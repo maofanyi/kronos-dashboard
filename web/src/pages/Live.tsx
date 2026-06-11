@@ -256,7 +256,7 @@ const directionIcon = (direction?: string) => {
 
 function Panel({ title, sub, children, right }: { title: string; sub?: string; children: ReactNode; right?: ReactNode }) {
   return (
-    <section className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
+    <section className="w-full max-w-full min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
       <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>
@@ -553,8 +553,8 @@ export default function Live() {
 
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(380px,0.7fr)]">
         <Panel title="Completed Trades" sub="newest first" right={<span className="font-mono text-xs text-zinc-500">{settledDesc.length} rows</span>}>
-          <div className="max-h-[560px] overflow-auto">
-            <table className="w-full min-w-[760px] table-fixed text-sm tabular-nums">
+          <div className="max-h-[560px] w-full max-w-[calc(100vw-2rem)] overflow-x-auto overflow-y-auto">
+            <table className="w-full table-fixed text-sm tabular-nums md:min-w-[760px]">
               <thead className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 text-xs uppercase tracking-[0.12em] text-zinc-500">
                 <tr>
                   <th className="px-4 py-2.5 text-left">Window</th>
@@ -603,7 +603,7 @@ export default function Live() {
           </div>
         </Panel>
 
-        <div className="space-y-5">
+        <div className="min-w-0 max-w-full space-y-5">
           <Panel title="Pending Orders" sub="current checkpoint queue" right={<span className="font-mono text-xs text-zinc-500">{pending.length}</span>}>
             <div className="max-h-[220px] divide-y divide-zinc-900 overflow-auto">
               {pending.length === 0 ? (
