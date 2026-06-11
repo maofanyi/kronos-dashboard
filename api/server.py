@@ -4,7 +4,7 @@ import os
 import sqlite3
 import time
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pandas as pd
@@ -23,6 +23,12 @@ KRONOS_FEATURE_DIR = KRONOS_CHECKPOINT_DIR.parent / "features"
 KRONOS_CONFIG_DIR = KRONOS_CHECKPOINT_DIR.parent / "config"
 KRONOS_REPORT_DIR = KRONOS_CHECKPOINT_DIR.parent / "reports"
 LOG_ERROR_PATTERNS = ("traceback", "poll error", "unexpected", "exception", "timeout", "network", "cuda", "oom")
+RISK_LIMITS = {
+    "max_daily_loss_usdc": float(os.environ.get("MAX_DAILY_LOSS_USDC", "10")),
+    "max_daily_trades": int(os.environ.get("MAX_DAILY_TRADES", "20")),
+    "max_consecutive_losses": int(os.environ.get("MAX_CONSECUTIVE_LOSSES", "3")),
+    "max_open_or_pending_orders": int(os.environ.get("MAX_OPEN_OR_PENDING_ORDERS", "1")),
+}
 
 
 def _configured_paper_source():
@@ -46,6 +52,10 @@ def _paper_run_source():
 
 def _paper_checkpoint_path():
     return KRONOS_CHECKPOINT_DIR / f"{_paper_run_source()}.json"
+
+
+def _paper_ledger_path():
+    return KRONOS_CHECKPOINT_DIR / f"{_paper_run_source()}_ledger.json"
 
 
 def _safe_feature_path(rel_path: str):
@@ -232,6 +242,142 @@ def _check_status(report: dict, name: str):
     return None
 
 
+def _parse_dt(value):
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _record_ts(record: dict):
+    for key in ("settled_at", "settle_ts", "created_at", "entry_ts", "ts"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _record_pnl(record: dict):
+    for key in ("pnl_usdc", "realized_pnl", "pnl"):
+        try:
+            return float(record.get(key))
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
+def _is_settled_record(record: dict):
+    status = str(record.get("status", "")).upper()
+    if status in {"SETTLED", "FILLED", "WON", "LOST", "CLOSED"}:
+        return True
+    return any(key in record for key in ("pnl", "realized_pnl", "pnl_usdc"))
+
+
+def _risk_records_from_payload(payload):
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    records = []
+    for key in ("trades", "orders", "open_orders", "pending_orders"):
+        items = payload.get(key)
+        if isinstance(items, list):
+            records.extend(item for item in items if isinstance(item, dict))
+    return records
+
+
+def _consecutive_losses(records):
+    streak = 0
+    sorted_records = sorted(records, key=lambda item: _record_ts(item) or datetime.min.replace(tzinfo=timezone.utc))
+    for record in sorted_records:
+        if _record_pnl(record) < 0:
+            streak += 1
+        else:
+            streak = 0
+    return streak
+
+
+def _live_risk_summary(checkpoint=None):
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
+    ledger = _read_json(_paper_ledger_path())
+    records = _risk_records_from_payload(checkpoint) + _risk_records_from_payload(ledger)
+    today = datetime.now(timezone.utc).date()
+    todays = []
+    open_or_pending = 0
+
+    for record in records:
+        status = str(record.get("status", "")).upper()
+        if status in {"OPEN", "PENDING", "SUBMITTED"}:
+            open_or_pending += 1
+        ts = _record_ts(record)
+        if ts is not None and ts.date() == today:
+            todays.append(record)
+
+    settled = [record for record in todays if _is_settled_record(record)]
+    daily_pnl = sum(_record_pnl(record) for record in settled)
+    daily_trades = len(settled)
+    consecutive_losses = _consecutive_losses(settled)
+    limits = dict(RISK_LIMITS)
+    checks = [
+        {
+            "key": "risk_daily_loss",
+            "label": "Daily loss",
+            "ok": daily_pnl > -abs(limits["max_daily_loss_usdc"]),
+            "value": round(daily_pnl, 2),
+            "expected": f"> -{limits['max_daily_loss_usdc']}",
+            "severity": "risk",
+        },
+        {
+            "key": "risk_daily_trades",
+            "label": "Daily trades",
+            "ok": daily_trades < limits["max_daily_trades"],
+            "value": daily_trades,
+            "expected": f"< {limits['max_daily_trades']}",
+            "severity": "risk",
+        },
+        {
+            "key": "risk_consecutive_losses",
+            "label": "Consecutive losses",
+            "ok": consecutive_losses < limits["max_consecutive_losses"],
+            "value": consecutive_losses,
+            "expected": f"< {limits['max_consecutive_losses']}",
+            "severity": "risk",
+        },
+        {
+            "key": "risk_open_or_pending",
+            "label": "Open or pending",
+            "ok": open_or_pending < limits["max_open_or_pending_orders"],
+            "value": open_or_pending,
+            "expected": f"< {limits['max_open_or_pending_orders']}",
+            "severity": "risk",
+        },
+    ]
+    return {
+        "ok": all(check["ok"] for check in checks),
+        "checks": checks,
+        "metrics": {
+            "day_utc": today.isoformat(),
+            "daily_pnl_usdc": round(daily_pnl, 8),
+            "daily_trades": daily_trades,
+            "consecutive_losses": consecutive_losses,
+            "open_or_pending_orders": open_or_pending,
+        },
+        "limits": limits,
+        "inputs": {
+            "checkpoint": str(_paper_checkpoint_path()),
+            "ledger": str(_paper_ledger_path()),
+            "record_count": len(records),
+        },
+    }
+
+
 def _safety_report_summary():
     allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
     if not allowance_report:
@@ -265,6 +411,7 @@ def _safety_report_summary():
     balance_ok = bool(balance_check and balance_check.get("ok"))
     allowance_ok = bool(allowance_check and allowance_check.get("ok"))
     real_orders_enabled = real_orders_env == "YES"
+    risk_summary = _live_risk_summary(checkpoint)
 
     checklist = [
         {
@@ -318,7 +465,7 @@ def _safety_report_summary():
             "value": open_orders_count,
             "severity": "critical",
         },
-    ]
+    ] + risk_summary["checks"]
 
     return {
         "mode": mode,
@@ -349,6 +496,7 @@ def _safety_report_summary():
             "execution": str(execution_path) if execution_path else "",
         },
         "checklist": checklist,
+        "risk": risk_summary,
         "execution_summary": execution_report.get("summary") or execution_report,
     }
 
@@ -1283,6 +1431,11 @@ def api_live_safety():
     return jsonify(_safety_report_summary())
 
 
+@app.route("/api/live-risk")
+def api_live_risk():
+    return jsonify(_live_risk_summary())
+
+
 # ---------------------------------------------------------------------------
 # BTC price (proxied from Binance, cached 30s)
 # ---------------------------------------------------------------------------
@@ -1397,4 +1550,6 @@ def serve_static(path):
 
 
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=8090, debug=False, threaded=True)
+    host = os.environ.get("DASHBOARD_HOST", "0.0.0.0")
+    port = int(os.environ.get("DASHBOARD_PORT", "8090"))
+    app.run(host=host, port=port, debug=False, threaded=True)

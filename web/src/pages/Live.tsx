@@ -161,6 +161,22 @@ interface LiveSafety {
     execution: string;
   };
   checklist?: ChecklistItem[];
+  risk?: {
+    ok: boolean;
+    metrics: {
+      day_utc: string;
+      daily_pnl_usdc: number;
+      daily_trades: number;
+      consecutive_losses: number;
+      open_or_pending_orders: number;
+    };
+    limits: {
+      max_daily_loss_usdc: number;
+      max_daily_trades: number;
+      max_consecutive_losses: number;
+      max_open_or_pending_orders: number;
+    };
+  };
 }
 
 type ChecklistItem = {
@@ -279,6 +295,44 @@ function Panel({ title, sub, children, right }: { title: string; sub?: string; c
   );
 }
 
+function CollapsiblePanel({
+  title,
+  sub,
+  children,
+  right,
+  summary,
+}: {
+  title: string;
+  sub?: string;
+  children: ReactNode;
+  right?: ReactNode;
+  summary?: ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  return (
+    <section className="w-full max-w-full min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
+      <button
+        type="button"
+        className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
+        onClick={() => setOpen((value) => !value)}
+      >
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <h2 className="truncate text-sm font-semibold text-zinc-100">{title}</h2>
+            <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} />
+          </div>
+          {sub && <p className="mt-0.5 truncate text-xs text-zinc-500">{sub}</p>}
+        </div>
+        <div className="flex shrink-0 items-center gap-2">
+          {right}
+        </div>
+      </button>
+      {!open && summary && <div className="hidden border-t border-zinc-900 px-4 py-2 md:block">{summary}</div>}
+      {open && <div className="border-t border-zinc-800">{children}</div>}
+    </section>
+  );
+}
+
 function StatCard({
   label,
   value,
@@ -315,16 +369,21 @@ function StatusPill({ ok, label }: { ok: boolean; label: string }) {
 
 function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null }) {
   const liveEnabled = safety?.real_orders_enabled === true;
+  const source = safety?.run_source ?? health?.run_source ?? "-";
   return (
-    <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
-            <ShieldCheck className="h-4 w-4 text-emerald-300" />
-            Live Safety
-          </div>
-          <div className="mt-1 text-xs text-zinc-500">{safety?.run_source ?? health?.run_source ?? "-"}</div>
+    <CollapsiblePanel
+      title="Live Safety"
+      sub={source}
+      right={<StatusPill ok={!liveEnabled && health?.state === "ok"} label={!liveEnabled && health?.state === "ok" ? "Safe" : "Review"} />}
+      summary={
+        <div className="flex min-w-0 flex-wrap gap-2">
+          <StatusPill ok={!liveEnabled} label={liveEnabled ? "Real orders enabled" : "Locked"} />
+          <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
+          <span className="min-w-0 truncate font-mono text-xs text-zinc-500">{source}</span>
         </div>
+      }
+    >
+      <div className="p-4">
         <div className="flex flex-wrap gap-2">
           <StatusPill ok={!liveEnabled} label={liveEnabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />
           <StatusPill ok={safety?.clob?.authenticated === true} label="CLOB auth" />
@@ -333,7 +392,7 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
         </div>
       </div>
-    </section>
+    </CollapsiblePanel>
   );
 }
 
@@ -368,10 +427,16 @@ function ReadinessChecklist({ safety, health, intel }: { safety?: LiveSafety | n
   const readyForSmoke = total > 0 && passed === total && safety?.real_orders_enabled === false;
 
   return (
-    <Panel
+    <CollapsiblePanel
       title="Live Readiness Checklist"
       sub="read-only gates before the first real maker smoke"
       right={<StatusPill ok={readyForSmoke} label={readyForSmoke ? "Ready" : `${passed}/${total}`} />}
+      summary={
+        <div className="flex items-center justify-between gap-3 text-xs">
+          <span className="text-zinc-500">Checks</span>
+          <span className={`font-mono ${readyForSmoke ? "text-emerald-300" : "text-amber-300"}`}>{passed}/{total}</span>
+        </div>
+      }
     >
       <div className="grid gap-2 p-4 md:grid-cols-2 xl:grid-cols-3">
         {items.map((item) => (
@@ -390,7 +455,7 @@ function ReadinessChecklist({ safety, health, intel }: { safety?: LiveSafety | n
           </div>
         ))}
       </div>
-    </Panel>
+    </CollapsiblePanel>
   );
 }
 
@@ -498,13 +563,34 @@ function FunnelPanel({ funnel }: { funnel?: Record<string, number> }) {
 function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveSafety | null }) {
   const risk = intel?.risk;
   const maker = intel?.maker;
+  const liveRisk = safety?.risk;
+  const metrics = liveRisk?.metrics;
+  const limits = liveRisk?.limits;
   return (
     <Panel title="Risk & Funding" sub="limits, exposure, readiness">
       <div className="grid grid-cols-2 gap-2 p-4">
         <HealthTile label="Balance" value={String(safety?.funding?.balance ?? "-")} ok={safety?.funding?.balance_ok} />
         <HealthTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
-        <HealthTile label="Open Orders" value={`${maker?.open_orders.length ?? 0}/${risk?.max_open_orders ?? "-"}`} ok={(maker?.open_orders.length ?? 0) === 0} />
-        <HealthTile label="Pending" value={`${maker?.pending_positions.length ?? 0}`} ok={(maker?.pending_positions.length ?? 0) === 0} />
+        <HealthTile
+          label="Daily PnL"
+          value={metrics ? signedMoney(metrics.daily_pnl_usdc) : "-"}
+          ok={metrics && limits ? metrics.daily_pnl_usdc > -Math.abs(limits.max_daily_loss_usdc) : undefined}
+        />
+        <HealthTile
+          label="Daily Trades"
+          value={metrics && limits ? `${metrics.daily_trades}/${limits.max_daily_trades}` : "-"}
+          ok={metrics && limits ? metrics.daily_trades < limits.max_daily_trades : undefined}
+        />
+        <HealthTile
+          label="Loss Streak"
+          value={metrics && limits ? `${metrics.consecutive_losses}/${limits.max_consecutive_losses}` : "-"}
+          ok={metrics && limits ? metrics.consecutive_losses < limits.max_consecutive_losses : undefined}
+        />
+        <HealthTile
+          label="Open/Pending"
+          value={metrics && limits ? `${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders}` : `${(maker?.open_orders.length ?? 0) + (maker?.pending_positions.length ?? 0)}`}
+          ok={metrics && limits ? metrics.open_or_pending_orders < limits.max_open_or_pending_orders : undefined}
+        />
         <HealthTile label="Missed" value={`${risk?.missed_trades?.length ?? 0}`} ok={(risk?.missed_trades?.length ?? 0) === 0} />
         <HealthTile label="Rejections" value={`${risk?.max_open_rejections_count ?? 0}`} ok={(risk?.max_open_rejections_count ?? 0) === 0} />
       </div>
