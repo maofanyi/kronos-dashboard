@@ -670,9 +670,6 @@ export default function Live() {
 
   return (
     <div className="space-y-5">
-      <SafetyStrip safety={safety} health={health} />
-      <ReadinessChecklist safety={safety} health={health} intel={intel} />
-
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`PnL ${signedMoney(totalPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
         <StatCard label="Win Rate" value={percent(wr)} sub={`${wins}W / ${losses}L`} icon={Target} tone={wr >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
