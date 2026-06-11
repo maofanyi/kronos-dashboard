@@ -237,6 +237,7 @@ def _safety_report_summary():
     if not allowance_report:
         allowance_path, allowance_report = _latest_json_report("polymarket_clob_account_read_audit*.json")
     execution_path, execution_report = _latest_json_report("live_dryrun_execution_summary_latest.json")
+    checkpoint = _read_json(_paper_checkpoint_path()) or {}
 
     balance_check = _check_status(allowance_report, "minimum_balance")
     allowance_check = _check_status(allowance_report, "minimum_allowance")
@@ -256,25 +257,87 @@ def _safety_report_summary():
     real_orders_env = os.environ.get("KRONOS_ENABLE_REAL_ORDERS", "")
     run_source = _paper_run_source()
     mode = "live" if run_source.startswith("live_") else "dry-run" if "dryrun" in run_source else "paper"
+    open_orders_count = len(checkpoint.get("open_orders", []) or [])
+
+    clob_authenticated = bool(auth_check and auth_check.get("ok"))
+    account_read_ok = bool(balance_read and balance_read.get("ok"))
+    allowance_read_ok = bool(allowance_read and allowance_read.get("ok"))
+    balance_ok = bool(balance_check and balance_check.get("ok"))
+    allowance_ok = bool(allowance_check and allowance_check.get("ok"))
+    real_orders_enabled = real_orders_env == "YES"
+
+    checklist = [
+        {
+            "key": "real_orders_locked",
+            "label": "Real orders locked",
+            "ok": not real_orders_enabled,
+            "value": "locked" if not real_orders_enabled else "enabled",
+            "severity": "critical",
+        },
+        {
+            "key": "clob_authenticated",
+            "label": "CLOB authenticated",
+            "ok": clob_authenticated,
+            "value": "ok" if clob_authenticated else "missing",
+            "severity": "critical",
+        },
+        {
+            "key": "account_read_ok",
+            "label": "Account read",
+            "ok": account_read_ok,
+            "value": "ok" if account_read_ok else "failed",
+            "severity": "critical",
+        },
+        {
+            "key": "allowance_read_ok",
+            "label": "Allowance read",
+            "ok": allowance_read_ok,
+            "value": "ok" if allowance_read_ok else "failed",
+            "severity": "critical",
+        },
+        {
+            "key": "minimum_balance",
+            "label": "Minimum balance",
+            "ok": balance_ok,
+            "value": balance_allowance_call.get("balance"),
+            "expected": balance_check.get("expected") if balance_check else None,
+            "severity": "funding",
+        },
+        {
+            "key": "minimum_allowance",
+            "label": "Minimum allowance",
+            "ok": allowance_ok,
+            "value": balance_allowance_call.get("min_allowance"),
+            "expected": allowance_check.get("expected") if allowance_check else None,
+            "severity": "funding",
+        },
+        {
+            "key": "open_orders_clear",
+            "label": "Open orders clear",
+            "ok": open_orders_count == 0,
+            "value": open_orders_count,
+            "severity": "critical",
+        },
+    ]
 
     return {
         "mode": mode,
         "run_source": run_source,
-        "real_orders_enabled": real_orders_env == "YES",
+        "real_orders_enabled": real_orders_enabled,
         "kill_switch": {
-            "state": "armed" if real_orders_env == "YES" else "locked",
-            "env": "YES" if real_orders_env == "YES" else "",
+            "state": "armed" if real_orders_enabled else "locked",
+            "env": "YES" if real_orders_enabled else "",
         },
         "clob": {
-            "authenticated": bool(auth_check and auth_check.get("ok")),
-            "account_read_ok": bool(balance_read and balance_read.get("ok")),
-            "allowance_read_ok": bool(allowance_read and allowance_read.get("ok")),
+            "authenticated": clob_authenticated,
+            "account_read_ok": account_read_ok,
+            "allowance_read_ok": allowance_read_ok,
             "open_orders_read_ok": bool(orders_call.get("ok")),
-            "open_orders_count": None,
+            "open_orders_count": open_orders_count,
         },
         "funding": {
-            "balance_ok": bool(balance_check and balance_check.get("ok")),
-            "allowance_ok": bool(allowance_check and allowance_check.get("ok")),
+            "balance_ok": balance_ok,
+            "allowance_ok": allowance_ok,
             "balance": balance_allowance_call.get("balance"),
             "allowance_count": balance_allowance_call.get("allowance_count"),
             "min_allowance": balance_allowance_call.get("min_allowance"),
@@ -285,6 +348,7 @@ def _safety_report_summary():
             "allowance": str(allowance_path) if allowance_path else "",
             "execution": str(execution_path) if execution_path else "",
         },
+        "checklist": checklist,
         "execution_summary": execution_report.get("summary") or execution_report,
     }
 

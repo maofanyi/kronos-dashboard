@@ -160,7 +160,17 @@ interface LiveSafety {
     allowance: string;
     execution: string;
   };
+  checklist?: ChecklistItem[];
 }
+
+type ChecklistItem = {
+  key: string;
+  label: string;
+  ok: boolean;
+  value?: string | number | null;
+  expected?: string | null;
+  severity?: string;
+};
 
 const INITIAL_BALANCE = 500;
 
@@ -324,6 +334,63 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
         </div>
       </div>
     </section>
+  );
+}
+
+function ReadinessChecklist({ safety, health, intel }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null; intel?: LiveIntel | null }) {
+  const apiItems = safety?.checklist ?? [];
+  const healthItems: ChecklistItem[] = [
+    {
+      key: "checkpoint_fresh",
+      label: "Checkpoint fresh",
+      ok: (health?.checkpoint_age_seconds ?? 9999) < 600,
+      value: ageLabel(health?.checkpoint_age_seconds),
+      severity: "runtime",
+    },
+    {
+      key: "events_fresh",
+      label: "Events fresh",
+      ok: (health?.latest_event_age_seconds ?? 9999) < 600,
+      value: ageLabel(health?.latest_event_age_seconds),
+      severity: "runtime",
+    },
+    {
+      key: "no_log_errors",
+      label: "No log errors",
+      ok: (intel?.issues.log_errors.length ?? 0) === 0,
+      value: intel?.issues.log_errors.length ?? 0,
+      severity: "runtime",
+    },
+  ];
+  const items = [...apiItems, ...healthItems];
+  const passed = items.filter((item) => item.ok).length;
+  const total = items.length;
+  const readyForSmoke = total > 0 && passed === total && safety?.real_orders_enabled === false;
+
+  return (
+    <Panel
+      title="Live Readiness Checklist"
+      sub="read-only gates before the first real maker smoke"
+      right={<StatusPill ok={readyForSmoke} label={readyForSmoke ? "Ready" : `${passed}/${total}`} />}
+    >
+      <div className="grid gap-2 p-4 md:grid-cols-2 xl:grid-cols-3">
+        {items.map((item) => (
+          <div key={item.key} className={`rounded border p-3 ${item.ok ? "border-emerald-500/20 bg-emerald-500/5" : "border-amber-500/20 bg-amber-500/5"}`}>
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-2">
+                {item.ok ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-300" /> : <AlertTriangle className="h-4 w-4 shrink-0 text-amber-300" />}
+                <span className="truncate text-sm font-medium text-zinc-100">{item.label}</span>
+              </div>
+              <span className={`shrink-0 font-mono text-xs ${item.ok ? "text-emerald-300" : "text-amber-300"}`}>
+                {String(item.value ?? "-")}
+              </span>
+            </div>
+            {item.expected && <div className="mt-2 truncate text-xs text-zinc-500">expected {item.expected}</div>}
+            <div className="mt-2 text-[11px] uppercase tracking-[0.14em] text-zinc-600">{item.severity ?? "check"}</div>
+          </div>
+        ))}
+      </div>
+    </Panel>
   );
 }
 
@@ -518,6 +585,7 @@ export default function Live() {
   return (
     <div className="space-y-5">
       <SafetyStrip safety={safety} health={health} />
+      <ReadinessChecklist safety={safety} health={health} intel={intel} />
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
         <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`PnL ${signedMoney(totalPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
