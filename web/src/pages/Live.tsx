@@ -1,0 +1,662 @@
+import {
+  Activity,
+  AlertTriangle,
+  ArrowDownRight,
+  ArrowUpRight,
+  CheckCircle2,
+  ChevronDown,
+  CircleDollarSign,
+  Clock3,
+  Gauge,
+  ListChecks,
+  Lock,
+  RadioTower,
+  ShieldCheck,
+  Target,
+  Wallet,
+} from "lucide-react";
+import { Fragment, type ReactNode, useMemo, useState } from "react";
+import BTCChart from "../components/BTCChart";
+import { Chart } from "@/components/chart";
+import { usePolling } from "../hooks/usePolling";
+
+interface StatusData {
+  balance: number;
+  trades_count: number;
+  wr: number;
+  cooldown_left: number;
+}
+
+interface SignalStats {
+  total: number;
+  passed: number;
+  blocked: number;
+  pass_rate: number;
+}
+
+interface EventItem {
+  id: number;
+  kline_n: number;
+  action: string;
+  dir5: string;
+  dir4: string;
+  regime: string;
+  filt_passed: number;
+  reason: string;
+  details?: string;
+  created_at?: string;
+}
+
+interface TradeItem {
+  id: number;
+  pnl: number;
+  won: number;
+  regime: string;
+  direction: string;
+  size: number;
+  entry_bar: number | string;
+  settle_bar: number | string;
+  details?: string;
+  created_at?: string;
+}
+
+type SignalDetails = {
+  action?: string;
+  passed?: boolean;
+  side?: string | null;
+  reason?: string;
+  reason_code?: string;
+  failure_codes?: string[];
+  p5_up?: number;
+  p1_up?: number;
+  p4_up?: number;
+  long_score?: number;
+  short_score?: number;
+  ts?: string;
+  close?: number;
+  balance?: number;
+  entry_ts?: string;
+  settle_ts?: string;
+  market_slug?: string;
+  maker_price?: number;
+  entry_close?: number;
+  settle_close?: number;
+};
+
+interface LiveIntel {
+  health: {
+    run_source?: string;
+    state: "ok" | "warning";
+    warnings: string[];
+    checkpoint_age_seconds: number | null;
+    latest_event_age_seconds: number | null;
+    pending_count: number;
+    open_order_count: number;
+    trades_count: number;
+    stale_pending_count: number;
+    duplicated_pending_count: number;
+  };
+  funnel: Record<string, number>;
+  maker: {
+    open_orders: unknown[];
+    pending_positions: unknown[];
+    rejected_orders: Array<{ reason?: string; created_at?: string }>;
+    avg_fill_delay_bars: number;
+  };
+  maker_quality: {
+    summary?: {
+      watch_count?: number;
+      avg_buy_one_rate?: number;
+      avg_target_price?: number;
+      total_reposts?: number;
+      total_blocks?: number;
+      api_error_count?: number;
+    };
+  };
+  order_lifecycle: {
+    counts?: Record<string, number>;
+    anomalies?: unknown[];
+    recent?: Array<Record<string, unknown>>;
+  };
+  risk: {
+    max_open_orders?: number;
+    max_open_rejections_count?: number;
+    missed_trades?: unknown[];
+  };
+  issues: {
+    missing_orders: unknown[];
+    inconsistent_events: unknown[];
+    stale_pending: unknown[];
+    duplicated_pending: unknown[];
+    log_errors: Array<{ file: string; line: string }>;
+  };
+  logs: {
+    out_log: string;
+    err_log: string;
+  };
+}
+
+interface LiveSafety {
+  mode: string;
+  run_source: string;
+  real_orders_enabled: boolean;
+  kill_switch: { state: string };
+  clob: {
+    authenticated: boolean;
+    account_read_ok: boolean;
+    allowance_read_ok: boolean;
+    open_orders_read_ok: boolean;
+  };
+  funding: {
+    balance_ok: boolean;
+    allowance_ok: boolean;
+    balance?: number;
+    allowance_count?: number;
+    min_allowance?: number;
+    balance_expected?: string;
+    allowance_expected?: string;
+  };
+  reports: {
+    allowance: string;
+    execution: string;
+  };
+}
+
+const INITIAL_BALANCE = 500;
+
+const money = (value: number, digits = 2) =>
+  `$${value.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+
+const signedMoney = (value: number) => `${value >= 0 ? "+" : ""}${money(value)}`;
+
+const percent = (value?: number | null, digits = 1) =>
+  value == null ? "-" : `${(value * 100).toFixed(digits)}%`;
+
+const score = (value?: number) => (value == null ? "-" : value.toFixed(1));
+
+const localTime = (value?: string | number) => {
+  if (value == null) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleTimeString("zh-CN", {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  });
+};
+
+const shortDateTime = (value?: string | number) => {
+  if (value == null) return "-";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString("zh-CN", {
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  });
+};
+
+const ageLabel = (seconds?: number | null) => {
+  if (seconds == null) return "-";
+  if (seconds < 90) return `${Math.round(seconds)}s`;
+  return `${Math.round(seconds / 60)}m`;
+};
+
+const sortValue = (value?: number | string) => {
+  if (value == null) return 0;
+  if (typeof value === "number") return value;
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value);
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+};
+
+const timeOrBar = (value?: number | string) => {
+  if (value == null) return "-";
+  if (typeof value === "number" || /^-?\d+(\.\d+)?$/.test(String(value))) return `#${value}`;
+  return localTime(String(value));
+};
+
+const rangeLabel = (entry?: number | string, settle?: number | string) =>
+  `${timeOrBar(entry)} -> ${timeOrBar(settle)}`;
+
+const parseJson = <T,>(text?: string): T | null => {
+  if (!text) return null;
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return null;
+  }
+};
+
+const actionTone = (action?: string) => {
+  if (action?.includes("BUY")) return "text-emerald-300";
+  if (action === "HOLD") return "text-zinc-400";
+  return "text-sky-300";
+};
+
+const directionLabel = (direction?: string) => {
+  const normalized = direction?.toUpperCase();
+  if (normalized === "LONG" || normalized === "UP" || normalized === "BUY_UP") return "UP";
+  if (normalized === "SHORT" || normalized === "DOWN" || normalized === "BUY_DOWN") return "DOWN";
+  return direction || "-";
+};
+
+const directionIcon = (direction?: string) => {
+  const normalized = direction?.toUpperCase();
+  if (normalized === "LONG" || normalized === "UP" || normalized === "BUY_UP") return <ArrowUpRight className="h-3.5 w-3.5" />;
+  if (normalized === "SHORT" || normalized === "DOWN" || normalized === "BUY_DOWN") return <ArrowDownRight className="h-3.5 w-3.5" />;
+  return null;
+};
+
+function Panel({ title, sub, children, right }: { title: string; sub?: string; children: ReactNode; right?: ReactNode }) {
+  return (
+    <section className="overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
+      <div className="flex items-center justify-between gap-3 border-b border-zinc-800 px-4 py-3">
+        <div>
+          <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>
+          {sub && <p className="mt-0.5 text-xs text-zinc-500">{sub}</p>}
+        </div>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function StatCard({
+  label,
+  value,
+  sub,
+  icon: Icon,
+  tone = "text-zinc-100",
+}: {
+  label: string;
+  value: string;
+  sub?: string;
+  icon: typeof Activity;
+  tone?: string;
+}) {
+  return (
+    <div className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
+      <div className="flex items-center justify-between gap-3">
+        <span className="text-xs uppercase tracking-[0.16em] text-zinc-500">{label}</span>
+        <Icon className="h-4 w-4 text-zinc-500" />
+      </div>
+      <div className={`mt-3 font-mono text-2xl font-semibold ${tone}`}>{value}</div>
+      {sub && <div className="mt-1 truncate text-xs text-zinc-500">{sub}</div>}
+    </div>
+  );
+}
+
+function StatusPill({ ok, label }: { ok: boolean; label: string }) {
+  return (
+    <span className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${ok ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300" : "border-amber-500/25 bg-amber-500/10 text-amber-300"}`}>
+      {ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+      {label}
+    </span>
+  );
+}
+
+function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null }) {
+  const liveEnabled = safety?.real_orders_enabled === true;
+  return (
+    <section className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
+            <ShieldCheck className="h-4 w-4 text-emerald-300" />
+            Live Safety
+          </div>
+          <div className="mt-1 text-xs text-zinc-500">{safety?.run_source ?? health?.run_source ?? "-"}</div>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <StatusPill ok={!liveEnabled} label={liveEnabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />
+          <StatusPill ok={safety?.clob?.authenticated === true} label="CLOB auth" />
+          <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${safety?.funding?.balance ?? "-"}`} />
+          <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${safety?.funding?.min_allowance ?? "-"}`} />
+          <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function MetricChip({ label, value }: { label: string; value: string }) {
+  return (
+    <span className="rounded border border-zinc-900 bg-black/20 px-2 py-1 font-mono text-zinc-300">
+      <span className="text-zinc-600">{label}</span> {value}
+    </span>
+  );
+}
+
+function conditionRows(details: SignalDetails | null) {
+  const failures = new Set(details?.failure_codes ?? []);
+  return [
+    { side: "LONG", label: "5m 多头概率", value: percent(details?.p5_up), ok: !failures.has("long_micro_low") },
+    { side: "LONG", label: "4h 多头门槛", value: percent(details?.p4_up), ok: !failures.has("long_macro_low") },
+    { side: "LONG", label: "1h+4h 乘积分数", value: score(details?.long_score), ok: !failures.has("long_score_low") },
+    { side: "LONG", label: "空头宏观否决", value: failures.has("long_macro_veto") ? "触发" : "未触发", ok: !failures.has("long_macro_veto") },
+    { side: "SHORT", label: "5m 空头概率", value: percent(details?.p5_up == null ? undefined : 1 - details.p5_up), ok: !failures.has("short_micro_low") },
+    { side: "SHORT", label: "4h 空头门槛", value: percent(details?.p4_up == null ? undefined : 1 - details.p4_up), ok: !failures.has("short_macro_low") },
+    { side: "SHORT", label: "1h+4h 乘积分数", value: score(details?.short_score), ok: !failures.has("short_score_low") },
+    { side: "SHORT", label: "多头宏观否决", value: failures.has("short_macro_veto") ? "触发" : "未触发", ok: !failures.has("short_macro_veto") },
+  ];
+}
+
+function SignalCard({ event, expanded, onToggle }: { event: EventItem; expanded: boolean; onToggle: () => void }) {
+  const details = parseJson<SignalDetails>(event.details);
+  return (
+    <button type="button" onClick={onToggle} className="block w-full border-b border-zinc-900 px-4 py-3 text-left last:border-b-0 hover:bg-zinc-900/50">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex min-w-0 items-center gap-2">
+          <ChevronDown className={`h-3.5 w-3.5 shrink-0 text-zinc-600 transition-transform ${expanded ? "rotate-180" : ""}`} />
+          <span className="font-mono text-xs text-zinc-500">{details?.ts ? localTime(details.ts) : `#${event.kline_n}`}</span>
+          <span className="font-mono text-xs text-zinc-600">{localTime(event.created_at)}</span>
+        </div>
+        <span className={`font-mono text-xs font-semibold ${actionTone(event.action)}`}>{event.action}</span>
+      </div>
+
+      <div className="mt-2 grid grid-cols-4 gap-2 text-xs">
+        <MetricChip label="5m" value={percent(details?.p5_up)} />
+        <MetricChip label="1h" value={percent(details?.p1_up)} />
+        <MetricChip label="4h" value={percent(details?.p4_up)} />
+        <span className={event.filt_passed ? "text-emerald-300" : "text-rose-300"}>{event.filt_passed ? "passed" : "blocked"}</span>
+      </div>
+
+      <div className="mt-1 truncate text-xs text-zinc-600">{details?.reason ?? event.reason}</div>
+
+      {expanded && (
+        <div className="mt-3 space-y-3 rounded border border-zinc-900 bg-black/20 p-3">
+          <div className="grid grid-cols-2 gap-2 text-[11px] text-zinc-500">
+            <div>close <span className="font-mono text-zinc-300">{details?.close?.toFixed(2) ?? "-"}</span></div>
+            <div>balance <span className="font-mono text-zinc-300">{details?.balance?.toFixed(2) ?? "-"}</span></div>
+            <div>reason <span className="font-mono text-zinc-300">{details?.reason_code ?? "-"}</span></div>
+            <div>side <span className="font-mono text-zinc-300">{details?.side ?? "-"}</span></div>
+            <div>entry <span className="font-mono text-zinc-300">{shortDateTime(details?.entry_ts)}</span></div>
+            <div>settle <span className="font-mono text-zinc-300">{shortDateTime(details?.settle_ts)}</span></div>
+          </div>
+          <div className="grid gap-1.5">
+            {conditionRows(details).map((row) => (
+              <div key={`${row.side}-${row.label}`} className="flex items-center justify-between gap-3 rounded border border-zinc-900 bg-zinc-950/70 px-2.5 py-1.5">
+                <div className="flex min-w-0 items-center gap-2">
+                  {row.ok ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-300" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-rose-300" />}
+                  <span className="font-mono text-[11px] text-zinc-500">{row.side}</span>
+                  <span className="truncate text-xs text-zinc-300">{row.label}</span>
+                </div>
+                <span className={`shrink-0 font-mono text-xs ${row.ok ? "text-emerald-300" : "text-rose-300"}`}>{row.value}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </button>
+  );
+}
+
+function FunnelPanel({ funnel }: { funnel?: Record<string, number> }) {
+  const rows = [
+    ["Signals", funnel?.total ?? 0],
+    ["Passed", funnel?.filt_passed ?? 0],
+    ["Executable", funnel?.executable ?? 0],
+    ["Orders", funnel?.orders_generated ?? 0],
+    ["Maker Opened", funnel?.maker_opened ?? 0],
+    ["Filled", funnel?.filled ?? 0],
+    ["Settled", funnel?.settled ?? 0],
+    ["Rejected", funnel?.rejected ?? 0],
+  ] as const;
+  const max = Math.max(...rows.map(([, value]) => value), 1);
+  return (
+    <Panel title="Execution Funnel" sub="signal to settlement, read-only">
+      <div className="space-y-2 p-4">
+        {rows.map(([label, value]) => (
+          <div key={label} className="grid grid-cols-[110px_1fr_48px] items-center gap-3 text-xs">
+            <span className="text-zinc-500">{label}</span>
+            <div className="h-2 rounded bg-zinc-900">
+              <div className="h-2 rounded bg-emerald-400/70" style={{ width: `${Math.max(3, (value / max) * 100)}%` }} />
+            </div>
+            <span className="text-right font-mono text-zinc-300">{value}</span>
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveSafety | null }) {
+  const risk = intel?.risk;
+  const maker = intel?.maker;
+  return (
+    <Panel title="Risk & Funding" sub="limits, exposure, readiness">
+      <div className="grid grid-cols-2 gap-2 p-4">
+        <HealthTile label="Balance" value={String(safety?.funding?.balance ?? "-")} ok={safety?.funding?.balance_ok} />
+        <HealthTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
+        <HealthTile label="Open Orders" value={`${maker?.open_orders.length ?? 0}/${risk?.max_open_orders ?? "-"}`} ok={(maker?.open_orders.length ?? 0) === 0} />
+        <HealthTile label="Pending" value={`${maker?.pending_positions.length ?? 0}`} ok={(maker?.pending_positions.length ?? 0) === 0} />
+        <HealthTile label="Missed" value={`${risk?.missed_trades?.length ?? 0}`} ok={(risk?.missed_trades?.length ?? 0) === 0} />
+        <HealthTile label="Rejections" value={`${risk?.max_open_rejections_count ?? 0}`} ok={(risk?.max_open_rejections_count ?? 0) === 0} />
+      </div>
+    </Panel>
+  );
+}
+
+function MakerPanel({ intel }: { intel?: LiveIntel | null }) {
+  const summary = intel?.maker_quality?.summary;
+  return (
+    <Panel title="Maker Monitor" sub="quote quality and execution health">
+      <div className="grid grid-cols-2 gap-2 p-4">
+        <HealthTile label="Watches" value={`${summary?.watch_count ?? 0}`} />
+        <HealthTile label="Buy-One Rate" value={percent(summary?.avg_buy_one_rate ?? 0)} />
+        <HealthTile label="Avg Target" value={summary?.avg_target_price ? summary.avg_target_price.toFixed(3) : "-"} />
+        <HealthTile label="Reposts" value={`${summary?.total_reposts ?? 0}`} />
+        <HealthTile label="Blocks" value={`${summary?.total_blocks ?? 0}`} ok={(summary?.total_blocks ?? 0) === 0} />
+        <HealthTile label="API Errors" value={`${summary?.api_error_count ?? 0}`} ok={(summary?.api_error_count ?? 0) === 0} />
+      </div>
+    </Panel>
+  );
+}
+
+function HealthTile({ label, value, ok }: { label: string; value: string; ok?: boolean }) {
+  const tone = ok == null ? "text-zinc-200" : ok ? "text-emerald-300" : "text-amber-300";
+  return (
+    <div className="rounded border border-zinc-900 bg-black/20 px-3 py-2">
+      <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">{label}</div>
+      <div className={`mt-1 truncate font-mono text-sm ${tone}`}>{value}</div>
+    </div>
+  );
+}
+
+function ResultPill({ won }: { won: number }) {
+  const label = won === 1 ? "WIN" : won === 0 ? "LOSS" : "PENDING";
+  const klass =
+    won === 1
+      ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+      : won === 0
+        ? "border-rose-500/25 bg-rose-500/10 text-rose-300"
+        : "border-amber-500/25 bg-amber-500/10 text-amber-300";
+  return <span className={`inline-flex min-w-14 items-center justify-center rounded border px-2 py-0.5 text-xs font-medium ${klass}`}>{label}</span>;
+}
+
+export default function Live() {
+  const [expandedSignal, setExpandedSignal] = useState<number | null>(null);
+  const [expandedTrade, setExpandedTrade] = useState<number | null>(null);
+  const { data: status } = usePolling<StatusData>("/api/status?source=live", 5000);
+  const { data: signalStats } = usePolling<SignalStats>("/api/signal-stats?source=live", 5000);
+  const { data: events } = usePolling<EventItem[]>("/api/events?source=live&limit=80", 5000);
+  const { data: trades } = usePolling<TradeItem[]>("/api/trades?source=live&limit=200", 5000);
+  const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=260", 5000);
+  const { data: safety } = usePolling<LiveSafety>("/api/live-safety", 5000);
+
+  const allTrades = trades ?? [];
+  const settledDesc = useMemo(
+    () => allTrades.filter((trade) => trade.won !== -1).sort((a, b) => sortValue(b.settle_bar) - sortValue(a.settle_bar)),
+    [allTrades],
+  );
+  const pending = useMemo(
+    () => allTrades.filter((trade) => trade.won === -1).sort((a, b) => sortValue(a.settle_bar) - sortValue(b.settle_bar)),
+    [allTrades],
+  );
+  const wins = settledDesc.filter((trade) => trade.won === 1).length;
+  const losses = settledDesc.filter((trade) => trade.won === 0).length;
+  const totalPnl = settledDesc.reduce((sum, trade) => sum + (trade.pnl ?? 0), 0);
+  const wr = settledDesc.length ? wins / settledDesc.length : status?.wr ?? 0;
+  const equity = useMemo(() => {
+    const points = [INITIAL_BALANCE];
+    [...settledDesc].reverse().forEach((trade) => points.push(points[points.length - 1] + (trade.pnl ?? 0)));
+    return points;
+  }, [settledDesc]);
+  const latestSignal = events?.[0];
+  const latestDetails = latestSignal ? parseJson<SignalDetails>(latestSignal.details) : null;
+  const health = intel?.health;
+  const isHealthy = health?.state === "ok";
+
+  return (
+    <div className="space-y-5">
+      <SafetyStrip safety={safety} health={health} />
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+        <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`PnL ${signedMoney(totalPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
+        <StatCard label="Win Rate" value={percent(wr)} sub={`${wins}W / ${losses}L`} icon={Target} tone={wr >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
+        <StatCard label="Settled" value={`${settledDesc.length}`} sub="completed trades" icon={ListChecks} />
+        <StatCard label="Pending" value={`${pending.length}`} sub={pending[0] ? `next ${timeOrBar(pending[0].settle_bar)}` : "queue clear"} icon={Clock3} />
+        <StatCard label="Signals" value={`${signalStats?.passed ?? 0}/${signalStats?.total ?? 0}`} sub={`${percent(signalStats?.pass_rate ?? 0)} pass rate`} icon={CheckCircle2} />
+        <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
+        <StatCard label="Health" value={isHealthy ? "OK" : "Review"} sub={health?.run_source ?? safety?.run_source ?? "-"} icon={ShieldCheck} tone={isHealthy ? "text-emerald-300" : "text-amber-300"} />
+      </div>
+
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(380px,0.78fr)]">
+        <div className="min-w-0"><BTCChart /></div>
+        <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
+          <div className="h-[280px] p-4">
+            <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
+          </div>
+        </Panel>
+        <Panel title="Recent Signals" sub="aligned-prod decisions" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
+          <div className="max-h-[280px] overflow-auto">
+            {(events ?? []).slice(0, 14).map((event) => (
+              <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
+            ))}
+          </div>
+        </Panel>
+      </div>
+
+      <div className="grid gap-5 xl:grid-cols-3">
+        <FunnelPanel funnel={intel?.funnel} />
+        <RiskPanel intel={intel} safety={safety} />
+        <MakerPanel intel={intel} />
+      </div>
+
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(380px,0.7fr)]">
+        <Panel title="Completed Trades" sub="newest first" right={<span className="font-mono text-xs text-zinc-500">{settledDesc.length} rows</span>}>
+          <div className="max-h-[560px] overflow-auto">
+            <table className="w-full min-w-[760px] table-fixed text-sm tabular-nums">
+              <thead className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 text-xs uppercase tracking-[0.12em] text-zinc-500">
+                <tr>
+                  <th className="px-4 py-2.5 text-left">Window</th>
+                  <th className="px-3 py-2.5 text-left">Dir</th>
+                  <th className="px-3 py-2.5 text-left">Result</th>
+                  <th className="px-3 py-2.5 text-left">Recorded</th>
+                  <th className="px-3 py-2.5 text-right">Size</th>
+                  <th className="px-3 py-2.5 text-right">PnL</th>
+                  <th className="px-3 py-2.5" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-900">
+                {settledDesc.map((trade) => {
+                  const open = expandedTrade === trade.id;
+                  const details = parseJson<SignalDetails>(trade.details);
+                  return (
+                    <Fragment key={trade.id}>
+                      <tr className="cursor-pointer hover:bg-zinc-900/60" onClick={() => setExpandedTrade(open ? null : trade.id)}>
+                        <td className="px-4 py-2.5 font-mono text-xs text-zinc-300">{rangeLabel(trade.entry_bar, trade.settle_bar)}</td>
+                        <td className="px-3 py-2.5">
+                          <span className="inline-flex items-center gap-1 font-mono text-xs text-zinc-300">{directionIcon(trade.direction)}{directionLabel(trade.direction)}</span>
+                        </td>
+                        <td className="px-3 py-2.5"><ResultPill won={trade.won} /></td>
+                        <td className="px-3 py-2.5 font-mono text-xs text-zinc-400">{localTime(trade.created_at)}</td>
+                        <td className="px-3 py-2.5 text-right font-mono text-zinc-300">{money(trade.size ?? 0)}</td>
+                        <td className={`px-3 py-2.5 text-right font-mono font-semibold ${trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(trade.pnl ?? 0)}</td>
+                        <td className="px-3 py-2.5 text-right"><ChevronDown className={`ml-auto h-3.5 w-3.5 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} /></td>
+                      </tr>
+                      {open && (
+                        <tr>
+                          <td colSpan={7} className="bg-black/20 px-4 py-3">
+                            <div className="grid gap-3 text-xs text-zinc-500 md:grid-cols-4">
+                              <div>reason <span className="font-mono text-zinc-300">{details?.reason_code || trade.regime || "-"}</span></div>
+                              <div>5m/1h/4h <span className="font-mono text-zinc-300">{percent(details?.p5_up)} / {percent(details?.p1_up)} / {percent(details?.p4_up)}</span></div>
+                              <div>score <span className="font-mono text-zinc-300">L {score(details?.long_score)} / S {score(details?.short_score)}</span></div>
+                              <div>maker <span className="font-mono text-zinc-300">{details?.maker_price?.toFixed(2) ?? "-"}</span></div>
+                            </div>
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+
+        <div className="space-y-5">
+          <Panel title="Pending Orders" sub="current checkpoint queue" right={<span className="font-mono text-xs text-zinc-500">{pending.length}</span>}>
+            <div className="max-h-[220px] divide-y divide-zinc-900 overflow-auto">
+              {pending.length === 0 ? (
+                <div className="px-4 py-8 text-center text-sm text-zinc-500">No open orders</div>
+              ) : (
+                pending.map((trade) => (
+                  <div key={trade.id} className="px-4 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <ResultPill won={trade.won} />
+                      <span className="font-mono text-xs text-zinc-400">{rangeLabel(trade.entry_bar, trade.settle_bar)}</span>
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-xs text-zinc-500">
+                      <span className="inline-flex items-center gap-1 text-zinc-300">{directionIcon(trade.direction)}{directionLabel(trade.direction)}</span>
+                      <span className="font-mono">{money(trade.size ?? 0)}</span>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </Panel>
+
+          <Panel title="System Health" sub="runner, checkpoint, events, logs" right={<StatusPill ok={isHealthy} label={isHealthy ? "OK" : "Review"} />}>
+            <div className="space-y-3 p-4">
+              <div className="grid grid-cols-2 gap-2">
+                <HealthTile label="Checkpoint" value={ageLabel(health?.checkpoint_age_seconds)} ok={(health?.checkpoint_age_seconds ?? 9999) < 600} />
+                <HealthTile label="Latest Event" value={ageLabel(health?.latest_event_age_seconds)} ok={(health?.latest_event_age_seconds ?? 9999) < 600} />
+                <HealthTile label="Stale Pending" value={`${health?.stale_pending_count ?? 0}`} ok={(health?.stale_pending_count ?? 0) === 0} />
+                <HealthTile label="Log Errors" value={`${intel?.issues.log_errors.length ?? 0}`} ok={(intel?.issues.log_errors.length ?? 0) === 0} />
+              </div>
+              {(health?.warnings?.length ?? 0) > 0 && (
+                <div className="rounded border border-amber-500/20 bg-amber-500/5 p-3">
+                  <div className="mb-2 flex items-center gap-2 text-xs font-medium text-amber-300">
+                    <AlertTriangle className="h-3.5 w-3.5" /> Warnings
+                  </div>
+                  <div className="space-y-1 font-mono text-xs text-zinc-400">
+                    {health?.warnings.map((item) => <div key={item}>{item}</div>)}
+                  </div>
+                </div>
+              )}
+              <div className="rounded border border-zinc-900 bg-black/20 p-3">
+                <div className="mb-2 flex items-center gap-2 text-xs font-medium text-zinc-300">
+                  <RadioTower className="h-3.5 w-3.5 text-zinc-500" /> Runtime
+                </div>
+                <div className="space-y-1 text-xs text-zinc-500">
+                  <div>source <span className="font-mono text-zinc-300">{health?.run_source ?? "-"}</span></div>
+                  <div className="truncate">stdout <span className="font-mono text-zinc-400">{intel?.logs.out_log?.split("\\").pop() ?? "-"}</span></div>
+                  <div className="truncate">stderr <span className="font-mono text-zinc-400">{intel?.logs.err_log?.split("\\").pop() ?? "-"}</span></div>
+                </div>
+              </div>
+            </div>
+          </Panel>
+        </div>
+      </div>
+    </div>
+  );
+}
