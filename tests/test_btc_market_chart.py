@@ -173,6 +173,23 @@ def test_api_btc_market_chart_uses_readonly_chainlink_payload(monkeypatch):
     assert "trading" not in payload
 
 
+def test_api_btc_market_chart_returns_degraded_payload_when_chainlink_unavailable(monkeypatch):
+    def raise_unavailable(**kwargs):
+        raise RuntimeError("missing Chainlink Candlestick credentials")
+
+    monkeypatch.setattr(server, "_fetch_chainlink_btc_candles", raise_unavailable)
+
+    response = server.app.test_client().get("/api/btc/market-chart?now=2026-06-12T10:28:00Z")
+
+    assert response.status_code == 200
+    payload = response.get_json()
+    assert payload["readonly"] is True
+    assert payload["chart_status"] == "degraded"
+    assert payload["error"] == "missing Chainlink Candlestick credentials"
+    assert payload["candles"] == []
+    assert payload["market"]["start_ts"] == "2026-06-12T10:25:00+00:00"
+
+
 def test_api_btc_market_chart_can_select_market_window(monkeypatch):
     rows = pd.DataFrame(
         [
@@ -297,8 +314,10 @@ def test_frontend_market_chart_matches_live_polymarket_motion_cues():
     assert "smoothPath(" in source
     assert "live_source" in source
     assert "live_status" in source
+    assert "chart_status" in source
     assert "Streaming" in source
     assert "Candlestick fallback" in source
+    assert "Data degraded" in source
     assert "chainlink-latest-dot" in source
     assert "stopOpacity=\"0.12\"" in source
     assert "@keyframes chainlink-dot-enter" in css

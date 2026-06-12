@@ -27,13 +27,6 @@ interface StatusData {
   cooldown_left: number;
 }
 
-interface SignalStats {
-  total: number;
-  passed: number;
-  blocked: number;
-  pass_rate: number;
-}
-
 interface EventItem {
   id: number;
   kline_n: number;
@@ -205,6 +198,24 @@ interface LiveSafety {
     components?: Record<string, unknown>;
   };
   checklist?: ChecklistItem[];
+  readiness_summary?: {
+    ready: boolean;
+    total: number;
+    passed: number;
+    blockers: number;
+    critical_blockers: number;
+    funding_blockers: number;
+    risk_blockers: number;
+    top_blockers?: Array<{
+      key?: string;
+      label?: string;
+      severity?: string;
+      value?: string | number | null;
+      expected?: string | null;
+      action?: string;
+    }>;
+    by_severity?: Record<string, number>;
+  };
   risk?: {
     ok: boolean;
     metrics: {
@@ -219,6 +230,37 @@ interface LiveSafety {
       max_daily_trades: number;
       max_consecutive_losses: number;
       max_open_or_pending_orders: number;
+    };
+  };
+  today?: {
+    day_utc: string;
+    signals: {
+      total: number;
+      passed: number;
+      blocked: number;
+      pass_rate: number;
+    };
+    trades: {
+      settled: number;
+      wins: number;
+      losses: number;
+      win_rate: number;
+      pnl_usdc: number;
+      pending: number;
+      open: number;
+    };
+    risk_usage: {
+      daily_loss: number;
+      daily_trades: number;
+      loss_streak: number;
+      open_or_pending: number;
+    };
+    maker: {
+      target_price: number;
+      observed_avg_target_price?: number | null;
+      buy_one_rate: number;
+      blocks: number;
+      api_errors: number;
     };
   };
 }
@@ -423,6 +465,11 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
   const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
   const fundingReady = safety?.funding?.funding_ready === true;
+  const readiness = safety?.readiness_summary;
+  const criticalBlockers = readiness?.critical_blockers ?? 0;
+  const fundingBlockers = readiness?.funding_blockers ?? 0;
+  const riskBlockers = readiness?.risk_blockers ?? 0;
+  const topBlockers = readiness?.top_blockers ?? [];
   const fundingGap = Math.max(
     safety?.funding?.balance_shortfall_usdc ?? 0,
     safety?.funding?.allowance_shortfall_usdc ?? 0,
@@ -436,6 +483,9 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
         <div className="flex min-w-0 flex-wrap gap-2">
           <StatusPill ok={!liveEnabled} label={liveEnabled ? "Real orders enabled" : "Locked"} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
+          <StatusPill ok={criticalBlockers === 0} label={`Critical ${criticalBlockers}`} />
+          <StatusPill ok={fundingBlockers === 0} label={`Funding ${fundingBlockers}`} />
+          <StatusPill ok={riskBlockers === 0} label={`Risk ${riskBlockers}`} />
           <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : `Funding gap ${money(fundingGap)}`} />
           <StatusPill ok={dryrunClean} label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`} />
           <StatusPill ok={gateReady} label={gateReady ? "Gate ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`} />
@@ -448,6 +498,9 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
         <div className="flex flex-wrap gap-2">
           <StatusPill ok={!liveEnabled} label={liveEnabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />
           <StatusPill ok={safety?.clob?.authenticated === true} label="CLOB auth" />
+          <StatusPill ok={criticalBlockers === 0} label={`Critical blockers ${criticalBlockers}`} />
+          <StatusPill ok={fundingBlockers === 0} label={`Funding blockers ${fundingBlockers}`} />
+          <StatusPill ok={riskBlockers === 0} label={`Risk blockers ${riskBlockers}`} />
           <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${safety?.funding?.balance ?? "-"}`} />
           <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${safety?.funding?.min_allowance ?? "-"}`} />
           <StatusPill ok={fundingReady} label={`Balance Gap ${money(safety?.funding?.balance_shortfall_usdc ?? 0)}`} />
@@ -457,6 +510,23 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={preflightReady} label={preflightSubmitted ? "Preflight submitted" : `Preflight ${preflightAge}`} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
         </div>
+        {topBlockers.length > 0 && (
+          <div className="mt-3 rounded-md border border-zinc-900 bg-black/20 p-3">
+            <div className="mb-2 text-[11px] uppercase tracking-[0.14em] text-zinc-600">Top Blockers</div>
+            <div className="grid gap-2 md:grid-cols-3">
+              {topBlockers.slice(0, 3).map((blocker) => (
+                <div key={blocker.key ?? blocker.label} className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="truncate text-sm text-zinc-200">{blocker.label ?? blocker.key}</span>
+                    <span className="shrink-0 font-mono text-[11px] uppercase text-amber-300">{blocker.severity ?? "check"}</span>
+                  </div>
+                  {blocker.expected && <div className="mt-1 truncate text-xs text-zinc-500">expected {blocker.expected}</div>}
+                  {blocker.action && <div className="mt-1 truncate text-xs text-zinc-500">next {blocker.action}</div>}
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </CollapsiblePanel>
   );
@@ -536,14 +606,14 @@ function MetricChip({ label, value }: { label: string; value: string }) {
 function conditionRows(details: SignalDetails | null) {
   const failures = new Set(details?.failure_codes ?? []);
   return [
-    { side: "LONG", label: "5m 多头概率", value: percent(details?.p5_up), ok: !failures.has("long_micro_low") },
-    { side: "LONG", label: "4h 多头门槛", value: percent(details?.p4_up), ok: !failures.has("long_macro_low") },
-    { side: "LONG", label: "1h+4h 乘积分数", value: score(details?.long_score), ok: !failures.has("long_score_low") },
-    { side: "LONG", label: "空头宏观否决", value: failures.has("long_macro_veto") ? "触发" : "未触发", ok: !failures.has("long_macro_veto") },
-    { side: "SHORT", label: "5m 空头概率", value: percent(details?.p5_up == null ? undefined : 1 - details.p5_up), ok: !failures.has("short_micro_low") },
-    { side: "SHORT", label: "4h 空头门槛", value: percent(details?.p4_up == null ? undefined : 1 - details.p4_up), ok: !failures.has("short_macro_low") },
-    { side: "SHORT", label: "1h+4h 乘积分数", value: score(details?.short_score), ok: !failures.has("short_score_low") },
-    { side: "SHORT", label: "多头宏观否决", value: failures.has("short_macro_veto") ? "触发" : "未触发", ok: !failures.has("short_macro_veto") },
+    { side: "LONG", label: "5m long probability", value: percent(details?.p5_up), ok: !failures.has("long_micro_low") },
+    { side: "LONG", label: "4h long gate", value: percent(details?.p4_up), ok: !failures.has("long_macro_low") },
+    { side: "LONG", label: "1h+4h long score", value: score(details?.long_score), ok: !failures.has("long_score_low") },
+    { side: "LONG", label: "Short macro veto", value: failures.has("long_macro_veto") ? "triggered" : "clear", ok: !failures.has("long_macro_veto") },
+    { side: "SHORT", label: "5m short probability", value: percent(details?.p5_up == null ? undefined : 1 - details.p5_up), ok: !failures.has("short_micro_low") },
+    { side: "SHORT", label: "4h short gate", value: percent(details?.p4_up == null ? undefined : 1 - details.p4_up), ok: !failures.has("short_macro_low") },
+    { side: "SHORT", label: "1h+4h short score", value: score(details?.short_score), ok: !failures.has("short_score_low") },
+    { side: "SHORT", label: "Long macro veto", value: failures.has("short_macro_veto") ? "triggered" : "clear", ok: !failures.has("short_macro_veto") },
   ];
 }
 
@@ -621,6 +691,78 @@ function FunnelPanel({ funnel }: { funnel?: Record<string, number> }) {
             <span className="text-right font-mono text-zinc-300">{value}</span>
           </div>
         ))}
+      </div>
+    </Panel>
+  );
+}
+
+function UsageBar({ label, value }: { label: string; value?: number }) {
+  const clamped = Math.max(0, Math.min(1, value ?? 0));
+  const ok = clamped < 0.8;
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-3 text-xs">
+        <span className="text-zinc-500">{label}</span>
+        <span className={ok ? "font-mono text-zinc-300" : "font-mono text-amber-300"}>{percent(clamped, 0)}</span>
+      </div>
+      <div className="h-2 rounded bg-zinc-900">
+        <div
+          className={`h-2 rounded ${ok ? "bg-emerald-400/70" : "bg-amber-300/80"}`}
+          style={{ width: `${Math.max(2, clamped * 100)}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
+  const pnl = today?.trades.pnl_usdc ?? 0;
+  const winRate = today?.trades.win_rate ?? 0;
+  const passRate = today?.signals.pass_rate ?? 0;
+  const makerTarget = today?.maker.target_price ?? 0.49;
+  const observedTarget = today?.maker.observed_avg_target_price;
+  const makerClean = (today?.maker.blocks ?? 0) === 0 && (today?.maker.api_errors ?? 0) === 0;
+
+  return (
+    <Panel
+      title="Today Cockpit"
+      sub={`UTC ${today?.day_utc ?? "-"}`}
+      right={<StatusPill ok={makerTarget <= 0.49} label={`Maker Target ${makerTarget.toFixed(2)}`} />}
+    >
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.72fr)]">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <HealthTile label="Day PnL" value={signedMoney(pnl)} ok={pnl >= 0} />
+          <HealthTile
+            label="Settled W/L"
+            value={`${today?.trades.settled ?? 0} · ${today?.trades.wins ?? 0}W/${today?.trades.losses ?? 0}L`}
+            ok={(today?.trades.settled ?? 0) === 0 ? undefined : winRate >= 0.5}
+          />
+          <HealthTile
+            label="Signal Pass"
+            value={`${today?.signals.passed ?? 0}/${today?.signals.total ?? 0} · ${percent(passRate)}`}
+            ok={(today?.signals.total ?? 0) === 0 ? undefined : passRate > 0}
+          />
+          <HealthTile
+            label="Open/Pending"
+            value={`${today?.trades.open ?? 0}/${today?.trades.pending ?? 0}`}
+            ok={(today?.risk_usage.open_or_pending ?? 0) < 0.8}
+          />
+          <HealthTile label="Maker Target" value={makerTarget.toFixed(2)} ok={makerTarget <= 0.49} />
+          <HealthTile
+            label="Observed Target"
+            value={observedTarget == null ? "-" : observedTarget.toFixed(3)}
+            ok={observedTarget == null ? undefined : observedTarget <= makerTarget + 0.01}
+          />
+          <HealthTile label="Buy-One Rate" value={percent(today?.maker.buy_one_rate ?? 0)} />
+          <HealthTile label="Maker Blocks" value={`${today?.maker.blocks ?? 0} / ${today?.maker.api_errors ?? 0} err`} ok={makerClean} />
+        </div>
+
+        <div className="grid gap-3 rounded-md border border-zinc-900 bg-black/20 p-3">
+          <UsageBar label="Daily Loss" value={today?.risk_usage.daily_loss} />
+          <UsageBar label="Daily Trades" value={today?.risk_usage.daily_trades} />
+          <UsageBar label="Loss Streak" value={today?.risk_usage.loss_streak} />
+          <UsageBar label="Open/Pending" value={today?.risk_usage.open_or_pending} />
+        </div>
       </div>
     </Panel>
   );
@@ -708,7 +850,6 @@ export default function Live() {
   const [expandedSignal, setExpandedSignal] = useState<number | null>(null);
   const [expandedTrade, setExpandedTrade] = useState<number | null>(null);
   const { data: status } = usePolling<StatusData>("/api/status?source=live", 5000);
-  const { data: signalStats } = usePolling<SignalStats>("/api/signal-stats?source=live", 5000);
   const { data: events } = usePolling<EventItem[]>("/api/events?source=live&limit=80", 5000);
   const { data: trades } = usePolling<TradeItem[]>("/api/trades?source=live&limit=200", 5000);
   const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=260", 5000);
@@ -723,10 +864,7 @@ export default function Live() {
     () => allTrades.filter((trade) => trade.won === -1).sort((a, b) => sortValue(a.settle_bar) - sortValue(b.settle_bar)),
     [allTrades],
   );
-  const wins = settledDesc.filter((trade) => trade.won === 1).length;
-  const losses = settledDesc.filter((trade) => trade.won === 0).length;
   const totalPnl = settledDesc.reduce((sum, trade) => sum + (trade.pnl ?? 0), 0);
-  const wr = settledDesc.length ? wins / settledDesc.length : status?.wr ?? 0;
   const equity = useMemo(() => {
     const points = [INITIAL_BALANCE];
     [...settledDesc].reverse().forEach((trade) => points.push(points[points.length - 1] + (trade.pnl ?? 0)));
@@ -736,20 +874,33 @@ export default function Live() {
   const latestDetails = latestSignal ? parseJson<SignalDetails>(latestSignal.details) : null;
   const health = intel?.health;
   const isHealthy = health?.state === "ok";
+  const todayStats = safety?.today;
+  const todayPnl = todayStats?.trades.pnl_usdc ?? 0;
+  const todaySettled = todayStats?.trades.settled ?? 0;
+  const todayWins = todayStats?.trades.wins ?? 0;
+  const todayLosses = todayStats?.trades.losses ?? 0;
+  const todayWinRate = todayStats?.trades.win_rate ?? 0;
+  const todayOpen = todayStats?.trades.open ?? 0;
+  const todayPending = todayStats?.trades.pending ?? 0;
+  const todaySignalPassed = todayStats?.signals.passed ?? 0;
+  const todaySignalTotal = todayStats?.signals.total ?? 0;
+  const todaySignalPassRate = todayStats?.signals.pass_rate ?? 0;
 
   return (
     <div className="space-y-5">
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
-        <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`PnL ${signedMoney(totalPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
-        <StatCard label="Win Rate" value={percent(wr)} sub={`${wins}W / ${losses}L`} icon={Target} tone={wr >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
-        <StatCard label="Settled" value={`${settledDesc.length}`} sub="completed trades" icon={ListChecks} />
-        <StatCard label="Pending" value={`${pending.length}`} sub={pending[0] ? `next ${timeOrBar(pending[0].settle_bar)}` : "queue clear"} icon={Clock3} />
-        <StatCard label="Signals" value={`${signalStats?.passed ?? 0}/${signalStats?.total ?? 0}`} sub={`${percent(signalStats?.pass_rate ?? 0)} pass rate`} icon={CheckCircle2} />
+        <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`Today ${signedMoney(todayPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
+        <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
+        <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />
+        <StatCard label="Pending" value={`${todayOpen}/${todayPending}`} sub={todayOpen || todayPending ? "open / pending" : "queue clear"} icon={Clock3} />
+        <StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={`${percent(todaySignalPassRate)} today pass rate`} icon={CheckCircle2} />
         <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
         <StatCard label="Health" value={isHealthy ? "OK" : "Review"} sub={health?.run_source ?? safety?.run_source ?? "-"} icon={ShieldCheck} tone={isHealthy ? "text-emerald-300" : "text-amber-300"} />
       </div>
 
       <BTCMarketChart />
+
+      <TodayCockpit today={safety?.today} />
 
       <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
         <SafetyStrip safety={safety} health={health} />

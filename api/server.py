@@ -375,6 +375,26 @@ def _record_pnl(record: dict):
     return 0.0
 
 
+def _record_won(record: dict):
+    value = record.get("won")
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value)
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"1", "true", "win", "won"}:
+            return True
+        if normalized in {"0", "false", "loss", "lost"}:
+            return False
+    pnl = _record_pnl(record)
+    if pnl > 0:
+        return True
+    if pnl < 0:
+        return False
+    return None
+
+
 def _is_settled_record(record: dict):
     status = str(record.get("status", "")).upper()
     if status in {"SETTLED", "FILLED", "WON", "LOST", "CLOSED"}:
@@ -480,6 +500,192 @@ def _live_risk_summary(checkpoint=None):
     }
 
 
+def _maker_target_price():
+    for key in ("DASHBOARD_MAKER_TARGET_PRICE", "MAKER_TARGET_PRICE"):
+        try:
+            return round(float(os.environ.get(key, "")), 4)
+        except ValueError:
+            continue
+    return 0.49
+
+
+def _usage(numerator, denominator):
+    try:
+        denominator = float(denominator)
+        numerator = float(numerator)
+    except (TypeError, ValueError):
+        return 0.0
+    if denominator <= 0:
+        return 0.0
+    return round(max(0.0, min(1.0, numerator / denominator)), 4)
+
+
+def _is_today_record(record, day):
+    ts = _record_ts(record)
+    return ts is not None and ts.date() == day
+
+
+def _is_today_event(event, day):
+    ts = _parse_dt(event.get("_t") or event.get("ts") or event.get("created_at"))
+    return ts is not None and ts.date() == day
+
+
+def _is_decision_event(event):
+    return (
+        event.get("type") == "decision"
+        or "filt" in event
+        or "filt_passed" in event
+        or "executable" in event
+    )
+
+
+def _decision_passed(event):
+    if event.get("filt") is True or event.get("filt_passed") in (1, True):
+        return True
+    action = str(event.get("action") or "").upper()
+    return event.get("executable") is True and action != "HOLD"
+
+
+def _source_events_for_day(source, day, limit=1000):
+    return [
+        event for event in _tail_source_events(source, limit=limit)
+        if isinstance(event, dict) and _is_today_event(event, day)
+    ]
+
+
+def _live_today_summary(checkpoint=None, risk_summary=None):
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
+    risk_summary = risk_summary if isinstance(risk_summary, dict) else _live_risk_summary(checkpoint)
+    today = datetime.now(timezone.utc).date()
+
+    trades = [item for item in checkpoint.get("trades", []) or [] if isinstance(item, dict)]
+    pending = [item for item in checkpoint.get("pending_orders", []) or [] if isinstance(item, dict)]
+    open_orders = [item for item in checkpoint.get("open_orders", []) or [] if isinstance(item, dict)]
+    todays_settled = [
+        record for record in trades
+        if _is_settled_record(record) and _is_today_record(record, today)
+    ]
+    wins = sum(1 for record in todays_settled if _record_won(record) is True)
+    losses = sum(1 for record in todays_settled if _record_won(record) is False)
+    daily_pnl = round(sum(_record_pnl(record) for record in todays_settled), 8)
+
+    events = [
+        event for event in _tail_jsonl(_events_checkpoint_path(), limit=1000)
+        if isinstance(event, dict) and _is_decision_event(event) and _is_today_event(event, today)
+    ]
+    passed = sum(1 for event in events if _decision_passed(event))
+    blocked = max(0, len(events) - passed)
+
+    audit_events = [
+        event for event in _tail_audit_events(limit=1000)
+        if isinstance(event, dict) and _is_today_event(event, today)
+    ]
+    maker_quality = _maker_quality_report(
+        events,
+        audit_events,
+        limit=20,
+        shadow_events=_source_events_for_day("shadow_live", today, limit=1000),
+    )
+    maker_summary = maker_quality.get("summary") or {}
+    metrics = risk_summary.get("metrics") or {}
+    limits = risk_summary.get("limits") or {}
+    max_daily_loss = abs(float(limits.get("max_daily_loss_usdc", 0) or 0))
+
+    return {
+        "day_utc": today.isoformat(),
+        "signals": {
+            "total": len(events),
+            "passed": passed,
+            "blocked": blocked,
+            "pass_rate": round(passed / len(events), 4) if events else 0.0,
+        },
+        "trades": {
+            "settled": len(todays_settled),
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / len(todays_settled), 4) if todays_settled else 0.0,
+            "pnl_usdc": daily_pnl,
+            "pending": len(pending),
+            "open": len(open_orders),
+        },
+        "risk_usage": {
+            "daily_loss": _usage(max(0.0, -float(metrics.get("daily_pnl_usdc", daily_pnl) or 0)), max_daily_loss),
+            "daily_trades": _usage(metrics.get("daily_trades", len(todays_settled)), limits.get("max_daily_trades")),
+            "loss_streak": _usage(metrics.get("consecutive_losses", 0), limits.get("max_consecutive_losses")),
+            "open_or_pending": _usage(metrics.get("open_or_pending_orders", len(open_orders) + len(pending)), limits.get("max_open_or_pending_orders")),
+        },
+        "maker": {
+            "target_price": _maker_target_price(),
+            "observed_avg_target_price": maker_summary.get("avg_target_price"),
+            "buy_one_rate": maker_summary.get("avg_buy_one_rate", 0),
+            "blocks": maker_summary.get("total_blocks", 0),
+            "api_errors": maker_summary.get("api_error_count", 0),
+        },
+    }
+
+
+def _readiness_summary(checklist):
+    total = len(checklist)
+    passed = sum(1 for item in checklist if item.get("ok"))
+    by_severity = {}
+    severity_order = {"critical": 0, "funding": 1, "risk": 2, "runtime": 3}
+    failed = []
+    for index, item in enumerate(checklist):
+        if item.get("ok"):
+            continue
+        severity = str(item.get("severity") or "check")
+        by_severity[severity] = by_severity.get(severity, 0) + 1
+        failed.append(
+            {
+                "key": item.get("key"),
+                "label": item.get("label"),
+                "severity": severity,
+                "value": item.get("value"),
+                "expected": item.get("expected"),
+                "action": _readiness_action(item.get("key")),
+                "original_index": index,
+            }
+        )
+    failed = sorted(
+        failed,
+        key=lambda item: (severity_order.get(item["severity"], 9), int(item.get("original_index") or 0)),
+    )
+    return {
+        "ready": total > 0 and passed == total,
+        "total": total,
+        "passed": passed,
+        "blockers": total - passed,
+        "by_severity": by_severity,
+        "critical_blockers": by_severity.get("critical", 0),
+        "funding_blockers": by_severity.get("funding", 0),
+        "risk_blockers": by_severity.get("risk", 0),
+        "top_blockers": failed[:6],
+    }
+
+
+def _readiness_action(key):
+    actions = {
+        "clob_authenticated": "Run CLOB read-only audit",
+        "account_read_ok": "Check CLOB account read access",
+        "allowance_read_ok": "Check CLOB allowance read access",
+        "minimum_balance": "Fund USDC balance",
+        "minimum_allowance": "Approve USDC allowance",
+        "open_orders_clear": "Cancel or reconcile open orders",
+        "dryrun_no_submitted_orders": "Keep dry-run from submitting orders",
+        "live_trade_gate_available": "Generate live trade gate report",
+        "live_trade_gate_ready": "Clear live gate blockers",
+        "live_preflight_available": "Run live preflight chain",
+        "live_preflight_chain_ok": "Clear preflight blockers",
+        "live_preflight_fresh": "Refresh live preflight chain",
+        "live_preflight_no_submission": "Use preview-only preflight",
+        "risk_daily_loss": "Reset or lower daily loss exposure",
+        "risk_daily_trades": "Wait for daily trade limit reset",
+        "risk_consecutive_losses": "Pause after loss streak",
+        "risk_open_or_pending": "Clear open or pending orders",
+    }
+    return actions.get(str(key or ""), "Review readiness check")
+
+
 def _safety_report_summary():
     allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
     if not allowance_report:
@@ -532,6 +738,7 @@ def _safety_report_summary():
     allowance_ok = bool(allowance_check and allowance_check.get("ok"))
     real_orders_enabled = real_orders_env == "YES"
     risk_summary = _live_risk_summary(checkpoint)
+    today_summary = _live_today_summary(checkpoint, risk_summary)
 
     checklist = [
         {
@@ -681,7 +888,9 @@ def _safety_report_summary():
         "live_gate": live_gate_summary,
         "preflight_chain": preflight_summary,
         "checklist": checklist,
+        "readiness_summary": _readiness_summary(checklist),
         "risk": risk_summary,
+        "today": today_summary,
         "execution_summary": execution_report.get("summary") or execution_report,
     }
 
@@ -1107,8 +1316,9 @@ def _num(value):
         return None
 
 
-def _maker_quality_report(recent_events, recent_audit_events, limit=20):
-    shadow_events = _tail_source_events("shadow_live", limit=limit * 12)
+def _maker_quality_report(recent_events, recent_audit_events, limit=20, shadow_events=None):
+    if shadow_events is None:
+        shadow_events = _tail_source_events("shadow_live", limit=limit * 12)
     watch_events = [e for e in shadow_events if e.get("type") == "shadow_watch"]
     error_events = [e for e in shadow_events if e.get("type") == "shadow_watch_error"]
     rejected_events = [e for e in recent_audit_events if e.get("type") == "order_rejected"]
@@ -2157,6 +2367,7 @@ def _build_btc_market_chart_payload(frame, now=None, start_ts=None):
 
     return {
         "readonly": True,
+        "chart_status": "ok",
         "source": "chainlink_candlestick",
         "live_source": live.get("source") or "chainlink_candlestick",
         "live_status": live.get("status") or "fallback",
@@ -2239,8 +2450,9 @@ def api_btc_market_chart():
         return jsonify(_build_btc_market_chart_payload(frame, now=now_ts, start_ts=start_ts))
     except Exception as exc:
         payload = _build_btc_market_chart_payload(pd.DataFrame(), now=now_ts, start_ts=start_ts)
+        payload["chart_status"] = "degraded"
         payload["error"] = str(exc)
-        return jsonify(payload), 503
+        return jsonify(payload)
 
 
 @app.route("/api/btc/live-price")

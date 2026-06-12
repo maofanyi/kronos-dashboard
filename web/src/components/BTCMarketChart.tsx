@@ -29,6 +29,7 @@ type MarketItem = {
 
 type MarketChartPayload = {
   readonly: boolean;
+  chart_status?: "ok" | "degraded";
   source: string;
   live_source: string;
   live_status: string;
@@ -619,12 +620,13 @@ export default function BTCMarketChart() {
   const [marketPillStyle, setMarketPillStyle] = useState({ transform: "translateX(0px)", width: "0px" });
   const hasRenderedChart = renderedMarketRef.current === marketSlug;
   const liveIsFresh = data?.live_status === "fresh";
+  const chartIsDegraded = data?.chart_status === "degraded";
   const liveSourceLabel = data?.live_source === "polymarket_rtds_chainlink"
     ? "Polymarket RTDS Chainlink"
     : data?.live_source === "chainlink_streams_ws"
       ? "Chainlink Streams"
       : "Chainlink Candlestick";
-  const liveStatusLabel = liveIsFresh ? "Streaming" : "Candlestick fallback";
+  const liveStatusLabel = chartIsDegraded ? "Data degraded" : liveIsFresh ? "Streaming" : "Candlestick fallback";
 
   useEffect(() => {
     if (!selectedStart || !data) return;
@@ -679,7 +681,7 @@ export default function BTCMarketChart() {
                 Chainlink {data?.symbol ?? "BTCUSD"} {data?.resolution ?? "5m"}
               </span>
               <span className={`inline-flex items-center gap-1.5 rounded border px-2 py-1 text-xs font-semibold ${
-                liveIsFresh ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300" : "border-amber-500/20 bg-amber-500/10 text-amber-300"
+                liveIsFresh && !chartIsDegraded ? "border-emerald-500/20 bg-emerald-500/10 text-emerald-300" : "border-amber-500/20 bg-amber-500/10 text-amber-300"
               }`}>
                 <Activity className="h-3.5 w-3.5" />
                 {liveStatusLabel}

@@ -95,6 +95,53 @@ def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypat
     assert checks["minimum_allowance"]["value"] == 0.0
 
 
+def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+    monkeypatch.setattr(
+        server,
+        "RISK_LIMITS",
+        {
+            "max_daily_loss_usdc": 10.0,
+            "max_daily_trades": 20,
+            "max_consecutive_losses": 3,
+            "max_open_or_pending_orders": 1,
+        },
+    )
+    _write_json(
+        checkpoint_dir / "paper_live.json",
+        {
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "open_orders": [{"status": "OPEN", "created_at": datetime.now(timezone.utc).isoformat()}],
+        },
+    )
+
+    summary = server._safety_report_summary()
+    readiness = summary["readiness_summary"]
+
+    assert readiness["total"] == len(summary["checklist"])
+    assert readiness["passed"] == sum(1 for item in summary["checklist"] if item["ok"])
+    assert readiness["blockers"] == readiness["total"] - readiness["passed"]
+    assert readiness["by_severity"]["critical"] >= 1
+    assert readiness["by_severity"]["funding"] >= 1
+    assert readiness["by_severity"]["risk"] >= 1
+    assert readiness["critical_blockers"] == readiness["by_severity"]["critical"]
+    assert readiness["ready"] is False
+    assert readiness["top_blockers"]
+    assert readiness["top_blockers"][0]["severity"] == "critical"
+    assert {"key", "label", "severity", "value"}.issubset(readiness["top_blockers"][0])
+    assert len(readiness["top_blockers"]) <= 6
+    top_keys = [item["key"] for item in readiness["top_blockers"]]
+    assert top_keys.index("clob_authenticated") < top_keys.index("account_read_ok")
+    clob_blocker = next(item for item in readiness["top_blockers"] if item["key"] == "clob_authenticated")
+    assert clob_blocker["action"] == "Run CLOB read-only audit"
+
+
 def test_live_safety_marks_dryrun_submitted_order_as_critical(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -263,6 +310,180 @@ def test_live_safety_marks_stale_preflight_report_as_critical(tmp_path, monkeypa
     assert checks["live_preflight_fresh"]["severity"] == "critical"
 
 
+def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    audit_dir = tmp_path / "data" / "events" / "paper_live" / "today"
+    shadow_dir = tmp_path / "data" / "events" / "shadow_live" / "today"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    audit_dir.mkdir(parents=True)
+    shadow_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+    monkeypatch.setenv("DASHBOARD_MAKER_TARGET_PRICE", "0.49")
+    monkeypatch.setattr(
+        server,
+        "RISK_LIMITS",
+        {
+            "max_daily_loss_usdc": 20.0,
+            "max_daily_trades": 10,
+            "max_consecutive_losses": 4,
+            "max_open_or_pending_orders": 3,
+        },
+    )
+
+    now = datetime.now(timezone.utc)
+    today_prefix = now.strftime("%Y-%m-%d")
+    yesterday = now - timedelta(days=1)
+    checkpoint = {
+        "timestamp": now.isoformat(),
+        "trades": [
+            {
+                "status": "SETTLED",
+                "won": True,
+                "pnl": 26.02,
+                "settled_at": f"{today_prefix}T01:00:00Z",
+            },
+            {
+                "status": "SETTLED",
+                "won": False,
+                "pnl": -25.0,
+                "settled_at": f"{today_prefix}T02:00:00Z",
+            },
+            {
+                "status": "SETTLED",
+                "won": True,
+                "pnl": 26.02,
+                "settled_at": yesterday.isoformat(),
+            },
+        ],
+        "pending_orders": [
+            {
+                "status": "PENDING",
+                "entry_bar": 10,
+                "settle_bar": 23,
+                "created_at": f"{today_prefix}T03:00:00Z",
+            }
+        ],
+        "open_orders": [
+            {
+                "status": "OPEN",
+                "entry_bar": 12,
+                "created_at": f"{today_prefix}T03:05:00Z",
+            }
+        ],
+    }
+    _write_json(checkpoint_dir / "paper_live.json", checkpoint)
+
+    decision_events = [
+        {
+            "type": "decision",
+            "event_id": "decision-pass",
+            "action": "BUY_UP",
+            "filt": True,
+            "executable": True,
+            "_t": f"{today_prefix}T00:00:00Z",
+        },
+        {
+            "type": "decision",
+            "event_id": "decision-block",
+            "action": "HOLD",
+            "filt": False,
+            "executable": False,
+            "_t": f"{today_prefix}T00:05:00Z",
+        },
+        {
+            "type": "decision",
+            "event_id": "decision-old",
+            "action": "BUY_DOWN",
+            "filt": True,
+            "executable": True,
+            "_t": yesterday.isoformat(),
+        },
+    ]
+    (checkpoint_dir / "paper_live_events.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in decision_events),
+        encoding="utf-8",
+    )
+    shadow_events = [
+        {
+            "event_id": "watch-open",
+            "type": "shadow_watch",
+            "decision_event_id": "decision-pass",
+            "sample": 0,
+            "action": "OPEN",
+            "price": 0.49,
+            "best_bid": 0.49,
+            "_t": f"{today_prefix}T00:00:01Z",
+        },
+        {
+            "event_id": "watch-block",
+            "type": "shadow_watch",
+            "decision_event_id": "decision-pass",
+            "sample": 1,
+            "action": "BLOCK",
+            "price": 0.51,
+            "best_bid": 0.52,
+            "reason": "price cap",
+            "_t": f"{today_prefix}T00:00:02Z",
+        },
+        {
+            "event_id": "watch-error",
+            "type": "shadow_watch_error",
+            "decision_event_id": "decision-pass",
+            "error": "timeout",
+            "_t": f"{today_prefix}T00:00:03Z",
+        },
+        {
+            "event_id": "watch-old",
+            "type": "shadow_watch",
+            "decision_event_id": "decision-old",
+            "sample": 0,
+            "action": "OPEN",
+            "price": 0.47,
+            "best_bid": 0.47,
+            "_t": yesterday.isoformat(),
+        },
+        {
+            "event_id": "watch-old-error",
+            "type": "shadow_watch_error",
+            "decision_event_id": "decision-old",
+            "error": "old timeout",
+            "_t": yesterday.isoformat(),
+        },
+    ]
+    (shadow_dir / "events_00.jsonl").write_text(
+        "\n".join(json.dumps(event) for event in shadow_events),
+        encoding="utf-8",
+    )
+
+    summary = server._safety_report_summary()
+    today = summary["today"]
+
+    assert today["day_utc"] == today_prefix
+    assert today["signals"]["total"] == 2
+    assert today["signals"]["passed"] == 1
+    assert today["signals"]["blocked"] == 1
+    assert today["signals"]["pass_rate"] == 0.5
+    assert today["trades"]["settled"] == 2
+    assert today["trades"]["wins"] == 1
+    assert today["trades"]["losses"] == 1
+    assert today["trades"]["win_rate"] == 0.5
+    assert today["trades"]["pnl_usdc"] == 1.02
+    assert today["trades"]["pending"] == 1
+    assert today["trades"]["open"] == 1
+    assert today["risk_usage"]["daily_loss"] == 0.0
+    assert today["risk_usage"]["daily_trades"] == 0.2
+    assert today["risk_usage"]["open_or_pending"] == 0.6667
+    assert today["maker"]["target_price"] == 0.49
+    assert today["maker"]["observed_avg_target_price"] == 0.49
+    assert today["maker"]["buy_one_rate"] == 0.5
+    assert today["maker"]["blocks"] == 1
+    assert today["maker"]["api_errors"] == 1
+
+
 def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -315,6 +536,72 @@ def test_live_page_surfaces_funding_shortfalls():
     assert "Allowance Gap" in source
 
 
+def test_live_page_mounts_today_cockpit():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "function TodayCockpit" in source
+    assert "<TodayCockpit today={safety?.today}" in source
+    assert "safety?.today" in source
+    assert "Maker Target" in source
+    assert "0.49" in source
+
+
+def test_live_page_uses_today_summary_for_top_kpis():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const todayStats = safety?.today" in source
+    assert "const todayPnl = todayStats?.trades.pnl_usdc" in source
+    assert "const todaySettled = todayStats?.trades.settled" in source
+    assert "const todayWinRate = todayStats?.trades.win_rate" in source
+    assert "const todaySignalPassRate = todayStats?.signals.pass_rate" in source
+    assert "Today ${signedMoney(todayPnl)}" in source
+    assert "today trades" in source
+    assert "today pass rate" in source
+
+
+def test_live_page_surfaces_readiness_blocker_summary():
+    live_source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    status_source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "readiness_summary" in live_source
+    assert "readiness_summary" in status_source
+    assert "critical_blockers" in live_source
+    assert "funding_blockers" in live_source
+    assert "risk_blockers" in live_source
+    assert "Critical" in live_source
+    assert "Funding" in status_source
+    assert "Risk" in status_source
+
+
+def test_live_page_surfaces_top_readiness_blockers():
+    live_source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    status_source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "top_blockers" in live_source
+    assert "top_blockers" in status_source
+    assert "Top Blockers" in live_source
+    assert "Top Blockers" in status_source
+    assert "blocker.label" in live_source
+    assert "blocker.expected" in status_source
+    assert "blocker.action" in live_source
+    assert "blocker.action" in status_source
+    assert "next {blocker.action}" in live_source
+    assert "next {blocker.action}" in status_source
+
+
+def test_live_page_signal_condition_labels_are_readable():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "5m long probability" in source
+    assert "4h long gate" in source
+    assert "1h+4h long score" in source
+    assert "Short macro veto" in source
+    assert "5m short probability" in source
+    assert "4h short gate" in source
+    assert "1h+4h short score" in source
+    assert "Long macro veto" in source
+
+
 def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
@@ -335,3 +622,37 @@ def test_status_bar_surfaces_funding_shortfalls():
     assert "safety?.funding?.funding_ready" in source
     assert "Balance Gap" in source
     assert "Allowance Gap" in source
+
+
+def test_status_bar_surfaces_today_summary():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "today?: {" in source
+    assert "const today = safety?.today" in source
+    assert "Today ${signedMoney(todayPnl)}" in source
+    assert "Signal ${todaySignalsPassed}/${todaySignalsTotal}" in source
+    assert "W/L ${todayWins}/${todayLosses}" in source
+    assert "Today PnL" in source
+    assert "Today Signals" in source
+
+
+def test_status_bar_merges_runtime_checks_into_readiness_summary():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "function summarizeChecklistReadiness" in source
+    assert "const localReadiness = summarizeChecklistReadiness(checklist)" in source
+    assert "const readinessPassed = localReadiness.passed" in source
+    assert "const criticalBlockers = localReadiness.critical_blockers" in source
+    assert "const topBlockers = localReadiness.top_blockers" in source
+    assert "readiness?.passed ?? checksPassed" not in source
+    assert "original_index" in source
+    assert ".map((item, original_index)" in source
+    assert "items.indexOf(item)" not in source
+    assert "localeCompare" not in source
+
+
+def test_status_bar_uses_readable_risk_separator():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert " | ${metrics.open_or_pending_orders}" in source
+    assert " 路 " not in source

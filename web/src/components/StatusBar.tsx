@@ -81,6 +81,24 @@ interface SafetyData {
     components?: Record<string, unknown>;
   };
   checklist?: ChecklistItem[];
+  readiness_summary?: {
+    ready: boolean;
+    total: number;
+    passed: number;
+    blockers: number;
+    critical_blockers: number;
+    funding_blockers: number;
+    risk_blockers: number;
+    top_blockers?: Array<{
+      key?: string;
+      label?: string;
+      severity?: string;
+      value?: string | number | null;
+      expected?: string | null;
+      action?: string;
+    }>;
+    by_severity?: Record<string, number>;
+  };
   risk?: {
     ok: boolean;
     metrics: {
@@ -95,6 +113,23 @@ interface SafetyData {
       max_daily_trades: number;
       max_consecutive_losses: number;
       max_open_or_pending_orders: number;
+    };
+  };
+  today?: {
+    signals: {
+      total: number;
+      passed: number;
+      blocked: number;
+      pass_rate: number;
+    };
+    trades: {
+      settled: number;
+      wins: number;
+      losses: number;
+      win_rate: number;
+      pnl_usdc: number;
+      pending: number;
+      open: number;
     };
   };
 }
@@ -186,6 +221,79 @@ function DetailTile({
   );
 }
 
+function summarizeChecklistReadiness(items: ChecklistItem[]) {
+  const severityOrder: Record<string, number> = {
+    critical: 0,
+    funding: 1,
+    risk: 2,
+    runtime: 3,
+  };
+  const passed = items.filter((item) => item.ok).length;
+  const failedItems = items
+    .map((item, original_index) => ({ item, original_index }))
+    .filter(({ item }) => !item.ok);
+  const by_severity = failedItems.reduce<Record<string, number>>((counts, { item }) => {
+    const severity = item.severity ?? "check";
+    counts[severity] = (counts[severity] ?? 0) + 1;
+    return counts;
+  }, {});
+  const top_blockers = failedItems
+    .map(({ item, original_index }) => ({
+      key: item.key,
+      label: item.label,
+      severity: item.severity ?? "check",
+      value: item.value,
+      expected: item.expected,
+      action: readinessAction(item.key),
+      original_index,
+    }))
+    .sort((a, b) => {
+      const rankA = severityOrder[a.severity] ?? 9;
+      const rankB = severityOrder[b.severity] ?? 9;
+      if (rankA !== rankB) return rankA - rankB;
+      return a.original_index - b.original_index;
+    })
+    .slice(0, 6);
+
+  return {
+    ready: items.length > 0 && passed === items.length,
+    total: items.length,
+    passed,
+    blockers: items.length - passed,
+    by_severity,
+    critical_blockers: by_severity.critical ?? 0,
+    funding_blockers: by_severity.funding ?? 0,
+    risk_blockers: by_severity.risk ?? 0,
+    top_blockers,
+  };
+}
+
+function readinessAction(key: string) {
+  const actions: Record<string, string> = {
+    clob_authenticated: "Run CLOB read-only audit",
+    account_read_ok: "Check CLOB account read access",
+    allowance_read_ok: "Check CLOB allowance read access",
+    minimum_balance: "Fund USDC balance",
+    minimum_allowance: "Approve USDC allowance",
+    open_orders_clear: "Cancel or reconcile open orders",
+    dryrun_no_submitted_orders: "Keep dry-run from submitting orders",
+    live_trade_gate_available: "Generate live trade gate report",
+    live_trade_gate_ready: "Clear live gate blockers",
+    live_preflight_available: "Run live preflight chain",
+    live_preflight_chain_ok: "Clear preflight blockers",
+    live_preflight_fresh: "Refresh live preflight chain",
+    live_preflight_no_submission: "Use preview-only preflight",
+    risk_daily_loss: "Reset or lower daily loss exposure",
+    risk_daily_trades: "Wait for daily trade limit reset",
+    risk_consecutive_losses: "Pause after loss streak",
+    risk_open_or_pending: "Clear open or pending orders",
+    checkpoint_fresh: "Check runner checkpoint freshness",
+    events_fresh: "Check event stream freshness",
+    no_log_errors: "Inspect runtime logs",
+  };
+  return actions[key] ?? "Review readiness check";
+}
+
 export default function StatusBar() {
   const [open, setOpen] = useState(false);
   const { data, error } = usePolling<StatusData>("/api/status?source=live", 5000);
@@ -197,6 +305,14 @@ export default function StatusBar() {
   const health = intel?.health;
   const metrics = safety?.risk?.metrics;
   const limits = safety?.risk?.limits;
+  const today = safety?.today;
+  const todayPnl = today?.trades.pnl_usdc ?? 0;
+  const todayWins = today?.trades.wins ?? 0;
+  const todayLosses = today?.trades.losses ?? 0;
+  const todaySettled = today?.trades.settled ?? 0;
+  const todaySignalsPassed = today?.signals.passed ?? 0;
+  const todaySignalsTotal = today?.signals.total ?? 0;
+  const todaySignalsOk = todaySignalsTotal === 0 || todaySignalsPassed > 0;
   const healthOk = !error && health?.state !== "warning";
   const locked = !liveEnabled && safety?.kill_switch?.state !== "armed";
   const checklist = useMemo(() => {
@@ -226,9 +342,14 @@ export default function StatusBar() {
     ];
     return [...apiItems, ...runtimeItems];
   }, [health?.checkpoint_age_seconds, health?.latest_event_age_seconds, intel?.issues?.log_errors?.length, safety?.checklist]);
-  const checksPassed = checklist.filter((item) => item.ok).length;
-  const checksTotal = checklist.length;
-  const checksOk = checksTotal > 0 && checksPassed === checksTotal;
+  const localReadiness = summarizeChecklistReadiness(checklist);
+  const checksOk = localReadiness.ready;
+  const criticalBlockers = localReadiness.critical_blockers;
+  const fundingBlockers = localReadiness.funding_blockers;
+  const riskBlockers = localReadiness.risk_blockers;
+  const topBlockers = localReadiness.top_blockers;
+  const readinessPassed = localReadiness.passed;
+  const readinessTotal = localReadiness.total;
   const riskOk = safety?.risk?.ok ?? true;
   const dryrunOk = (safety?.dryrun?.submitted_count ?? 0) === 0;
   const liveGateReady = safety?.live_gate?.ready_for_live_smoke === true;
@@ -262,15 +383,21 @@ export default function StatusBar() {
           </span>
           <StatusChip ok={locked} label={liveEnabled ? "Real Enabled" : safety?.kill_switch?.state ?? "Locked"} icon="lock" />
           <StatusChip ok={healthOk} label={healthOk ? "Health OK" : "Review"} icon="shield" />
-          <StatusChip ok={checksOk} label={`Checks ${checksPassed}/${checksTotal || 0}`} />
+          <StatusChip ok={checksOk} label={`Checks ${readinessPassed}/${readinessTotal}`} />
+          <StatusChip ok={criticalBlockers === 0} label={`Critical ${criticalBlockers}`} />
+          <StatusChip ok={fundingBlockers === 0} label={`Funding ${fundingBlockers}`} />
+          <StatusChip ok={riskBlockers === 0} label={`Risk ${riskBlockers}`} />
           <StatusChip
             ok={riskOk}
             label={
               metrics && limits
-                ? `PnL ${signedMoney(metrics.daily_pnl_usdc)} · ${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders} open`
+                ? `PnL ${signedMoney(metrics.daily_pnl_usdc)} | ${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders} open`
                 : "Risk -"
             }
           />
+          <StatusChip ok={todayPnl >= 0} label={`Today ${signedMoney(todayPnl)}`} />
+          <StatusChip ok={todaySignalsOk} label={`Signal ${todaySignalsPassed}/${todaySignalsTotal}`} />
+          <StatusChip ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} label={`W/L ${todayWins}/${todayLosses}`} />
           <StatusChip
             ok={dryrunOk}
             label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
@@ -311,6 +438,9 @@ export default function StatusBar() {
               <DetailTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
               <DetailTile label="Balance Gap" value={money(safety?.funding?.balance_shortfall_usdc)} ok={(safety?.funding?.balance_shortfall_usdc ?? 0) === 0} />
               <DetailTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc)} ok={(safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
+              <DetailTile label="Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
+              <DetailTile label="Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
+              <DetailTile label="Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
               <DetailTile
                 label="Daily Trades"
                 value={metrics && limits ? `${metrics.daily_trades}/${limits.max_daily_trades}` : "-"}
@@ -344,8 +474,30 @@ export default function StatusBar() {
             <div className="rounded-md border border-zinc-800 bg-black/20">
               <div className="flex items-center justify-between border-b border-zinc-800 px-3 py-2">
                 <span className="font-medium text-zinc-200">Readiness Details</span>
-                <span className={checksOk ? "font-mono text-emerald-300" : "font-mono text-amber-300"}>{checksPassed}/{checksTotal || 0}</span>
+                <span className={checksOk ? "font-mono text-emerald-300" : "font-mono text-amber-300"}>{readinessPassed}/{readinessTotal}</span>
               </div>
+              <div className="grid grid-cols-3 gap-2 border-b border-zinc-800 p-3">
+                <DetailTile label="Critical" value={`${criticalBlockers}`} ok={criticalBlockers === 0} />
+                <DetailTile label="Funding" value={`${fundingBlockers}`} ok={fundingBlockers === 0} />
+                <DetailTile label="Risk" value={`${riskBlockers}`} ok={riskBlockers === 0} />
+              </div>
+              {topBlockers.length > 0 && (
+                <div className="border-b border-zinc-800 p-3">
+                  <div className="mb-2 text-[11px] uppercase tracking-[0.14em] text-zinc-600">Top Blockers</div>
+                  <div className="grid gap-2">
+                    {topBlockers.slice(0, 3).map((blocker) => (
+                      <div key={blocker.key ?? blocker.label} className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="truncate text-zinc-200">{blocker.label ?? blocker.key}</span>
+                          <span className="shrink-0 font-mono text-[11px] uppercase text-amber-300">{blocker.severity ?? "check"}</span>
+                        </div>
+                        {blocker.expected && <div className="mt-1 truncate text-[11px] text-zinc-500">expected {blocker.expected}</div>}
+                        {blocker.action && <div className="mt-1 truncate text-[11px] text-zinc-500">next {blocker.action}</div>}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
               <div className="grid max-h-[260px] gap-2 overflow-auto p-3 md:grid-cols-2">
                 {checklist.map((item) => (
                   <div
