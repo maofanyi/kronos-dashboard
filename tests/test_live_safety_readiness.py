@@ -589,6 +589,16 @@ def test_live_page_surfaces_top_readiness_blockers():
     assert "next {blocker.action}" in status_source
 
 
+def test_live_collapsible_panels_expose_accessible_expanded_state():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "useId" in source
+    assert "const panelId = useId()" in source
+    assert "aria-expanded={open}" in source
+    assert "aria-controls={panelId}" in source
+    assert "id={panelId}" in source
+
+
 def test_live_page_signal_condition_labels_are_readable():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

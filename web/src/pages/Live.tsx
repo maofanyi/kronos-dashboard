@@ -15,7 +15,7 @@ import {
   Target,
   Wallet,
 } from "lucide-react";
-import { Fragment, type ReactNode, useMemo, useState } from "react";
+import { Fragment, type ReactNode, useId, useMemo, useState } from "react";
 import BTCMarketChart from "../components/BTCMarketChart";
 import { Chart } from "@/components/chart";
 import { usePolling } from "../hooks/usePolling";
@@ -395,12 +395,15 @@ function CollapsiblePanel({
   summary?: ReactNode;
 }) {
   const [open, setOpen] = useState(false);
+  const panelId = useId();
   return (
     <section className="w-full max-w-full min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
       <button
         type="button"
         className="flex w-full items-center justify-between gap-3 px-4 py-2.5 text-left"
         onClick={() => setOpen((value) => !value)}
+        aria-expanded={open}
+        aria-controls={panelId}
       >
         <div className="min-w-0">
           <div className="flex min-w-0 items-center gap-2">
@@ -414,7 +417,7 @@ function CollapsiblePanel({
         </div>
       </button>
       {!open && summary && <div className="hidden border-t border-zinc-900 px-4 py-2 md:block">{summary}</div>}
-      {open && <div className="border-t border-zinc-800">{children}</div>}
+      {open && <div id={panelId} className="border-t border-zinc-800">{children}</div>}
     </section>
   );
 }
