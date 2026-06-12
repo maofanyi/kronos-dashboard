@@ -160,6 +160,17 @@ interface LiveSafety {
     market_probe_count: number;
     quote_executable_count: number;
     quote_executable_rate: number;
+    quote_probes?: Array<{
+      direction?: string;
+      ok?: boolean;
+      quote_executable?: boolean;
+      best_bid?: number | null;
+      best_ask?: number | null;
+      price?: number | null;
+      token_id?: string;
+      reason?: string;
+      error?: string;
+    }>;
     funding_ready?: boolean | null;
     balance_shortfall_usdc?: number | null;
     allowance_shortfall_usdc?: number | null;
@@ -859,6 +870,7 @@ function FirstOrderRail({ rail }: { rail?: LiveSafety["first_order_rail"] | null
 function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | null }) {
   const quoteRate = audit?.quote_executable_rate ?? 0;
   const blockers = audit?.blockers ?? [];
+  const quoteProbes = audit?.quote_probes ?? [];
   return (
     <Panel
       title="CLOB Read-only Audit"
@@ -905,6 +917,33 @@ function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | nu
           )}
           <div className="mt-3 truncate text-[11px] text-zinc-600">
             spender {audit?.min_allowance_spender || "-"}
+          </div>
+          <div className="mt-4 border-t border-zinc-900 pt-3">
+            <div className="mb-2 text-[11px] uppercase tracking-[0.14em] text-zinc-600">Probe Details</div>
+            {quoteProbes.length === 0 ? (
+              <div className="text-xs text-zinc-500">No market probes yet</div>
+            ) : (
+              <div className="space-y-2">
+                {quoteProbes.map((probe) => (
+                  <div key={`${probe.direction}-${probe.token_id || probe.reason || probe.error}`} className="rounded border border-zinc-900 bg-zinc-950/60 px-2.5 py-2">
+                    <div className="flex items-center justify-between gap-3">
+                      <span className="font-mono text-xs text-zinc-200">{probe.direction || "-"}</span>
+                      <span className={`font-mono text-[11px] uppercase ${probe.quote_executable ? "text-emerald-300" : "text-amber-300"}`}>
+                        {probe.quote_executable ? "executable" : probe.ok ? "not executable" : "failed"}
+                      </span>
+                    </div>
+                    <div className="mt-1 grid grid-cols-3 gap-2 font-mono text-[11px] text-zinc-500">
+                      <span>bid {probe.best_bid == null ? "-" : probe.best_bid.toFixed(3)}</span>
+                      <span>ask {probe.best_ask == null ? "-" : probe.best_ask.toFixed(3)}</span>
+                      <span>px {probe.price == null ? "-" : probe.price.toFixed(3)}</span>
+                    </div>
+                    {(probe.reason || probe.error) && (
+                      <div className="mt-1 truncate text-[11px] text-amber-300">{probe.reason || probe.error}</div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         </div>
       </div>

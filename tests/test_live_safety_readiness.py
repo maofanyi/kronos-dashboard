@@ -179,8 +179,24 @@ def test_live_safety_includes_clob_readonly_audit_summary(tmp_path, monkeypatch)
                 "funding_ready": True,
             },
             "market_probes": [
-                {"direction": "UP", "ok": True, "quote_executable": True},
-                {"direction": "DOWN", "ok": True, "quote_executable": False},
+                {
+                    "direction": "UP",
+                    "ok": True,
+                    "quote_executable": True,
+                    "best_bid": 0.49,
+                    "best_ask": 0.51,
+                    "price": 0.5,
+                    "token_id": "token-up",
+                },
+                {
+                    "direction": "DOWN",
+                    "ok": True,
+                    "quote_executable": False,
+                    "best_bid": 0.44,
+                    "best_ask": 0.56,
+                    "reason": "wide spread",
+                    "token_id": "token-down",
+                },
             ],
             "checks": [
                 {"name": "clob_account_authenticated", "ok": True},
@@ -210,6 +226,30 @@ def test_live_safety_includes_clob_readonly_audit_summary(tmp_path, monkeypatch)
     assert audit["market_probe_count"] == 2
     assert audit["quote_executable_count"] == 1
     assert audit["quote_executable_rate"] == 0.5
+    assert audit["quote_probes"] == [
+        {
+            "direction": "UP",
+            "ok": True,
+            "quote_executable": True,
+            "best_bid": 0.49,
+            "best_ask": 0.51,
+            "price": 0.5,
+            "token_id": "token-up",
+            "reason": "",
+            "error": "",
+        },
+        {
+            "direction": "DOWN",
+            "ok": True,
+            "quote_executable": False,
+            "best_bid": 0.44,
+            "best_ask": 0.56,
+            "price": None,
+            "token_id": "token-down",
+            "reason": "wide spread",
+            "error": "",
+        },
+    ]
     assert audit["funding_ready"] is True
     assert audit["blockers"] == ["one quote not executable"]
 
@@ -853,6 +893,11 @@ def test_live_page_surfaces_clob_readonly_panel():
     assert "Report Age" in source
     assert "audit?.fresh" in source
     assert "audit?.report_age_seconds" in source
+    assert "Probe Details" in source
+    assert "quote_probes" in source
+    assert "probe.quote_executable" in source
+    assert "probe.best_bid" in source
+    assert "probe.best_ask" in source
 
 
 def test_live_collapsible_panels_expose_accessible_expanded_state():

@@ -777,6 +777,20 @@ def _first_order_rail(checklist):
     }
 
 
+def _clob_quote_probe_summary(probe):
+    return {
+        "direction": str(probe.get("direction") or probe.get("side") or probe.get("outcome") or "").upper(),
+        "ok": bool(probe.get("ok")),
+        "quote_executable": bool(probe.get("quote_executable")),
+        "best_bid": _num(probe.get("best_bid")),
+        "best_ask": _num(probe.get("best_ask")),
+        "price": _num(probe.get("price")),
+        "token_id": str(probe.get("token_id") or probe.get("outcome_token_id") or ""),
+        "reason": str(probe.get("reason") or probe.get("block_reason") or ""),
+        "error": str(probe.get("error") or ""),
+    }
+
+
 def _safety_report_summary():
     allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
     if not allowance_report:
@@ -942,6 +956,12 @@ def _safety_report_summary():
     open_orders_read_ok = bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok"))
     market_probe_count = int(live_gate_summary.get("market_probe_count", 0) or 0)
     quote_executable_count = int(live_gate_summary.get("quote_executable_count", 0) or 0)
+    gate_market_probes = gate_report.get("market_probes") if isinstance(gate_report.get("market_probes"), list) else []
+    quote_probes = [
+        _clob_quote_probe_summary(probe)
+        for probe in gate_market_probes
+        if isinstance(probe, dict)
+    ]
     clob_report_path = gate_path or allowance_path
     clob_report_mtime = None
     clob_report_age_seconds = None
@@ -988,6 +1008,7 @@ def _safety_report_summary():
         "market_probe_count": market_probe_count,
         "quote_executable_count": quote_executable_count,
         "quote_executable_rate": round(quote_executable_count / market_probe_count, 4) if market_probe_count else 0.0,
+        "quote_probes": quote_probes,
         "funding_ready": gate_funding.get("funding_ready"),
         "balance_shortfall_usdc": gate_funding.get("balance_shortfall_usdc"),
         "allowance_shortfall_usdc": gate_funding.get("allowance_shortfall_usdc"),
