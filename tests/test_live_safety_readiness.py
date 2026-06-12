@@ -821,6 +821,40 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
         ],
     }
     _write_json(checkpoint_dir / "paper_live.json", checkpoint)
+    _write_json(
+        checkpoint_dir / "paper_live_ledger.json",
+        [
+            {
+                "status": "would_place",
+                "action": "BUY_UP",
+                "would_place_order": True,
+                "submitted": False,
+                "created_at": f"{today_prefix}T00:10:00Z",
+            },
+            {
+                "status": "blocked",
+                "action": "BUY_DOWN",
+                "would_place_order": False,
+                "submitted": False,
+                "block_reason": "stale_signal",
+                "created_at": f"{today_prefix}T00:15:00Z",
+            },
+            {
+                "status": "would_place",
+                "action": "BUY_UP",
+                "would_place_order": True,
+                "submitted": True,
+                "created_at": f"{today_prefix}T00:20:00Z",
+            },
+            {
+                "status": "would_place",
+                "action": "BUY_DOWN",
+                "would_place_order": True,
+                "submitted": False,
+                "created_at": yesterday.isoformat(),
+            },
+        ],
+    )
 
     decision_events = [
         {
@@ -927,6 +961,13 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
     assert today["maker"]["buy_one_rate"] == 0.5
     assert today["maker"]["blocks"] == 1
     assert today["maker"]["api_errors"] == 1
+    assert today["dryrun"]["records"] == 3
+    assert today["dryrun"]["would_place"] == 2
+    assert today["dryrun"]["blocked"] == 1
+    assert today["dryrun"]["submitted"] == 1
+    assert today["dryrun"]["latest_status"] == "would_place"
+    assert today["dryrun"]["latest_action"] == "BUY_UP"
+    assert today["dryrun"]["latest_block_reason"] == "stale_signal"
 
 
 def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
@@ -1052,6 +1093,19 @@ def test_live_page_surfaces_first_order_rail():
     assert "First Order Path" in source
     assert "Manual confirmation" in source
     assert "requires_confirmation" in source
+
+
+def test_live_page_surfaces_today_dryrun_summary():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "dryrun: {" in source
+    assert "today?.dryrun.records" in source
+    assert "today?.dryrun.would_place" in source
+    assert "today?.dryrun.blocked" in source
+    assert "today?.dryrun.submitted" in source
+    assert "today?.dryrun.latest_block_reason" in source
+    assert "Dry-run Today" in source
+    assert "Dry Submitted" in source
 
 
 def test_live_page_surfaces_clob_readonly_panel():

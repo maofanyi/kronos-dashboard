@@ -333,6 +333,15 @@ interface LiveSafety {
       blocks: number;
       api_errors: number;
     };
+    dryrun: {
+      records: number;
+      would_place: number;
+      blocked: number;
+      submitted: number;
+      latest_status?: string;
+      latest_action?: string;
+      latest_block_reason?: string;
+    };
   };
 }
 
@@ -829,6 +838,12 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
           />
           <HealthTile label="Buy-One Rate" value={percent(today?.maker.buy_one_rate ?? 0)} />
           <HealthTile label="Maker Blocks" value={`${today?.maker.blocks ?? 0} / ${today?.maker.api_errors ?? 0} err`} ok={makerClean} />
+          <HealthTile label="Dry-run Today" value={`${today?.dryrun.records ?? 0}`} />
+          <HealthTile label="Dry Would Place" value={`${today?.dryrun.would_place ?? 0}`} />
+          <HealthTile label="Dry Blocked" value={`${today?.dryrun.blocked ?? 0}`} ok={(today?.dryrun.blocked ?? 0) === 0 ? undefined : false} />
+          <HealthTile label="Dry Submitted" value={`${today?.dryrun.submitted ?? 0}`} ok={(today?.dryrun.submitted ?? 0) === 0} />
+          <HealthTile label="Dry Latest" value={today?.dryrun.latest_action || today?.dryrun.latest_status || "-"} />
+          <HealthTile label="Last Block" value={today?.dryrun.latest_block_reason || "-"} ok={today?.dryrun.latest_block_reason ? false : undefined} />
         </div>
 
         <div className="grid gap-3 rounded-md border border-zinc-900 bg-black/20 p-3">

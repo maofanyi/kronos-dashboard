@@ -277,7 +277,44 @@ def _live_dryrun_ledger_summary():
         "would_place_count": len(would_place),
         "blocked_count": len(blocked),
         "submitted_count": len(submitted),
+        "today": _live_dryrun_today_summary(rows),
         "latest": rows[-1] if rows else None,
+    }
+
+
+def _dryrun_record_ts(record):
+    for key in ("created_at", "decision_ts", "entry_ts", "settle_ts", "ts"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _is_blocked_dryrun_record(record):
+    return str(record.get("status", "")).lower() == "blocked" or bool(record.get("block_reason"))
+
+
+def _live_dryrun_today_summary(rows=None):
+    rows = [row for row in (rows or []) if isinstance(row, dict)]
+    today = datetime.now(timezone.utc).date()
+    todays = []
+    for index, row in enumerate(rows):
+        ts = _dryrun_record_ts(row)
+        if ts is not None and ts.date() == today:
+            todays.append((index, row, ts))
+    todays_sorted = sorted(todays, key=lambda item: (item[2], item[0]))
+    today_rows = [row for _, row, _ in todays_sorted]
+    blocked_rows = [row for row in today_rows if _is_blocked_dryrun_record(row)]
+    latest = today_rows[-1] if today_rows else {}
+    latest_blocked = blocked_rows[-1] if blocked_rows else {}
+    return {
+        "records": len(today_rows),
+        "would_place": sum(1 for row in today_rows if row.get("would_place_order") is True),
+        "blocked": len(blocked_rows),
+        "submitted": sum(1 for row in today_rows if bool(row.get("submitted"))),
+        "latest_status": str(latest.get("status") or ""),
+        "latest_action": str(latest.get("action") or ""),
+        "latest_block_reason": str(latest_blocked.get("block_reason") or latest_blocked.get("reason") or ""),
     }
 
 
@@ -613,9 +650,10 @@ def _source_events_for_day(source, day, limit=1000):
     ]
 
 
-def _live_today_summary(checkpoint=None, risk_summary=None):
+def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None):
     checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
     risk_summary = risk_summary if isinstance(risk_summary, dict) else _live_risk_summary(checkpoint)
+    dryrun_summary = dryrun_summary if isinstance(dryrun_summary, dict) else _live_dryrun_ledger_summary()
     today = datetime.now(timezone.utc).date()
 
     trades = [item for item in checkpoint.get("trades", []) or [] if isinstance(item, dict)]
@@ -681,6 +719,7 @@ def _live_today_summary(checkpoint=None, risk_summary=None):
             "blocks": maker_summary.get("total_blocks", 0),
             "api_errors": maker_summary.get("api_error_count", 0),
         },
+        "dryrun": dryrun_summary.get("today") or _live_dryrun_today_summary(),
     }
 
 
@@ -938,7 +977,7 @@ def _safety_report_summary():
     allowance_ok = bool(allowance_check and allowance_check.get("ok"))
     real_orders_enabled = real_orders_env == "YES"
     risk_summary = _live_risk_summary(checkpoint)
-    today_summary = _live_today_summary(checkpoint, risk_summary)
+    today_summary = _live_today_summary(checkpoint, risk_summary, dryrun_summary)
 
     checklist = [
         {
