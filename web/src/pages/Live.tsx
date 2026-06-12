@@ -369,6 +369,18 @@ interface LiveSafety {
       latest_status?: string;
       latest_action?: string;
       latest_block_reason?: string;
+      latest_at?: string | null;
+      latest_age_seconds?: number | null;
+    };
+    activity?: {
+      latest_signal_at?: string | null;
+      latest_signal_age_seconds?: number | null;
+      latest_trade_at?: string | null;
+      latest_trade_age_seconds?: number | null;
+      latest_order_at?: string | null;
+      latest_order_age_seconds?: number | null;
+      latest_dryrun_at?: string | null;
+      latest_dryrun_age_seconds?: number | null;
     };
   };
 }
@@ -872,6 +884,10 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
           <HealthTile label="Dry Submitted" value={`${today?.dryrun.submitted ?? 0}`} ok={(today?.dryrun.submitted ?? 0) === 0} />
           <HealthTile label="Dry Latest" value={today?.dryrun.latest_action || today?.dryrun.latest_status || "-"} />
           <HealthTile label="Last Block" value={today?.dryrun.latest_block_reason || "-"} ok={today?.dryrun.latest_block_reason ? false : undefined} />
+          <HealthTile label="Latest Signal" value={ageLabel(today?.activity?.latest_signal_age_seconds)} ok={(today?.activity?.latest_signal_age_seconds ?? 9999) < 600} />
+          <HealthTile label="Latest Trade" value={ageLabel(today?.activity?.latest_trade_age_seconds)} />
+          <HealthTile label="Latest Order" value={ageLabel(today?.activity?.latest_order_age_seconds)} />
+          <HealthTile label="Latest Dry-run" value={ageLabel(today?.activity?.latest_dryrun_age_seconds)} ok={(today?.activity?.latest_dryrun_age_seconds ?? 9999) < 600} />
         </div>
 
         <div className="grid gap-3 rounded-md border border-zinc-900 bg-black/20 p-3">

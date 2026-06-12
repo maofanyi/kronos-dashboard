@@ -1130,6 +1130,14 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
     assert today["dryrun"]["latest_status"] == "would_place"
     assert today["dryrun"]["latest_action"] == "BUY_UP"
     assert today["dryrun"]["latest_block_reason"] == "stale_signal"
+    assert today["activity"]["latest_signal_at"] == f"{today_prefix}T00:05:00Z"
+    assert today["activity"]["latest_trade_at"] == f"{today_prefix}T02:00:00Z"
+    assert today["activity"]["latest_order_at"] == f"{today_prefix}T03:05:00Z"
+    assert today["activity"]["latest_dryrun_at"] == f"{today_prefix}T00:20:00Z"
+    assert today["activity"]["latest_signal_age_seconds"] >= 0
+    assert today["activity"]["latest_trade_age_seconds"] >= 0
+    assert today["activity"]["latest_order_age_seconds"] >= 0
+    assert today["activity"]["latest_dryrun_age_seconds"] >= 0
 
 
 def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
@@ -1280,6 +1288,20 @@ def test_live_page_surfaces_today_dryrun_summary():
     assert "today?.dryrun.latest_block_reason" in source
     assert "Dry-run Today" in source
     assert "Dry Submitted" in source
+
+
+def test_live_page_surfaces_today_activity_summary():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "activity?: {" in source
+    assert "today?.activity?.latest_signal_age_seconds" in source
+    assert "today?.activity?.latest_trade_age_seconds" in source
+    assert "today?.activity?.latest_order_age_seconds" in source
+    assert "today?.activity?.latest_dryrun_age_seconds" in source
+    assert "Latest Signal" in source
+    assert "Latest Trade" in source
+    assert "Latest Order" in source
+    assert "Latest Dry-run" in source
 
 
 def test_live_page_surfaces_clob_readonly_panel():

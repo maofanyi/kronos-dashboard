@@ -296,6 +296,25 @@ def _is_blocked_dryrun_record(record):
     return str(record.get("status", "")).lower() == "blocked" or bool(record.get("block_reason"))
 
 
+def _iso_utc(ts):
+    if ts is None:
+        return None
+    return ts.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _timestamp_age_seconds(ts, now_dt=None):
+    if ts is None:
+        return None
+    now_dt = now_dt or datetime.now(timezone.utc)
+    return max(0, int((now_dt - ts.astimezone(timezone.utc)).total_seconds()))
+
+
+def _latest_timestamp_summary(timestamps, now_dt=None):
+    valid = [ts.astimezone(timezone.utc) for ts in timestamps if ts is not None]
+    latest = max(valid) if valid else None
+    return _iso_utc(latest), _timestamp_age_seconds(latest, now_dt)
+
+
 def _live_dryrun_today_summary(rows=None):
     rows = [row for row in (rows or []) if isinstance(row, dict)]
     today = datetime.now(timezone.utc).date()
@@ -308,7 +327,9 @@ def _live_dryrun_today_summary(rows=None):
     today_rows = [row for _, row, _ in todays_sorted]
     blocked_rows = [row for row in today_rows if _is_blocked_dryrun_record(row)]
     latest = today_rows[-1] if today_rows else {}
+    latest_ts = todays_sorted[-1][2] if todays_sorted else None
     latest_blocked = blocked_rows[-1] if blocked_rows else {}
+    latest_at, latest_age_seconds = _latest_timestamp_summary([latest_ts])
     return {
         "records": len(today_rows),
         "would_place": sum(1 for row in today_rows if row.get("would_place_order") is True),
@@ -317,6 +338,8 @@ def _live_dryrun_today_summary(rows=None):
         "latest_status": str(latest.get("status") or ""),
         "latest_action": str(latest.get("action") or ""),
         "latest_block_reason": str(latest_blocked.get("block_reason") or latest_blocked.get("reason") or ""),
+        "latest_at": latest_at,
+        "latest_age_seconds": latest_age_seconds,
     }
 
 
@@ -705,7 +728,8 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
     checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
     risk_summary = risk_summary if isinstance(risk_summary, dict) else _live_risk_summary(checkpoint)
     dryrun_summary = dryrun_summary if isinstance(dryrun_summary, dict) else _live_dryrun_ledger_summary()
-    today = datetime.now(timezone.utc).date()
+    now_dt = datetime.now(timezone.utc)
+    today = now_dt.date()
 
     trades = [item for item in checkpoint.get("trades", []) or [] if isinstance(item, dict)]
     pending = [item for item in checkpoint.get("pending_orders", []) or [] if isinstance(item, dict)]
@@ -739,6 +763,21 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
     metrics = risk_summary.get("metrics") or {}
     limits = risk_summary.get("limits") or {}
     max_daily_loss = abs(float(limits.get("max_daily_loss_usdc", 0) or 0))
+    dryrun_today = dryrun_summary.get("today") or _live_dryrun_today_summary()
+    latest_signal_at, latest_signal_age_seconds = _latest_timestamp_summary(
+        [_parse_dt(event.get("_t") or event.get("ts") or event.get("created_at")) for event in events],
+        now_dt,
+    )
+    latest_trade_at, latest_trade_age_seconds = _latest_timestamp_summary(
+        [_record_ts(record) for record in todays_settled],
+        now_dt,
+    )
+    latest_order_at, latest_order_age_seconds = _latest_timestamp_summary(
+        [_record_ts(record) for record in [*pending, *open_orders] if _is_today_record(record, today)],
+        now_dt,
+    )
+    latest_dryrun_at = dryrun_today.get("latest_at")
+    latest_dryrun_age_seconds = dryrun_today.get("latest_age_seconds")
 
     return {
         "day_utc": today.isoformat(),
@@ -770,7 +809,17 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
             "blocks": maker_summary.get("total_blocks", 0),
             "api_errors": maker_summary.get("api_error_count", 0),
         },
-        "dryrun": dryrun_summary.get("today") or _live_dryrun_today_summary(),
+        "dryrun": dryrun_today,
+        "activity": {
+            "latest_signal_at": latest_signal_at,
+            "latest_signal_age_seconds": latest_signal_age_seconds,
+            "latest_trade_at": latest_trade_at,
+            "latest_trade_age_seconds": latest_trade_age_seconds,
+            "latest_order_at": latest_order_at,
+            "latest_order_age_seconds": latest_order_age_seconds,
+            "latest_dryrun_at": latest_dryrun_at,
+            "latest_dryrun_age_seconds": latest_dryrun_age_seconds,
+        },
     }
 
 
