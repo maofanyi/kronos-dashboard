@@ -143,6 +143,8 @@ interface LiveSafety {
   clob_readonly?: {
     available: boolean;
     ready: boolean;
+    status_reason?: string;
+    next_action?: string;
     report: string;
     report_mtime?: string | null;
     report_age_seconds?: number | null;
@@ -883,6 +885,16 @@ function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | nu
             label="Report Age"
             value={ageLabel(audit?.report_age_seconds)}
             ok={audit?.fresh}
+          />
+          <HealthTile
+            label="Status Reason"
+            value={audit?.status_reason?.replace(/_/g, " ") || "-"}
+            ok={audit?.ready === true}
+          />
+          <HealthTile
+            label="Next Action"
+            value={audit?.next_action || "-"}
+            ok={audit?.ready === true}
           />
           <HealthTile label="CLOB Auth" value={audit?.authenticated ? "OK" : "-"} ok={audit?.authenticated} />
           <HealthTile label="Account Read" value={audit?.account_read_ok ? "OK" : "-"} ok={audit?.account_read_ok} />

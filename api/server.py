@@ -791,6 +791,42 @@ def _clob_quote_probe_summary(probe):
     }
 
 
+def _clob_readonly_status(
+    *,
+    available,
+    fresh,
+    authenticated,
+    account_read_ok,
+    allowance_read_ok,
+    open_orders_read_ok,
+    open_orders_count,
+    market_probe_count,
+    quote_executable_count,
+    blockers,
+):
+    if not available:
+        return "missing_report", "Run live trade gate report"
+    if not fresh:
+        return "stale_report", "Refresh live trade gate report"
+    if not authenticated:
+        return "auth_blocked", "Run CLOB read-only audit"
+    if not account_read_ok:
+        return "account_read_blocked", "Check CLOB account read access"
+    if not allowance_read_ok:
+        return "allowance_read_blocked", "Check CLOB allowance read access"
+    if not open_orders_read_ok:
+        return "open_orders_read_blocked", "Check CLOB open orders access"
+    if open_orders_count != 0:
+        return "open_orders_present", "Cancel or reconcile open orders"
+    if market_probe_count == 0:
+        return "missing_quote_probes", "Run live trade gate report"
+    if quote_executable_count != market_probe_count:
+        return "quote_probe_blocked", "Review CLOB quote probes"
+    if blockers:
+        return "live_gate_blocked", "Clear live gate blockers"
+    return "ready", "Ready for guarded preflight"
+
+
 def _safety_report_summary():
     allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
     if not allowance_report:
@@ -978,6 +1014,8 @@ def _safety_report_summary():
         and clob_report_age_seconds is not None
         and clob_report_age_seconds <= CLOB_READONLY_MAX_AGE_SECONDS
     )
+    clob_blockers = live_gate_summary.get("blockers", []) or []
+    clob_readonly_available = bool(live_gate_summary.get("available") or allowance_report)
     clob_readonly_ready = (
         clob_authenticated
         and account_read_ok
@@ -987,10 +1025,25 @@ def _safety_report_summary():
         and market_probe_count > 0
         and quote_executable_count == market_probe_count
         and clob_report_fresh
+        and not clob_blockers
+    )
+    clob_status_reason, clob_next_action = _clob_readonly_status(
+        available=clob_readonly_available,
+        fresh=clob_report_fresh,
+        authenticated=clob_authenticated,
+        account_read_ok=account_read_ok,
+        allowance_read_ok=allowance_read_ok,
+        open_orders_read_ok=open_orders_read_ok,
+        open_orders_count=open_orders_count,
+        market_probe_count=market_probe_count,
+        quote_executable_count=quote_executable_count,
+        blockers=clob_blockers,
     )
     clob_readonly = {
-        "available": bool(live_gate_summary.get("available") or allowance_report),
+        "available": clob_readonly_available,
         "ready": clob_readonly_ready,
+        "status_reason": clob_status_reason,
+        "next_action": clob_next_action,
         "report": str(clob_report_path or ""),
         "report_mtime": clob_report_mtime,
         "report_age_seconds": clob_report_age_seconds,
@@ -1012,7 +1065,7 @@ def _safety_report_summary():
         "funding_ready": gate_funding.get("funding_ready"),
         "balance_shortfall_usdc": gate_funding.get("balance_shortfall_usdc"),
         "allowance_shortfall_usdc": gate_funding.get("allowance_shortfall_usdc"),
-        "blockers": live_gate_summary.get("blockers", []),
+        "blockers": clob_blockers,
     }
 
     return {
