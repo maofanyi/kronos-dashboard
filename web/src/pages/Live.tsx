@@ -184,6 +184,10 @@ interface LiveSafety {
     available: boolean;
     ok: boolean;
     submitted: boolean;
+    created_at: string;
+    age_seconds?: number | null;
+    fresh: boolean;
+    max_age_seconds: number;
     blockers: string[];
     gate_ready: boolean;
     smoke_mode: string;
@@ -405,20 +409,23 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
   const dryrunClean = (safety?.dryrun?.submitted_count ?? 0) === 0;
   const gateReady = safety?.live_gate?.ready_for_live_smoke === true;
   const preflightOk = safety?.preflight_chain?.ok === true;
+  const preflightFresh = safety?.preflight_chain?.fresh === true;
   const preflightSubmitted = safety?.preflight_chain?.submitted === true;
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
+  const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
+  const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
   return (
     <CollapsiblePanel
       title="Live Safety"
       sub={source}
-      right={<StatusPill ok={!liveEnabled && health?.state === "ok" && dryrunClean && preflightOk && !preflightSubmitted} label={!liveEnabled && health?.state === "ok" && dryrunClean && preflightOk && !preflightSubmitted ? "Safe" : "Review"} />}
+      right={<StatusPill ok={!liveEnabled && health?.state === "ok" && dryrunClean && preflightReady} label={!liveEnabled && health?.state === "ok" && dryrunClean && preflightReady ? "Safe" : "Review"} />}
       summary={
         <div className="flex min-w-0 flex-wrap gap-2">
           <StatusPill ok={!liveEnabled} label={liveEnabled ? "Real orders enabled" : "Locked"} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
           <StatusPill ok={dryrunClean} label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`} />
           <StatusPill ok={gateReady} label={gateReady ? "Gate ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`} />
-          <StatusPill ok={preflightOk && !preflightSubmitted} label={preflightOk ? "Preflight ready" : `Preflight ${preflightBlockers}`} />
+          <StatusPill ok={preflightReady} label={preflightReady ? `Preflight ${preflightAge}` : `Preflight ${preflightBlockers}`} />
           <span className="min-w-0 truncate font-mono text-xs text-zinc-500">{source}</span>
         </div>
       }
@@ -431,7 +438,7 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${safety?.funding?.min_allowance ?? "-"}`} />
           <StatusPill ok={dryrunClean} label={`Dry-run submitted ${safety?.dryrun?.submitted_count ?? 0}`} />
           <StatusPill ok={gateReady} label={`Gate blockers ${safety?.live_gate?.blockers?.length ?? 0}`} />
-          <StatusPill ok={preflightOk && !preflightSubmitted} label={preflightSubmitted ? "Preflight submitted" : `Preflight blockers ${preflightBlockers}`} />
+          <StatusPill ok={preflightReady} label={preflightSubmitted ? "Preflight submitted" : `Preflight ${preflightAge}`} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
         </div>
       </div>

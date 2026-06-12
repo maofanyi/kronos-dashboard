@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from api import server
@@ -108,6 +109,7 @@ def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
     _write_json(
         report_dir / "live_preflight_chain_latest.json",
         {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
             "ok": False,
             "submitted": False,
             "blockers": ["balance_meets_minimum", "live trade gate not ready"],
@@ -131,13 +133,45 @@ def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
     assert summary["preflight_chain"]["available"] is True
     assert summary["preflight_chain"]["ok"] is False
     assert summary["preflight_chain"]["submitted"] is False
+    assert summary["preflight_chain"]["created_at"]
+    assert 0 <= summary["preflight_chain"]["age_seconds"] < 30
+    assert summary["preflight_chain"]["fresh"] is True
     assert summary["preflight_chain"]["blockers"] == ["balance_meets_minimum", "live trade gate not ready"]
     assert summary["preflight_chain"]["smoke_mode"] == "blocked"
     assert summary["preflight_chain"]["settled"] == 1
     assert summary["reports"]["live_preflight"].endswith("live_preflight_chain_latest.json")
     assert checks["live_preflight_available"]["ok"] is True
+    assert checks["live_preflight_fresh"]["ok"] is True
     assert checks["live_preflight_chain_ok"]["ok"] is False
     assert checks["live_preflight_no_submission"]["ok"] is True
+
+
+def test_live_safety_marks_stale_preflight_report_as_critical(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {"gate_ready": True, "smoke_mode": "preview", "open_orders": 0, "settled": 0, "risk_ok": True},
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["preflight_chain"]["fresh"] is False
+    assert summary["preflight_chain"]["age_seconds"] >= 600
+    assert checks["live_preflight_fresh"]["ok"] is False
+    assert checks["live_preflight_fresh"]["severity"] == "critical"
 
 
 def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
@@ -177,6 +211,8 @@ def test_live_page_surfaces_preflight_chain_status():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert "safety?.preflight_chain?.ok" in source
+    assert "safety?.preflight_chain?.fresh" in source
+    assert "safety?.preflight_chain?.age_seconds" in source
     assert "Preflight" in source
 
 
@@ -186,5 +222,7 @@ def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     assert "safety?.dryrun?.submitted_count" in source
     assert "safety?.live_gate?.ready_for_live_smoke" in source
     assert "safety?.preflight_chain?.ok" in source
+    assert "safety?.preflight_chain?.fresh" in source
+    assert "safety?.preflight_chain?.age_seconds" in source
     assert "Dry-run" in source
     assert "Preflight" in source

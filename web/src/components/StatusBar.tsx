@@ -59,6 +59,10 @@ interface SafetyData {
     available?: boolean;
     ok?: boolean;
     submitted?: boolean;
+    created_at?: string;
+    age_seconds?: number | null;
+    fresh?: boolean;
+    max_age_seconds?: number;
     blockers?: string[];
     gate_ready?: boolean;
     smoke_mode?: string;
@@ -220,9 +224,12 @@ export default function StatusBar() {
   const dryrunOk = (safety?.dryrun?.submitted_count ?? 0) === 0;
   const liveGateReady = safety?.live_gate?.ready_for_live_smoke === true;
   const preflightOk = safety?.preflight_chain?.ok === true;
+  const preflightFresh = safety?.preflight_chain?.fresh === true;
   const preflightSubmitted = safety?.preflight_chain?.submitted === true;
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
-  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightOk || preflightSubmitted;
+  const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
+  const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
+  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady;
   const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
 
   return (
@@ -259,8 +266,8 @@ export default function StatusBar() {
             label={liveGateReady ? "Gate ready" : `Gate ${safety?.live_gate?.blockers?.length ?? 0}`}
           />
           <StatusChip
-            ok={preflightOk && !preflightSubmitted}
-            label={preflightOk ? "Preflight ready" : `Preflight ${preflightBlockers}`}
+            ok={preflightReady}
+            label={preflightReady ? `Preflight ${preflightAge}` : `Preflight ${preflightBlockers}`}
           />
           <span className="min-w-0 max-w-[220px] truncate font-mono text-zinc-600 md:max-w-[360px]">{source}</span>
           <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -308,8 +315,8 @@ export default function StatusBar() {
               />
               <DetailTile
                 label="Preflight"
-                value={preflightSubmitted ? "submitted" : preflightOk ? "ready" : `${preflightBlockers} blockers`}
-                ok={preflightOk && !preflightSubmitted}
+                value={preflightSubmitted ? "submitted" : preflightReady ? preflightAge : `${preflightBlockers} blockers`}
+                ok={preflightReady}
               />
             </div>
 

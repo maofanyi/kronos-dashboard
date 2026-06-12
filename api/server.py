@@ -39,6 +39,7 @@ RISK_LIMITS = {
     "max_consecutive_losses": int(os.environ.get("MAX_CONSECUTIVE_LOSSES", "3")),
     "max_open_or_pending_orders": int(os.environ.get("MAX_OPEN_OR_PENDING_ORDERS", "1")),
 }
+LIVE_PREFLIGHT_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_LIVE_PREFLIGHT_MAX_AGE_SECONDS", "180"))
 
 
 def _configured_paper_source():
@@ -305,11 +306,21 @@ def _live_preflight_chain_summary(path=None, report=None):
     summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
     blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
     components = report.get("components") if isinstance(report.get("components"), dict) else {}
+    created_at = str(report.get("created_at") or "")
+    created_ts = _parse_dt(created_at)
+    age_seconds = None
+    if created_ts is not None:
+        age_seconds = max(0, int((datetime.now(timezone.utc) - created_ts).total_seconds()))
+    fresh = bool(report) and age_seconds is not None and age_seconds <= LIVE_PREFLIGHT_MAX_AGE_SECONDS
     return {
         "report": str(path) if path else "",
         "available": bool(report),
         "ok": bool(report.get("ok")),
         "submitted": bool(report.get("submitted")),
+        "created_at": created_at,
+        "age_seconds": age_seconds,
+        "fresh": fresh,
+        "max_age_seconds": LIVE_PREFLIGHT_MAX_AGE_SECONDS,
         "blockers": blockers,
         "gate_ready": bool(summary.get("gate_ready")),
         "smoke_mode": str(summary.get("smoke_mode") or ""),
@@ -596,6 +607,14 @@ def _safety_report_summary():
             "ok": preflight_summary["ok"],
             "value": len(preflight_summary["blockers"]),
             "expected": "0 blockers",
+            "severity": "critical",
+        },
+        {
+            "key": "live_preflight_fresh",
+            "label": "Live preflight fresh",
+            "ok": preflight_summary["fresh"],
+            "value": preflight_summary["age_seconds"],
+            "expected": f"<= {LIVE_PREFLIGHT_MAX_AGE_SECONDS}s",
             "severity": "critical",
         },
         {
