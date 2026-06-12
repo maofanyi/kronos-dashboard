@@ -1215,6 +1215,18 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "today pass rate" in source
 
 
+def test_live_page_surfaces_readiness_summary_in_top_kpis():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const readinessSummary = safety?.readiness_summary" in source
+    assert "const readinessPassed = readinessSummary?.passed" in source
+    assert "const readinessCritical = readinessSummary?.critical_blockers" in source
+    assert 'label="Readiness"' in source
+    assert 'value={`${readinessPassed}/${readinessTotal}`}' in source
+    assert "Critical ${readinessCritical}" in source
+    assert "xl:grid-cols-9" in source
+
+
 def test_live_page_today_cockpit_uses_readable_separators():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -1274,7 +1286,7 @@ def test_live_page_surfaces_operator_summary_card():
     assert "operator?.next_action" in source
     assert "operator?.primary_blocker" in source
     assert 'label="Next"' in source
-    assert "xl:grid-cols-8" in source
+    assert "xl:grid-cols-9" in source
 
 
 def test_live_page_surfaces_today_dryrun_summary():
