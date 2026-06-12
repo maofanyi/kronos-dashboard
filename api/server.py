@@ -1,7 +1,11 @@
 """Flask API server for Kronos Dashboard."""
+import hashlib
+import hmac
 import json
 import os
 import sqlite3
+import sys
+import threading
 import time
 from collections import deque
 from datetime import datetime, timedelta, timezone
@@ -17,6 +21,12 @@ CORS(app)
 
 DB_PATH = Path(__file__).parent.parent / "data" / "dashboard.db"
 BTC_CACHE = {"price": None, "ts": 0}
+BTC_LIVE_CACHE = {"price": None, "timestamp": None, "received_at": None, "source": None, "status": "idle", "error": None}
+BTC_LIVE_TICKS = deque(maxlen=600)
+BTC_LIVE_LOCK = threading.Lock()
+BTC_LIVE_WORKER = {"started": False, "thread": None}
+BTC_CANDLE_CACHE = {}
+BTC_CANDLE_LOCK = threading.Lock()
 KRONOS_CHECKPOINT_DIR = Path(os.environ.get("KRONOS_DATA_DIR", "../Kronos/data/checkpoints"))
 KRONOS_LOG_DIR = KRONOS_CHECKPOINT_DIR.parent / "logs"
 KRONOS_FEATURE_DIR = KRONOS_CHECKPOINT_DIR.parent / "features"
@@ -1434,6 +1444,572 @@ def api_live_safety():
 @app.route("/api/live-risk")
 def api_live_risk():
     return jsonify(_live_risk_summary())
+
+
+# ---------------------------------------------------------------------------
+# BTC market chart (read-only Chainlink reference)
+# ---------------------------------------------------------------------------
+
+def _kronos_root():
+    configured = os.environ.get("KRONOS_ROOT")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    return KRONOS_CHECKPOINT_DIR.expanduser().resolve().parent.parent
+
+
+def _ensure_kronos_src_on_path():
+    src = _kronos_root() / "src"
+    if src.exists() and str(src) not in sys.path:
+        sys.path.insert(0, str(src))
+
+
+def _load_kronos_env():
+    env_path = _kronos_root() / ".env"
+    if not env_path.exists():
+        return
+    try:
+        lines = env_path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, value = stripped.split("=", 1)
+        key = key.strip()
+        if not key or key in os.environ:
+            continue
+        os.environ[key] = value.strip().strip('"').strip("'")
+
+
+def _btc_live_now():
+    return time.time()
+
+
+def _chainlink_streams_body_hash(body=b""):
+    if isinstance(body, str):
+        body = body.encode("utf-8")
+    return hashlib.sha256(body).hexdigest()
+
+
+def _chainlink_streams_auth_headers(method, full_path, api_key, secret, timestamp_ms=None, body=b""):
+    timestamp = str(timestamp_ms if timestamp_ms is not None else int(_btc_live_now() * 1000))
+    body_hash = _chainlink_streams_body_hash(body)
+    string_to_sign = f"{str(method).upper()} {full_path} {body_hash} {api_key} {timestamp}"
+    signature = hmac.new(str(secret).encode("utf-8"), string_to_sign.encode("utf-8"), hashlib.sha256).hexdigest()
+    return {
+        "Authorization": api_key,
+        "X-Authorization-Timestamp": timestamp,
+        "X-Authorization-Signature-SHA256": signature,
+    }
+
+
+def _chainlink_streams_config_status():
+    _load_kronos_env()
+    user_id = os.environ.get("CHAINLINK_STREAMS_USER_ID")
+    secret = os.environ.get("CHAINLINK_STREAMS_SECRET")
+    feed_id = os.environ.get("CHAINLINK_STREAMS_BTC_FEED_ID")
+    endpoint = os.environ.get("CHAINLINK_STREAMS_WS_ENDPOINT", "wss://ws.dataengine.chain.link").rstrip("/")
+    if not feed_id:
+        return {
+            "source": "chainlink_streams_ws",
+            "status": "missing_feed_id",
+            "message": "Set CHAINLINK_STREAMS_BTC_FEED_ID to enable direct Chainlink Streams WebSocket.",
+            "endpoint": endpoint,
+        }
+    missing = [name for name, value in (("user_id", user_id), ("secret", secret)) if not value]
+    if missing:
+        return {
+            "source": "chainlink_streams_ws",
+            "status": "missing_credentials",
+            "message": f"Missing Chainlink Streams {', '.join(missing)}.",
+            "endpoint": endpoint,
+            "feed_id_hint": f"{feed_id[:8]}...{feed_id[-6:]}",
+        }
+    return {
+        "source": "chainlink_streams_ws",
+        "status": "configured",
+        "endpoint": endpoint,
+        "feed_id_hint": f"{feed_id[:8]}...{feed_id[-6:]}",
+    }
+
+
+def _latest_chainlink_streams_price(now=None):
+    status = _chainlink_streams_config_status()
+    return {
+        "price": None,
+        "timestamp": None,
+        "source": status["source"],
+        "status": status["status"],
+        "error": status.get("message"),
+    }
+
+
+def _polymarket_rtds_subscription():
+    return {
+        "action": "subscribe",
+        "subscriptions": [
+            {
+                "topic": "crypto_prices_chainlink",
+                "type": "*",
+                "filters": "",
+            }
+        ],
+    }
+
+
+def _store_btc_live_price(price, timestamp_ms=None, source="polymarket_rtds_chainlink", status="fresh"):
+    try:
+        numeric_price = float(price)
+    except (TypeError, ValueError):
+        return
+    if timestamp_ms is None:
+        timestamp_ms = int(_btc_live_now() * 1000)
+    try:
+        ts = datetime.fromtimestamp(float(timestamp_ms) / 1000, tz=timezone.utc)
+    except (TypeError, ValueError, OSError):
+        ts = datetime.now(timezone.utc)
+    record = {
+        "price": numeric_price,
+        "timestamp": _iso_timestamp(ts),
+        "source": source,
+        "status": status,
+    }
+    with BTC_LIVE_LOCK:
+        BTC_LIVE_CACHE.update({**record, "received_at": _btc_live_now(), "error": None})
+        BTC_LIVE_TICKS.append(record)
+
+
+def _handle_polymarket_rtds_message(raw_message):
+    if not raw_message:
+        return
+    try:
+        message = json.loads(raw_message) if isinstance(raw_message, str) else raw_message
+    except (TypeError, json.JSONDecodeError):
+        return
+    if not isinstance(message, dict):
+        return
+    payload = message.get("payload") or {}
+    if not isinstance(payload, dict):
+        return
+    if isinstance(payload.get("data"), list):
+        for item in payload["data"]:
+            if not isinstance(item, dict):
+                continue
+            _store_btc_live_price(
+                item.get("value"),
+                timestamp_ms=item.get("timestamp") or message.get("timestamp"),
+                source="polymarket_rtds_chainlink",
+            )
+        return
+    if message.get("topic") != "crypto_prices_chainlink":
+        return
+    symbol = str(payload.get("symbol") or "").lower()
+    if symbol != "btc/usd":
+        return
+    value = payload.get("value")
+    timestamp_ms = payload.get("timestamp") or message.get("timestamp")
+    _store_btc_live_price(value, timestamp_ms=timestamp_ms, source="polymarket_rtds_chainlink")
+
+
+def _mark_btc_live_error(error):
+    with BTC_LIVE_LOCK:
+        BTC_LIVE_CACHE.update({"status": "error", "error": str(error)[:160], "received_at": _btc_live_now()})
+
+
+def _run_polymarket_rtds_worker():
+    url = os.environ.get("POLYMARKET_RTDS_WS_URL", "wss://ws-live-data.polymarket.com")
+    while True:
+        try:
+            import websocket
+
+            ws = websocket.create_connection(url, timeout=10)
+            ws.settimeout(2)
+            ws.send(json.dumps(_polymarket_rtds_subscription()))
+            last_ping = 0.0
+            while True:
+                if _btc_live_now() - last_ping >= 5:
+                    ws.send("PING")
+                    last_ping = _btc_live_now()
+                try:
+                    message = ws.recv()
+                except websocket.WebSocketTimeoutException:
+                    continue
+                if message and message not in ("PONG", "PING"):
+                    _handle_polymarket_rtds_message(message)
+        except Exception as exc:
+            _mark_btc_live_error(exc)
+            time.sleep(3)
+
+
+def _ensure_polymarket_rtds_worker_started():
+    if os.environ.get("DISABLE_POLYMARKET_RTDS") == "1":
+        return
+    with BTC_LIVE_LOCK:
+        if BTC_LIVE_WORKER["started"]:
+            return
+        BTC_LIVE_WORKER["started"] = True
+    thread = threading.Thread(target=_run_polymarket_rtds_worker, name="polymarket-rtds-chainlink-btc", daemon=True)
+    BTC_LIVE_WORKER["thread"] = thread
+    thread.start()
+
+
+def _latest_polymarket_chainlink_price(now=None, start_worker=True):
+    if start_worker:
+        _ensure_polymarket_rtds_worker_started()
+    now_ts = _utc_timestamp(now) if now is not None else pd.Timestamp(datetime.now(timezone.utc))
+    with BTC_LIVE_LOCK:
+        cached = dict(BTC_LIVE_CACHE)
+    price = cached.get("price")
+    timestamp = cached.get("timestamp")
+    if price is None or not timestamp:
+        return {
+            "price": None,
+            "timestamp": None,
+            "source": "polymarket_rtds_chainlink",
+            "status": cached.get("status") or "warming_up",
+            "error": cached.get("error"),
+        }
+    age = abs((now_ts - _utc_timestamp(timestamp)).total_seconds())
+    status = "fresh" if age <= 15 else "stale"
+    return {
+        "price": float(price),
+        "timestamp": timestamp,
+        "source": cached.get("source") or "polymarket_rtds_chainlink",
+        "status": status,
+        "error": cached.get("error"),
+    }
+
+
+def _latest_btc_live_price(now=None):
+    direct = _latest_chainlink_streams_price(now=now)
+    if direct.get("price") is not None:
+        return direct
+    rtds = _latest_polymarket_chainlink_price(now=now)
+    if rtds.get("price") is not None:
+        return rtds
+    return {
+        "price": None,
+        "timestamp": None,
+        "source": "polymarket_rtds_chainlink",
+        "status": rtds.get("status") or direct.get("status") or "warming_up",
+        "error": rtds.get("error") or direct.get("error"),
+    }
+
+
+def _live_ticks_between(start_ts, end_ts):
+    start = _utc_timestamp(start_ts)
+    end = _utc_timestamp(end_ts)
+    with BTC_LIVE_LOCK:
+        ticks = list(BTC_LIVE_TICKS)
+    return [
+        {
+            "timestamp": item["timestamp"],
+            "price": round(float(item["price"]), 4),
+            "source": item.get("source") or "polymarket_rtds_chainlink",
+        }
+        for item in ticks
+        if start <= _utc_timestamp(item["timestamp"]) <= end
+    ]
+
+
+def _get_cached_btc_candles(cache_key, ttl_seconds, fetcher):
+    now = _btc_live_now()
+    with BTC_CANDLE_LOCK:
+        cached = BTC_CANDLE_CACHE.get(cache_key)
+        if cached and now - cached["ts"] <= float(ttl_seconds):
+            return cached["frame"].copy()
+
+    frame = fetcher()
+    normalized = frame.copy() if hasattr(frame, "copy") else frame
+    with BTC_CANDLE_LOCK:
+        BTC_CANDLE_CACHE[cache_key] = {"ts": now, "frame": normalized.copy() if hasattr(normalized, "copy") else normalized}
+    return normalized
+
+
+def _utc_timestamp(value=None):
+    if value is None:
+        return pd.Timestamp(datetime.now(timezone.utc))
+    ts = pd.Timestamp(value)
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _iso_timestamp(value):
+    return _utc_timestamp(value).to_pydatetime().isoformat()
+
+
+def _btc_market_window(now=None, start_ts=None):
+    now_ts = _utc_timestamp(now)
+    anchor = _utc_timestamp(start_ts) if start_ts is not None else now_ts
+    minute = (anchor.minute // 5) * 5
+    start = anchor.replace(minute=minute, second=0, microsecond=0, nanosecond=0)
+    end = start + pd.Timedelta(minutes=5)
+    previous_start = start - pd.Timedelta(minutes=5)
+    next_start = end
+    return {
+        "slug": f"btc-updown-5m-{int(end.timestamp())}",
+        "label": f"{start.strftime('%H:%M')}-{end.strftime('%H:%M')}",
+        "start_ts": _iso_timestamp(start),
+        "end_ts": _iso_timestamp(end),
+        "previous_start_ts": _iso_timestamp(previous_start),
+        "next_start_ts": _iso_timestamp(next_start),
+    }
+
+
+def _normalize_ohlc_frame(frame):
+    if frame is None:
+        return pd.DataFrame(columns=["open", "high", "low", "close"])
+    normalized = frame.copy()
+    if not isinstance(normalized.index, pd.DatetimeIndex):
+        if "timestamp" not in normalized.columns:
+            return pd.DataFrame(columns=["open", "high", "low", "close"])
+        normalized.index = pd.to_datetime(normalized.pop("timestamp"), utc=True)
+    elif normalized.index.tz is None:
+        normalized.index = normalized.index.tz_localize("UTC")
+    else:
+        normalized.index = normalized.index.tz_convert("UTC")
+
+    columns = [col for col in ("open", "high", "low", "close") if col in normalized.columns]
+    normalized = normalized[columns].copy()
+    for col in ("open", "high", "low", "close"):
+        if col not in normalized.columns:
+            normalized[col] = pd.NA
+        normalized[col] = pd.to_numeric(normalized[col], errors="coerce")
+    return normalized.dropna(subset=["open", "high", "low", "close"]).sort_index()
+
+
+def _price_at_or_before(frame, ts):
+    if frame.empty:
+        return None, None
+    target = _utc_timestamp(ts)
+    eligible = frame.loc[frame.index <= target]
+    if eligible.empty:
+        return None, None
+    row_ts = eligible.index[-1]
+    return row_ts, float(eligible.iloc[-1]["close"])
+
+
+def _price_at(frame, ts):
+    target = _utc_timestamp(ts)
+    if target not in frame.index:
+        return None
+    return float(frame.loc[target, "close"])
+
+
+def _result_label(target_price, settle_price):
+    if target_price is None or settle_price is None:
+        return "PENDING"
+    if settle_price > target_price:
+        return "UP"
+    if settle_price < target_price:
+        return "DOWN"
+    return "FLAT"
+
+
+def _build_history(frame, current_start, limit=8):
+    history = []
+    starts = [ts for ts in frame.index if ts < current_start]
+    for start in reversed(starts):
+        settle = start + pd.Timedelta(minutes=5)
+        if settle not in frame.index:
+            continue
+        target_price = _price_at(frame, start)
+        settle_price = _price_at(frame, settle)
+        history.append(
+            {
+                "slug": f"btc-updown-5m-{int(settle.timestamp())}",
+                "label": f"{start.strftime('%H:%M')}-{settle.strftime('%H:%M')}",
+                "start_ts": _iso_timestamp(start),
+                "end_ts": _iso_timestamp(settle),
+                "target_price": target_price,
+                "settle_price": settle_price,
+                "result": _result_label(target_price, settle_price),
+            }
+        )
+        if len(history) >= limit:
+            break
+    return history
+
+
+def _build_market_switcher(frame, market):
+    current_start = _utc_timestamp(market["start_ts"])
+    windows = [
+        ("previous", current_start - pd.Timedelta(minutes=5)),
+        ("current", current_start),
+        ("next", current_start + pd.Timedelta(minutes=5)),
+    ]
+    items = []
+    for key, start in windows:
+        end = start + pd.Timedelta(minutes=5)
+        target_price = _price_at(frame, start)
+        settle_price = _price_at(frame, end)
+        items.append(
+            {
+                "key": key,
+                "slug": f"btc-updown-5m-{int(end.timestamp())}",
+                "label": f"{start.strftime('%H:%M')}",
+                "start_ts": _iso_timestamp(start),
+                "end_ts": _iso_timestamp(end),
+                "target_price": target_price,
+                "settle_price": settle_price,
+                "result": _result_label(target_price, settle_price) if key != "next" else "UPCOMING",
+            }
+        )
+    return items
+
+
+def _build_btc_market_chart_payload(frame, now=None, start_ts=None):
+    now_ts = _utc_timestamp(now)
+    market = _btc_market_window(now_ts, start_ts=start_ts)
+    normalized = _normalize_ohlc_frame(frame)
+    current_start = _utc_timestamp(market["start_ts"])
+    current_end = _utc_timestamp(market["end_ts"])
+
+    target_price = _price_at(normalized, current_start)
+    target_source = "exact"
+    if target_price is None:
+        _, target_price = _price_at_or_before(normalized, current_start)
+        target_source = "previous_close" if target_price is not None else "missing"
+
+    price_cursor = min(now_ts, current_end)
+    latest_ts, current_price = _price_at_or_before(normalized, price_cursor)
+    live = {"price": None, "timestamp": None, "source": "chainlink_candlestick", "status": "fallback", "error": None}
+    if current_start <= now_ts < current_end:
+        live = _latest_btc_live_price(now=now_ts)
+        live_ts = _utc_timestamp(live.get("timestamp")) if live.get("timestamp") else None
+        if live.get("price") is not None and live_ts is not None and current_start <= live_ts <= current_end + pd.Timedelta(seconds=5):
+            current_price = float(live["price"])
+            latest_ts = live_ts
+    delta = None
+    delta_pct = None
+    if target_price is not None and current_price is not None:
+        delta = round(current_price - target_price, 2)
+        delta_pct = round(delta / target_price, 6) if target_price else None
+
+    candles = [
+        {
+            "timestamp": _iso_timestamp(ts),
+            "open": round(float(row["open"]), 2),
+            "high": round(float(row["high"]), 2),
+            "low": round(float(row["low"]), 2),
+            "close": round(float(row["close"]), 2),
+        }
+        for ts, row in normalized.tail(80).iterrows()
+    ]
+    if current_price is not None and latest_ts is not None and current_start <= latest_ts <= current_end + pd.Timedelta(seconds=5):
+        live_close = round(float(current_price), 2)
+        if candles and candles[-1]["timestamp"] == _iso_timestamp(latest_ts):
+            candles[-1]["high"] = max(candles[-1]["high"], live_close)
+            candles[-1]["low"] = min(candles[-1]["low"], live_close)
+            candles[-1]["close"] = live_close
+        else:
+            candles.append(
+                {
+                    "timestamp": _iso_timestamp(latest_ts),
+                    "open": live_close,
+                    "high": live_close,
+                    "low": live_close,
+                    "close": live_close,
+                }
+            )
+    live_ticks = _live_ticks_between(current_start, current_end)
+    if current_price is not None and latest_ts is not None and current_start <= latest_ts <= current_end + pd.Timedelta(seconds=5):
+        live_tick_ts = _iso_timestamp(latest_ts)
+        if not any(item["timestamp"] == live_tick_ts for item in live_ticks):
+            live_ticks.append(
+                {
+                    "timestamp": live_tick_ts,
+                    "price": round(float(current_price), 4),
+                    "source": live.get("source") or "chainlink_candlestick",
+                }
+            )
+
+    return {
+        "readonly": True,
+        "source": "chainlink_candlestick",
+        "live_source": live.get("source") or "chainlink_candlestick",
+        "live_status": live.get("status") or "fallback",
+        "live_error": live.get("error"),
+        "symbol": os.environ.get("CHAINLINK_SYMBOL", "BTCUSD"),
+        "resolution": "5m",
+        "now": _iso_timestamp(now_ts),
+        "market": market,
+        "markets": _build_market_switcher(normalized, market),
+        "target_price": round(target_price, 2) if target_price is not None else None,
+        "target_source": target_source,
+        "current_price": round(current_price, 2) if current_price is not None else None,
+        "current_price_ts": _iso_timestamp(latest_ts) if latest_ts is not None else None,
+        "delta": delta,
+        "delta_pct": delta_pct,
+        "candles": candles,
+        "ticks": live_ticks,
+        "history": _build_history(normalized, current_start),
+    }
+
+
+def _fetch_chainlink_btc_candles(symbol=None, now=None, start_ts=None, lookback_minutes=120):
+    _load_kronos_env()
+    _ensure_kronos_src_on_path()
+    from kronos_poly.data.chainlink_candles import ChainlinkCandlestickClient, ChainlinkCredentials
+
+    user_id = os.environ.get("CHAINLINK_CANDLESTICK_USER_ID") or os.environ.get("CHAINLINK_STREAMS_USER_ID")
+    api_key = os.environ.get("CHAINLINK_CANDLESTICK_API_KEY")
+    if not user_id or not api_key:
+        raise RuntimeError("missing Chainlink Candlestick credentials")
+
+    now_ts = _utc_timestamp(now)
+    window = _btc_market_window(now_ts, start_ts=start_ts)
+    current_start = _utc_timestamp(window["start_ts"])
+    start = current_start - pd.Timedelta(minutes=int(lookback_minutes))
+    end = current_start + pd.Timedelta(minutes=5)
+    symbol = symbol or os.environ.get("CHAINLINK_SYMBOL", "BTCUSD")
+    base_url = os.environ.get("CHAINLINK_CANDLESTICK_BASE_URL", "https://priceapi.dataengine.chain.link")
+    client = ChainlinkCandlestickClient(
+        ChainlinkCredentials(user_id=user_id, api_key=api_key),
+        base_url=base_url,
+        timeout_seconds=float(os.environ.get("CHAINLINK_CANDLESTICK_TIMEOUT_SECONDS", "12")),
+    )
+    cache_key = (
+        symbol,
+        "5m",
+        _iso_timestamp(current_start),
+        int(lookback_minutes),
+        base_url,
+    )
+    cache_seconds = float(os.environ.get("CHAINLINK_CANDLE_CACHE_SECONDS", "20"))
+    return _get_cached_btc_candles(
+        cache_key,
+        cache_seconds,
+        lambda: client.fetch_history_chunked(
+            symbol=symbol,
+            resolution="5m",
+            start=start,
+            end=end,
+            max_window_days=1,
+        ),
+    )
+
+
+@app.route("/api/btc/market-chart")
+def api_btc_market_chart():
+    now_arg = request.args.get("now")
+    start_arg = request.args.get("start_ts")
+    now_ts = _parse_dt(now_arg) if now_arg else datetime.now(timezone.utc)
+    start_ts = _parse_dt(start_arg) if start_arg else None
+    try:
+        frame = _fetch_chainlink_btc_candles(now=now_ts, start_ts=start_ts)
+        return jsonify(_build_btc_market_chart_payload(frame, now=now_ts, start_ts=start_ts))
+    except Exception as exc:
+        payload = _build_btc_market_chart_payload(pd.DataFrame(), now=now_ts, start_ts=start_ts)
+        payload["error"] = str(exc)
+        return jsonify(payload), 503
+
+
+@app.route("/api/btc/live-price")
+def api_btc_live_price():
+    return jsonify(_latest_btc_live_price())
 
 
 # ---------------------------------------------------------------------------

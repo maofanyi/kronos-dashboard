@@ -16,7 +16,7 @@ import {
   Wallet,
 } from "lucide-react";
 import { Fragment, type ReactNode, useMemo, useState } from "react";
-import BTCChart from "../components/BTCChart";
+import BTCMarketChart from "../components/BTCMarketChart";
 import { Chart } from "@/components/chart";
 import { usePolling } from "../hooks/usePolling";
 
@@ -680,8 +680,9 @@ export default function Live() {
         <StatCard label="Health" value={isHealthy ? "OK" : "Review"} sub={health?.run_source ?? safety?.run_source ?? "-"} icon={ShieldCheck} tone={isHealthy ? "text-emerald-300" : "text-amber-300"} />
       </div>
 
-      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(380px,0.78fr)]">
-        <div className="min-w-0"><BTCChart /></div>
+      <BTCMarketChart />
+
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]">
         <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
           <div className="h-[280px] p-4">
             <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
