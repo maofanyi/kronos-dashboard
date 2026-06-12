@@ -797,6 +797,7 @@ function SignalCard({ event, expanded, onToggle }: { event: EventItem; expanded:
 }
 
 function FunnelPanel({ funnel }: { funnel?: Record<string, number> }) {
+  const funnelRate = (numerator: number, denominator: number) => (denominator > 0 ? numerator / denominator : 0);
   const rows = [
     ["Signals", funnel?.total ?? 0],
     ["Passed", funnel?.filt_passed ?? 0],
@@ -807,9 +808,23 @@ function FunnelPanel({ funnel }: { funnel?: Record<string, number> }) {
     ["Settled", funnel?.settled ?? 0],
     ["Rejected", funnel?.rejected ?? 0],
   ] as const;
+  const rates = [
+    { label: "Pass / Signal", value: funnelRate(funnel?.filt_passed ?? 0, funnel?.total ?? 0) },
+    { label: "Orders / Exec", value: funnelRate(funnel?.orders_generated ?? 0, funnel?.executable ?? 0) },
+    { label: "Filled / Orders", value: funnelRate(funnel?.filled ?? 0, funnel?.orders_generated ?? 0) },
+    { label: "Settled / Filled", value: funnelRate(funnel?.settled ?? 0, funnel?.filled ?? 0) },
+  ];
   const max = Math.max(...rows.map(([, value]) => value), 1);
   return (
     <Panel title="Execution Funnel" sub="signal to settlement, read-only">
+      <div className="grid grid-cols-2 gap-2 border-b border-zinc-900 p-4 md:grid-cols-4">
+        {rates.map((item) => (
+          <div key={item.label} className="rounded border border-zinc-900 bg-black/20 px-3 py-2">
+            <div className="truncate text-[11px] uppercase tracking-[0.14em] text-zinc-600">{item.label}</div>
+            <div className="mt-1 font-mono text-sm font-semibold text-zinc-200">{percent(item.value)}</div>
+          </div>
+        ))}
+      </div>
       <div className="space-y-2 p-4">
         {rows.map(([label, value]) => (
           <div key={label} className="grid grid-cols-[110px_1fr_48px] items-center gap-3 text-xs">

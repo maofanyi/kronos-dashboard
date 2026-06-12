@@ -1189,6 +1189,17 @@ def test_live_page_surfaces_preflight_chain_status():
     assert "Preflight" in source
 
 
+def test_live_page_surfaces_funnel_conversion_rates():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const funnelRate" in source
+    assert "Pass / Signal" in source
+    assert "Orders / Exec" in source
+    assert "Filled / Orders" in source
+    assert "Settled / Filled" in source
+    assert "percent(item.value)" in source
+
+
 def test_live_page_surfaces_funding_shortfalls():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
