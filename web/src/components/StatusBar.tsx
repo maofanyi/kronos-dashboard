@@ -54,6 +54,19 @@ interface SafetyData {
     market_probe_count?: number;
     quote_executable_count?: number;
   };
+  preflight_chain?: {
+    report?: string;
+    available?: boolean;
+    ok?: boolean;
+    submitted?: boolean;
+    blockers?: string[];
+    gate_ready?: boolean;
+    smoke_mode?: string;
+    open_orders?: number;
+    settled?: number;
+    risk_ok?: boolean;
+    components?: Record<string, unknown>;
+  };
   checklist?: ChecklistItem[];
   risk?: {
     ok: boolean;
@@ -206,7 +219,10 @@ export default function StatusBar() {
   const riskOk = safety?.risk?.ok ?? true;
   const dryrunOk = (safety?.dryrun?.submitted_count ?? 0) === 0;
   const liveGateReady = safety?.live_gate?.ready_for_live_smoke === true;
-  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk;
+  const preflightOk = safety?.preflight_chain?.ok === true;
+  const preflightSubmitted = safety?.preflight_chain?.submitted === true;
+  const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
+  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightOk || preflightSubmitted;
   const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
 
   return (
@@ -241,6 +257,10 @@ export default function StatusBar() {
           <StatusChip
             ok={liveGateReady}
             label={liveGateReady ? "Gate ready" : `Gate ${safety?.live_gate?.blockers?.length ?? 0}`}
+          />
+          <StatusChip
+            ok={preflightOk && !preflightSubmitted}
+            label={preflightOk ? "Preflight ready" : `Preflight ${preflightBlockers}`}
           />
           <span className="min-w-0 max-w-[220px] truncate font-mono text-zinc-600 md:max-w-[360px]">{source}</span>
           <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -285,6 +305,11 @@ export default function StatusBar() {
                 label="Live Gate"
                 value={liveGateReady ? "ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`}
                 ok={liveGateReady}
+              />
+              <DetailTile
+                label="Preflight"
+                value={preflightSubmitted ? "submitted" : preflightOk ? "ready" : `${preflightBlockers} blockers`}
+                ok={preflightOk && !preflightSubmitted}
               />
             </div>
 

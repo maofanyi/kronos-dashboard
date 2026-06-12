@@ -298,6 +298,28 @@ def _live_gate_report_summary(path=None, report=None):
     }
 
 
+def _live_preflight_chain_summary(path=None, report=None):
+    if report is None:
+        path, report = _latest_json_report("live_preflight_chain*.json")
+    report = report if isinstance(report, dict) else {}
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    components = report.get("components") if isinstance(report.get("components"), dict) else {}
+    return {
+        "report": str(path) if path else "",
+        "available": bool(report),
+        "ok": bool(report.get("ok")),
+        "submitted": bool(report.get("submitted")),
+        "blockers": blockers,
+        "gate_ready": bool(summary.get("gate_ready")),
+        "smoke_mode": str(summary.get("smoke_mode") or ""),
+        "open_orders": int(summary.get("open_orders", 0) or 0),
+        "settled": int(summary.get("settled", 0) or 0),
+        "risk_ok": bool(summary.get("risk_ok")),
+        "components": components,
+    }
+
+
 def _check_status(report: dict, name: str):
     for check in report.get("checks", []) or []:
         if check.get("name") == name:
@@ -446,8 +468,10 @@ def _safety_report_summary():
     if not allowance_report:
         allowance_path, allowance_report = _latest_json_report("polymarket_clob_account_read_audit*.json")
     gate_path, gate_report = _latest_json_report("live_trade_gate*.json")
+    preflight_path, preflight_report = _latest_json_report("live_preflight_chain*.json")
     dryrun_summary = _live_dryrun_ledger_summary()
     live_gate_summary = _live_gate_report_summary(gate_path, gate_report)
+    preflight_summary = _live_preflight_chain_summary(preflight_path, preflight_report)
     gate_account = gate_report.get("account") if isinstance(gate_report.get("account"), dict) else {}
     execution_path, execution_report = _latest_json_report("live_dryrun_execution_summary_latest.json")
     checkpoint = _read_json(_paper_checkpoint_path()) or {}
@@ -559,6 +583,28 @@ def _safety_report_summary():
             "expected": "0 blockers",
             "severity": "critical",
         },
+        {
+            "key": "live_preflight_available",
+            "label": "Live preflight report",
+            "ok": preflight_summary["available"],
+            "value": "ok" if preflight_summary["available"] else "missing",
+            "severity": "critical",
+        },
+        {
+            "key": "live_preflight_chain_ok",
+            "label": "Live preflight chain",
+            "ok": preflight_summary["ok"],
+            "value": len(preflight_summary["blockers"]),
+            "expected": "0 blockers",
+            "severity": "critical",
+        },
+        {
+            "key": "live_preflight_no_submission",
+            "label": "Preflight no submission",
+            "ok": not preflight_summary["submitted"],
+            "value": "submitted" if preflight_summary["submitted"] else "none",
+            "severity": "critical",
+        },
     ] + risk_summary["checks"]
 
     return {
@@ -589,9 +635,11 @@ def _safety_report_summary():
             "allowance": str(allowance_path) if allowance_path else "",
             "execution": str(execution_path) if execution_path else "",
             "live_gate": str(gate_path) if gate_path else "",
+            "live_preflight": str(preflight_path) if preflight_path else "",
         },
         "dryrun": dryrun_summary,
         "live_gate": live_gate_summary,
+        "preflight_chain": preflight_summary,
         "checklist": checklist,
         "risk": risk_summary,
         "execution_summary": execution_report.get("summary") or execution_report,

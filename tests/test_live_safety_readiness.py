@@ -97,6 +97,75 @@ def test_live_safety_marks_dryrun_submitted_order_as_critical(tmp_path, monkeypa
     assert checks["dryrun_no_submitted_orders"]["severity"] == "critical"
 
 
+def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "ok": False,
+            "submitted": False,
+            "blockers": ["balance_meets_minimum", "live trade gate not ready"],
+            "summary": {
+                "gate_ready": False,
+                "smoke_mode": "blocked",
+                "open_orders": 0,
+                "settled": 1,
+                "risk_ok": True,
+            },
+            "components": {
+                "guarded_smoke": {"submitted": False, "mode": "blocked"},
+                "settlement_reconciliation": {"settled_count": 1},
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["preflight_chain"]["available"] is True
+    assert summary["preflight_chain"]["ok"] is False
+    assert summary["preflight_chain"]["submitted"] is False
+    assert summary["preflight_chain"]["blockers"] == ["balance_meets_minimum", "live trade gate not ready"]
+    assert summary["preflight_chain"]["smoke_mode"] == "blocked"
+    assert summary["preflight_chain"]["settled"] == 1
+    assert summary["reports"]["live_preflight"].endswith("live_preflight_chain_latest.json")
+    assert checks["live_preflight_available"]["ok"] is True
+    assert checks["live_preflight_chain_ok"]["ok"] is False
+    assert checks["live_preflight_no_submission"]["ok"] is True
+
+
+def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "ok": False,
+            "submitted": True,
+            "blockers": ["guarded smoke submitted unexpectedly"],
+            "summary": {"gate_ready": True, "smoke_mode": "submitted", "open_orders": 1, "settled": 0, "risk_ok": False},
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["preflight_chain"]["submitted"] is True
+    assert checks["live_preflight_no_submission"]["ok"] is False
+    assert checks["live_preflight_no_submission"]["severity"] == "critical"
+
+
 def test_live_page_mounts_safety_panels():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -104,9 +173,18 @@ def test_live_page_mounts_safety_panels():
     assert "<ReadinessChecklist safety={safety} health={health} intel={intel} />" in source
 
 
-def test_status_bar_surfaces_dryrun_gate_status():
+def test_live_page_surfaces_preflight_chain_status():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "safety?.preflight_chain?.ok" in source
+    assert "Preflight" in source
+
+
+def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
     assert "safety?.dryrun?.submitted_count" in source
     assert "safety?.live_gate?.ready_for_live_smoke" in source
+    assert "safety?.preflight_chain?.ok" in source
     assert "Dry-run" in source
+    assert "Preflight" in source
