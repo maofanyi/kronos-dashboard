@@ -235,11 +235,22 @@ def test_live_intel_builds_order_lifecycle_from_signal_execution_and_settlement(
     order = {
         "order_id": "sim:100:113:UP:25.00000000",
         "market_id": "btc-5m-next-113",
+        "market_slug": "btc-updown-5m-1781137200",
+        "market_end_iso": "2026-06-10T11:05:00Z",
+        "decision_bar_ts": "2026-06-10T10:00:00Z",
+        "entry_ts": "2026-06-10T10:05:00Z",
+        "settle_ts": "2026-06-10T11:05:00Z",
+        "entry_price_ts": "2026-06-10T10:00:00Z",
+        "settle_price_ts": "2026-06-10T11:00:00Z",
         "entry_bar": 100,
         "settle_bar": 113,
         "direction": "UP",
         "size": 25.0,
         "maker_price": 0.49,
+        "reference_price_source": "chainlink_candlestick",
+        "reference_price": 63000.0,
+        "binance_reference_price": 63002.0,
+        "chainlink_reference_price": 63000.0,
         "status": "FILLED",
         "filled_bar": 101,
         "repost_count": 2,
@@ -249,6 +260,14 @@ def test_live_intel_builds_order_lifecycle_from_signal_execution_and_settlement(
         "pnl": 26.020408163265305,
         "won": True,
         "dir": "UP",
+        "settlement_source": "chainlink_candlestick",
+        "binance_entry_price": 63002.0,
+        "chainlink_entry_price": 63000.0,
+        "binance_settle_price": 63102.0,
+        "chainlink_settle_price": 63100.0,
+        "paper_actual_up_binance": True,
+        "actual_up_chainlink": True,
+        "settlement_disagrees": False,
         "settle_price": 63100.0,
         "status": "SETTLED",
     }
@@ -326,6 +345,18 @@ def test_live_intel_builds_order_lifecycle_from_signal_execution_and_settlement(
     assert lifecycle["recent"][0]["settled_at"] == "2026-06-10T11:05:00"
     assert lifecycle["recent"][0]["pnl"] == 26.020408163265305
     assert lifecycle["recent"][0]["repost_count"] == 2
+    assert lifecycle["recent"][0]["market_slug"] == "btc-updown-5m-1781137200"
+    assert lifecycle["recent"][0]["market_end_iso"] == "2026-06-10T11:05:00Z"
+    assert lifecycle["recent"][0]["entry_price_ts"] == "2026-06-10T10:00:00Z"
+    assert lifecycle["recent"][0]["settle_price_ts"] == "2026-06-10T11:00:00Z"
+    assert lifecycle["recent"][0]["reference_price_source"] == "chainlink_candlestick"
+    assert lifecycle["recent"][0]["chainlink_reference_price"] == 63000.0
+    assert lifecycle["recent"][0]["binance_reference_price"] == 63002.0
+    assert lifecycle["recent"][0]["settlement_source"] == "chainlink_candlestick"
+    assert lifecycle["recent"][0]["chainlink_settle_price"] == 63100.0
+    assert lifecycle["recent"][0]["binance_settle_price"] == 63102.0
+    assert lifecycle["recent"][0]["actual_up_chainlink"] is True
+    assert lifecycle["recent"][0]["settlement_disagrees"] is False
 
 
 def test_live_intel_reports_overdue_settlement_anomalies(tmp_path, monkeypatch):
