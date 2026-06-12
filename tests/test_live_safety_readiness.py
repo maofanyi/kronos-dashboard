@@ -142,6 +142,113 @@ def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
     assert clob_blocker["action"] == "Run CLOB read-only audit"
 
 
+def test_live_safety_includes_first_order_rail(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+
+    summary = server._safety_report_summary()
+    rail = summary["first_order_rail"]
+    stages = rail["stages"]
+
+    assert [stage["key"] for stage in stages] == [
+        "dry_run",
+        "read_only_audit",
+        "funding",
+        "preflight",
+        "tiny_guarded_order",
+        "settle_tracking",
+    ]
+    assert rail["current_key"] == "read_only_audit"
+    assert rail["ready_for_manual_confirmation"] is False
+    assert stages[0]["status"] == "complete"
+    assert stages[1]["status"] == "blocked"
+    assert stages[1]["action"] == "Run CLOB read-only audit"
+    assert "clob_authenticated" in stages[1]["blocker_keys"]
+    guarded = next(stage for stage in stages if stage["key"] == "tiny_guarded_order")
+    assert guarded["requires_confirmation"] is True
+    assert guarded["status"] == "waiting"
+    assert guarded["action"] == "Wait for explicit user confirmation"
+
+
+def test_live_safety_first_order_rail_requires_manual_confirmation_when_ready(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 12.0,
+                "min_allowance": 12.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {
+                "required_min_balance_usdc": 10.0,
+                "required_smoke_notional_usdc": 2.6,
+                "required_min_allowance_usdc": 10.0,
+                "balance_shortfall_usdc": 0.0,
+                "smoke_notional_shortfall_usdc": 0.0,
+                "allowance_shortfall_usdc": 0.0,
+                "funding_ready": True,
+            },
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 12.0, "expected": ">= 10.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 12.0, "expected": ">= 10.0"},
+            ],
+        },
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {
+                "gate_ready": True,
+                "smoke_mode": "preview",
+                "open_orders": 0,
+                "settled": 0,
+                "risk_ok": True,
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+    rail = summary["first_order_rail"]
+    stages = {stage["key"]: stage for stage in rail["stages"]}
+
+    assert rail["current_key"] == "tiny_guarded_order"
+    assert rail["ready_for_manual_confirmation"] is True
+    assert stages["preflight"]["status"] == "complete"
+    assert stages["tiny_guarded_order"]["status"] == "manual"
+    assert stages["tiny_guarded_order"]["requires_confirmation"] is True
+    assert stages["tiny_guarded_order"]["action"] == "Wait for explicit user confirmation"
+    assert stages["settle_tracking"]["status"] == "waiting"
+
+
 def test_live_safety_marks_dryrun_submitted_order_as_critical(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -559,6 +666,15 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "today pass rate" in source
 
 
+def test_live_page_today_cockpit_uses_readable_separators():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert " 路 " not in source
+    assert " · " not in source
+    assert " | ${today?.trades.wins" in source
+    assert " | ${percent(passRate)}" in source
+
+
 def test_live_page_surfaces_readiness_blocker_summary():
     live_source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
     status_source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
@@ -587,6 +703,17 @@ def test_live_page_surfaces_top_readiness_blockers():
     assert "blocker.action" in status_source
     assert "next {blocker.action}" in live_source
     assert "next {blocker.action}" in status_source
+
+
+def test_live_page_surfaces_first_order_rail():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "first_order_rail" in source
+    assert "function FirstOrderRail" in source
+    assert "<FirstOrderRail rail={safety?.first_order_rail}" in source
+    assert "First Order Path" in source
+    assert "Manual confirmation" in source
+    assert "requires_confirmation" in source
 
 
 def test_live_collapsible_panels_expose_accessible_expanded_state():

@@ -216,6 +216,19 @@ interface LiveSafety {
     }>;
     by_severity?: Record<string, number>;
   };
+  first_order_rail?: {
+    current_key: string;
+    ready_for_manual_confirmation: boolean;
+    stages: Array<{
+      key: string;
+      label: string;
+      status: string;
+      action: string;
+      blocker_keys?: string[];
+      blockers?: string[];
+      requires_confirmation?: boolean;
+    }>;
+  };
   risk?: {
     ok: boolean;
     metrics: {
@@ -737,12 +750,12 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
           <HealthTile label="Day PnL" value={signedMoney(pnl)} ok={pnl >= 0} />
           <HealthTile
             label="Settled W/L"
-            value={`${today?.trades.settled ?? 0} · ${today?.trades.wins ?? 0}W/${today?.trades.losses ?? 0}L`}
+            value={`${today?.trades.settled ?? 0} | ${today?.trades.wins ?? 0}W/${today?.trades.losses ?? 0}L`}
             ok={(today?.trades.settled ?? 0) === 0 ? undefined : winRate >= 0.5}
           />
           <HealthTile
             label="Signal Pass"
-            value={`${today?.signals.passed ?? 0}/${today?.signals.total ?? 0} · ${percent(passRate)}`}
+            value={`${today?.signals.passed ?? 0}/${today?.signals.total ?? 0} | ${percent(passRate)}`}
             ok={(today?.signals.total ?? 0) === 0 ? undefined : passRate > 0}
           />
           <HealthTile
@@ -766,6 +779,53 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
           <UsageBar label="Loss Streak" value={today?.risk_usage.loss_streak} />
           <UsageBar label="Open/Pending" value={today?.risk_usage.open_or_pending} />
         </div>
+      </div>
+    </Panel>
+  );
+}
+
+function FirstOrderRail({ rail }: { rail?: LiveSafety["first_order_rail"] | null }) {
+  const stages = rail?.stages ?? [];
+  const currentStage = stages.find((stage) => stage.key === rail?.current_key);
+  const ready = rail?.ready_for_manual_confirmation === true;
+  const statusLabel = ready ? "Manual confirmation" : currentStage?.label ?? "Waiting";
+
+  const statusTone = (status: string, active: boolean) => {
+    if (status === "complete") return "border-emerald-500/25 bg-emerald-500/5 text-emerald-300";
+    if (status === "manual") return "border-sky-500/25 bg-sky-500/10 text-sky-300";
+    if (status === "blocked") return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    return active ? "border-zinc-500/25 bg-zinc-500/10 text-zinc-300" : "border-zinc-900 bg-black/20 text-zinc-500";
+  };
+
+  return (
+    <Panel
+      title="First Order Path"
+      sub="dry-run to guarded smoke"
+      right={<StatusPill ok={ready} label={statusLabel} />}
+    >
+      <div className="grid gap-2 p-4 md:grid-cols-3 xl:grid-cols-6">
+        {stages.map((stage, index) => {
+          const active = stage.key === rail?.current_key;
+          const Icon = stage.status === "complete" ? CheckCircle2 : stage.status === "manual" ? Lock : stage.status === "blocked" ? AlertTriangle : Clock3;
+          return (
+            <div
+              key={stage.key}
+              className={`min-w-0 rounded-md border px-3 py-2.5 ${statusTone(stage.status, active)}`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-mono text-[11px] uppercase tracking-[0.14em] opacity-70">{String(index + 1).padStart(2, "0")}</span>
+                <Icon className="h-3.5 w-3.5 shrink-0" />
+              </div>
+              <div className="mt-2 truncate text-sm font-medium text-zinc-100">{stage.label}</div>
+              <div className="mt-1 truncate font-mono text-[11px] uppercase">{stage.status}</div>
+              {stage.requires_confirmation && <div className="mt-2 truncate text-xs text-sky-300">Manual confirmation</div>}
+              <div className="mt-2 min-h-8 text-xs text-zinc-500">{stage.action}</div>
+              {(stage.blockers?.length ?? 0) > 0 && (
+                <div className="mt-2 truncate text-[11px] text-amber-300">{stage.blockers?.slice(0, 2).join(" / ")}</div>
+              )}
+            </div>
+          );
+        })}
       </div>
     </Panel>
   );
@@ -902,6 +962,8 @@ export default function Live() {
       </div>
 
       <BTCMarketChart />
+
+      <FirstOrderRail rail={safety?.first_order_rail} />
 
       <TodayCockpit today={safety?.today} />
 

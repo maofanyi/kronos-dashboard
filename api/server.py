@@ -686,6 +686,96 @@ def _readiness_action(key):
     return actions.get(str(key or ""), "Review readiness check")
 
 
+def _first_order_rail(checklist):
+    checks = {item.get("key"): item for item in checklist if item.get("key")}
+
+    def make_stage(key, label, required_keys, action, prior_complete):
+        blockers = [checks[item_key] for item_key in required_keys if not checks.get(item_key, {}).get("ok")]
+        complete = not blockers
+        status = "complete" if complete else "blocked" if prior_complete else "waiting"
+        return {
+            "key": key,
+            "label": label,
+            "status": status,
+            "action": "Verified" if complete else action,
+            "blocker_keys": [item.get("key") for item in blockers],
+            "blockers": [item.get("label") for item in blockers],
+        }
+
+    stages = []
+    prior_complete = True
+    stage_specs = [
+        (
+            "dry_run",
+            "Dry-run audit",
+            ["real_orders_locked", "dryrun_no_submitted_orders"],
+            "Keep dry-run from submitting orders",
+        ),
+        (
+            "read_only_audit",
+            "CLOB read-only audit",
+            ["clob_authenticated", "account_read_ok", "allowance_read_ok", "open_orders_clear"],
+            "Run CLOB read-only audit",
+        ),
+        (
+            "funding",
+            "Funding and allowance",
+            ["minimum_balance", "minimum_allowance"],
+            "Fund USDC and approve allowance",
+        ),
+        (
+            "preflight",
+            "Live preflight",
+            [
+                "live_trade_gate_available",
+                "live_trade_gate_ready",
+                "live_preflight_available",
+                "live_preflight_chain_ok",
+                "live_preflight_fresh",
+                "live_preflight_no_submission",
+                "risk_daily_loss",
+                "risk_daily_trades",
+                "risk_consecutive_losses",
+                "risk_open_or_pending",
+            ],
+            "Run live preflight chain",
+        ),
+    ]
+    for key, label, required_keys, action in stage_specs:
+        stage = make_stage(key, label, required_keys, action, prior_complete)
+        stages.append(stage)
+        prior_complete = prior_complete and stage["status"] == "complete"
+
+    guarded_status = "manual" if prior_complete else "waiting"
+    stages.append(
+        {
+            "key": "tiny_guarded_order",
+            "label": "Tiny guarded order",
+            "status": guarded_status,
+            "action": "Wait for explicit user confirmation",
+            "blocker_keys": [],
+            "blockers": [],
+            "requires_confirmation": True,
+        }
+    )
+    stages.append(
+        {
+            "key": "settle_tracking",
+            "label": "Cancel and settle tracking",
+            "status": "waiting",
+            "action": "Track auto-cancel and settlement",
+            "blocker_keys": [],
+            "blockers": [],
+        }
+    )
+    current = next((stage for stage in stages if stage["status"] in {"blocked", "manual"}), stages[-1])
+    return {
+        "current_key": current["key"],
+        "ready_for_manual_confirmation": guarded_status == "manual",
+        "stages": stages,
+    }
+
+
 def _safety_report_summary():
     allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
     if not allowance_report:
@@ -846,6 +936,9 @@ def _safety_report_summary():
         },
     ] + risk_summary["checks"]
 
+    readiness_summary = _readiness_summary(checklist)
+    first_order_rail = _first_order_rail(checklist)
+
     return {
         "mode": mode,
         "run_source": run_source,
@@ -888,7 +981,8 @@ def _safety_report_summary():
         "live_gate": live_gate_summary,
         "preflight_chain": preflight_summary,
         "checklist": checklist,
-        "readiness_summary": _readiness_summary(checklist),
+        "readiness_summary": readiness_summary,
+        "first_order_rail": first_order_rail,
         "risk": risk_summary,
         "today": today_summary,
         "execution_summary": execution_report.get("summary") or execution_report,
