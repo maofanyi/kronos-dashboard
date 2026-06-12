@@ -142,6 +142,77 @@ def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
     assert clob_blocker["action"] == "Run CLOB read-only audit"
 
 
+def test_live_safety_includes_clob_readonly_audit_summary(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": False,
+            "ready_for_live_smoke": False,
+            "blockers": ["one quote not executable"],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 12.5,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+                "min_allowance_spender": "spender-a",
+            },
+            "funding_requirements": {
+                "required_min_balance_usdc": 10.0,
+                "required_smoke_notional_usdc": 2.6,
+                "required_min_allowance_usdc": 10.0,
+                "balance_shortfall_usdc": 0.0,
+                "smoke_notional_shortfall_usdc": 0.0,
+                "allowance_shortfall_usdc": 0.0,
+                "funding_ready": True,
+            },
+            "market_probes": [
+                {"direction": "UP", "ok": True, "quote_executable": True},
+                {"direction": "DOWN", "ok": True, "quote_executable": False},
+            ],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 12.5, "expected": ">= 10.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 15.0, "expected": ">= 10.0"},
+            ],
+        },
+    )
+
+    summary = server._safety_report_summary()
+    audit = summary["clob_readonly"]
+
+    assert audit["available"] is True
+    assert audit["ready"] is False
+    assert audit["authenticated"] is True
+    assert audit["account_read_ok"] is True
+    assert audit["allowance_read_ok"] is True
+    assert audit["open_orders_read_ok"] is True
+    assert audit["open_orders_count"] == 0
+    assert audit["balance"] == 12.5
+    assert audit["min_allowance"] == 15.0
+    assert audit["allowance_count"] == 3
+    assert audit["min_allowance_spender"] == "spender-a"
+    assert audit["market_probe_count"] == 2
+    assert audit["quote_executable_count"] == 1
+    assert audit["quote_executable_rate"] == 0.5
+    assert audit["funding_ready"] is True
+    assert audit["blockers"] == ["one quote not executable"]
+
+
 def test_live_safety_includes_first_order_rail(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -714,6 +785,19 @@ def test_live_page_surfaces_first_order_rail():
     assert "First Order Path" in source
     assert "Manual confirmation" in source
     assert "requires_confirmation" in source
+
+
+def test_live_page_surfaces_clob_readonly_panel():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "clob_readonly" in source
+    assert "function ClobReadonlyPanel" in source
+    assert "<ClobReadonlyPanel audit={safety?.clob_readonly}" in source
+    assert "CLOB Read-only Audit" in source
+    assert "Quote Executable" in source
+    assert "Open Orders" in source
+    assert "Min Allowance" in source
+    assert "Allowance Count" in source
 
 
 def test_live_collapsible_panels_expose_accessible_expanded_state():

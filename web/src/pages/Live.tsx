@@ -140,6 +140,27 @@ interface LiveSafety {
     allowance_read_ok: boolean;
     open_orders_read_ok: boolean;
   };
+  clob_readonly?: {
+    available: boolean;
+    ready: boolean;
+    report: string;
+    authenticated: boolean;
+    account_read_ok: boolean;
+    allowance_read_ok: boolean;
+    open_orders_read_ok: boolean;
+    open_orders_count: number;
+    balance?: number | null;
+    min_allowance?: number | null;
+    allowance_count?: number | null;
+    min_allowance_spender?: string;
+    market_probe_count: number;
+    quote_executable_count: number;
+    quote_executable_rate: number;
+    funding_ready?: boolean | null;
+    balance_shortfall_usdc?: number | null;
+    allowance_shortfall_usdc?: number | null;
+    blockers?: string[];
+  };
   funding: {
     balance_ok: boolean;
     allowance_ok: boolean;
@@ -831,6 +852,57 @@ function FirstOrderRail({ rail }: { rail?: LiveSafety["first_order_rail"] | null
   );
 }
 
+function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | null }) {
+  const quoteRate = audit?.quote_executable_rate ?? 0;
+  const blockers = audit?.blockers ?? [];
+  return (
+    <Panel
+      title="CLOB Read-only Audit"
+      sub={audit?.report?.split(/[\\/]/).pop() || "live gate and allowance report"}
+      right={<StatusPill ok={audit?.ready === true} label={audit?.ready ? "Ready" : audit?.available ? "Review" : "Missing"} />}
+    >
+      <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.55fr)]">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <HealthTile label="CLOB Auth" value={audit?.authenticated ? "OK" : "-"} ok={audit?.authenticated} />
+          <HealthTile label="Account Read" value={audit?.account_read_ok ? "OK" : "-"} ok={audit?.account_read_ok} />
+          <HealthTile label="Allowance Read" value={audit?.allowance_read_ok ? "OK" : "-"} ok={audit?.allowance_read_ok} />
+          <HealthTile label="Open Orders Read" value={audit?.open_orders_read_ok ? "OK" : "-"} ok={audit?.open_orders_read_ok} />
+          <HealthTile label="Balance" value={audit?.balance == null ? "-" : money(audit.balance)} ok={(audit?.balance ?? 0) > 0} />
+          <HealthTile label="Min Allowance" value={audit?.min_allowance == null ? "-" : money(audit.min_allowance)} ok={(audit?.min_allowance ?? 0) > 0} />
+          <HealthTile label="Allowance Count" value={`${audit?.allowance_count ?? 0}`} ok={(audit?.allowance_count ?? 0) > 0} />
+          <HealthTile label="Open Orders" value={`${audit?.open_orders_count ?? 0}`} ok={(audit?.open_orders_count ?? 0) === 0} />
+          <HealthTile
+            label="Quote Executable"
+            value={`${audit?.quote_executable_count ?? 0}/${audit?.market_probe_count ?? 0} | ${percent(quoteRate)}`}
+            ok={(audit?.market_probe_count ?? 0) > 0 && audit?.quote_executable_count === audit?.market_probe_count}
+          />
+          <HealthTile label="Funding Ready" value={audit?.funding_ready ? "yes" : "no"} ok={audit?.funding_ready === true} />
+          <HealthTile label="Balance Gap" value={money(audit?.balance_shortfall_usdc ?? 0)} ok={(audit?.balance_shortfall_usdc ?? 0) === 0} />
+          <HealthTile label="Allowance Gap" value={money(audit?.allowance_shortfall_usdc ?? 0)} ok={(audit?.allowance_shortfall_usdc ?? 0) === 0} />
+        </div>
+
+        <div className="rounded-md border border-zinc-900 bg-black/20 p-3">
+          <div className="mb-2 text-[11px] uppercase tracking-[0.14em] text-zinc-600">Read-only Blockers</div>
+          {blockers.length === 0 ? (
+            <div className="text-sm text-emerald-300">No live gate blockers</div>
+          ) : (
+            <div className="space-y-2">
+              {blockers.slice(0, 4).map((blocker) => (
+                <div key={blocker} className="rounded border border-amber-500/20 bg-amber-500/5 px-2.5 py-2 text-xs text-amber-200">
+                  {blocker}
+                </div>
+              ))}
+            </div>
+          )}
+          <div className="mt-3 truncate text-[11px] text-zinc-600">
+            spender {audit?.min_allowance_spender || "-"}
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveSafety | null }) {
   const risk = intel?.risk;
   const maker = intel?.maker;
@@ -964,6 +1036,8 @@ export default function Live() {
       <BTCMarketChart />
 
       <FirstOrderRail rail={safety?.first_order_rail} />
+
+      <ClobReadonlyPanel audit={safety?.clob_readonly} />
 
       <TodayCockpit today={safety?.today} />
 

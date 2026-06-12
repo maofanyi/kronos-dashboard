@@ -938,6 +938,39 @@ def _safety_report_summary():
 
     readiness_summary = _readiness_summary(checklist)
     first_order_rail = _first_order_rail(checklist)
+    open_orders_read_ok = bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok"))
+    market_probe_count = int(live_gate_summary.get("market_probe_count", 0) or 0)
+    quote_executable_count = int(live_gate_summary.get("quote_executable_count", 0) or 0)
+    clob_readonly_ready = (
+        clob_authenticated
+        and account_read_ok
+        and allowance_read_ok
+        and open_orders_read_ok
+        and open_orders_count == 0
+        and market_probe_count > 0
+        and quote_executable_count == market_probe_count
+    )
+    clob_readonly = {
+        "available": bool(live_gate_summary.get("available") or allowance_report),
+        "ready": clob_readonly_ready,
+        "report": str(gate_path or allowance_path or ""),
+        "authenticated": clob_authenticated,
+        "account_read_ok": account_read_ok,
+        "allowance_read_ok": allowance_read_ok,
+        "open_orders_read_ok": open_orders_read_ok,
+        "open_orders_count": open_orders_count,
+        "balance": balance_value,
+        "min_allowance": min_allowance_value,
+        "allowance_count": allowance_count,
+        "min_allowance_spender": min_allowance_spender,
+        "market_probe_count": market_probe_count,
+        "quote_executable_count": quote_executable_count,
+        "quote_executable_rate": round(quote_executable_count / market_probe_count, 4) if market_probe_count else 0.0,
+        "funding_ready": gate_funding.get("funding_ready"),
+        "balance_shortfall_usdc": gate_funding.get("balance_shortfall_usdc"),
+        "allowance_shortfall_usdc": gate_funding.get("allowance_shortfall_usdc"),
+        "blockers": live_gate_summary.get("blockers", []),
+    }
 
     return {
         "mode": mode,
@@ -951,7 +984,7 @@ def _safety_report_summary():
             "authenticated": clob_authenticated,
             "account_read_ok": account_read_ok,
             "allowance_read_ok": allowance_read_ok,
-            "open_orders_read_ok": bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok")),
+            "open_orders_read_ok": open_orders_read_ok,
             "open_orders_count": open_orders_count,
         },
         "funding": {
@@ -982,6 +1015,7 @@ def _safety_report_summary():
         "preflight_chain": preflight_summary,
         "checklist": checklist,
         "readiness_summary": readiness_summary,
+        "clob_readonly": clob_readonly,
         "first_order_rail": first_order_rail,
         "risk": risk_summary,
         "today": today_summary,
