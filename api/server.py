@@ -338,6 +338,65 @@ def _live_preflight_chain_summary(path=None, report=None):
     }
 
 
+def _path_age(path):
+    if not path:
+        return None, None
+    try:
+        mtime = datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc)
+    except OSError:
+        return None, None
+    return mtime.isoformat(), max(0, int((datetime.now(timezone.utc) - mtime).total_seconds()))
+
+
+def _report_refresh_item(
+    *,
+    key,
+    label,
+    report,
+    available,
+    ok,
+    fresh,
+    age_seconds,
+    max_age_seconds,
+    blockers=None,
+    actions=None,
+):
+    blockers = blockers if isinstance(blockers, list) else []
+    if not available:
+        status = "missing"
+    elif not fresh:
+        status = "stale"
+    elif ok:
+        status = "ready"
+    else:
+        status = "blocked"
+    actions = actions or {}
+    return {
+        "key": key,
+        "label": label,
+        "report": report,
+        "available": bool(available),
+        "ok": bool(ok),
+        "fresh": bool(fresh),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "status": status,
+        "next_action": actions.get(status, "Review report"),
+        "blockers": blockers,
+    }
+
+
+def _report_refresh_summary(items):
+    return {
+        "ready": bool(items) and all(item.get("status") == "ready" for item in items),
+        "total": len(items),
+        "missing_count": sum(1 for item in items if item.get("status") == "missing"),
+        "stale_count": sum(1 for item in items if item.get("status") == "stale"),
+        "blocked_count": sum(1 for item in items if item.get("status") == "blocked"),
+        "items": items,
+    }
+
+
 def _check_status(report: dict, name: str):
     for check in report.get("checks", []) or []:
         if check.get("name") == name:
@@ -1067,6 +1126,67 @@ def _safety_report_summary():
         "allowance_shortfall_usdc": gate_funding.get("allowance_shortfall_usdc"),
         "blockers": clob_blockers,
     }
+    _, gate_report_age_seconds = _path_age(gate_path)
+    gate_report_fresh = (
+        bool(gate_path)
+        and gate_report_age_seconds is not None
+        and gate_report_age_seconds <= CLOB_READONLY_MAX_AGE_SECONDS
+    )
+    report_refresh = _report_refresh_summary(
+        [
+            _report_refresh_item(
+                key="live_gate",
+                label="Live Gate",
+                report=str(gate_path) if gate_path else "",
+                available=live_gate_summary["available"],
+                ok=live_gate_summary["ready_for_live_smoke"],
+                fresh=gate_report_fresh,
+                age_seconds=gate_report_age_seconds,
+                max_age_seconds=CLOB_READONLY_MAX_AGE_SECONDS,
+                blockers=live_gate_summary["blockers"],
+                actions={
+                    "missing": "Run live trade gate report",
+                    "stale": "Refresh live trade gate report",
+                    "blocked": "Clear live gate blockers",
+                    "ready": "Ready for live preflight",
+                },
+            ),
+            _report_refresh_item(
+                key="live_preflight",
+                label="Live Preflight",
+                report=preflight_summary["report"],
+                available=preflight_summary["available"],
+                ok=preflight_summary["ok"] and not preflight_summary["submitted"],
+                fresh=preflight_summary["fresh"],
+                age_seconds=preflight_summary["age_seconds"],
+                max_age_seconds=preflight_summary["max_age_seconds"],
+                blockers=preflight_summary["blockers"],
+                actions={
+                    "missing": "Run live preflight chain",
+                    "stale": "Refresh live preflight chain",
+                    "blocked": "Clear preflight blockers",
+                    "ready": "Ready for manual confirmation",
+                },
+            ),
+            _report_refresh_item(
+                key="clob_readonly",
+                label="CLOB Read-only",
+                report=clob_readonly["report"],
+                available=clob_readonly_available,
+                ok=clob_readonly_ready,
+                fresh=clob_report_fresh,
+                age_seconds=clob_report_age_seconds,
+                max_age_seconds=CLOB_READONLY_MAX_AGE_SECONDS,
+                blockers=clob_blockers,
+                actions={
+                    "missing": clob_next_action,
+                    "stale": clob_next_action,
+                    "blocked": clob_next_action,
+                    "ready": clob_next_action,
+                },
+            ),
+        ]
+    )
 
     return {
         "mode": mode,
@@ -1112,6 +1232,7 @@ def _safety_report_summary():
         "checklist": checklist,
         "readiness_summary": readiness_summary,
         "clob_readonly": clob_readonly,
+        "report_refresh": report_refresh,
         "first_order_rail": first_order_rail,
         "risk": risk_summary,
         "today": today_summary,

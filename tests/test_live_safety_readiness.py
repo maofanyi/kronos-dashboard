@@ -665,6 +665,68 @@ def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
     assert checks["live_preflight_no_submission"]["ok"] is True
 
 
+def test_live_safety_includes_report_refresh_summary(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+
+    gate_path = report_dir / "live_trade_gate_latest.json"
+    _write_json(
+        gate_path,
+        {
+            "ok": False,
+            "ready_for_live_smoke": False,
+            "blockers": ["balance_meets_minimum"],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+            },
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+            ],
+        },
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {"gate_ready": True, "smoke_mode": "preview", "open_orders": 0, "settled": 0, "risk_ok": True},
+        },
+    )
+
+    summary = server._safety_report_summary()
+    refresh = summary["report_refresh"]
+    items = {item["key"]: item for item in refresh["items"]}
+
+    assert refresh["ready"] is False
+    assert refresh["total"] == 3
+    assert refresh["stale_count"] == 1
+    assert refresh["blocked_count"] >= 1
+    assert items["live_gate"]["report"].endswith("live_trade_gate_latest.json")
+    assert items["live_gate"]["available"] is True
+    assert items["live_gate"]["fresh"] is True
+    assert items["live_gate"]["status"] == "blocked"
+    assert items["live_gate"]["next_action"] == "Clear live gate blockers"
+    assert items["live_gate"]["blockers"] == ["balance_meets_minimum"]
+    assert items["live_preflight"]["fresh"] is False
+    assert items["live_preflight"]["status"] == "stale"
+    assert items["live_preflight"]["next_action"] == "Refresh live preflight chain"
+    assert items["clob_readonly"]["status"] == "blocked"
+    assert items["clob_readonly"]["next_action"] == "Run live trade gate report"
+
+
 def test_live_safety_marks_stale_preflight_report_as_critical(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -1015,6 +1077,19 @@ def test_live_page_surfaces_clob_readonly_panel():
     assert "probe.quote_executable" in source
     assert "probe.best_bid" in source
     assert "probe.best_ask" in source
+
+
+def test_live_page_surfaces_report_freshness_panel():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "report_refresh" in source
+    assert "function ReportFreshnessPanel" in source
+    assert "<ReportFreshnessPanel refresh={safety?.report_refresh}" in source
+    assert "Report Freshness" in source
+    assert "item.next_action" in source
+    assert "item.status" in source
+    assert "item.age_seconds" in source
+    assert "item.report" in source
 
 
 def test_live_collapsible_panels_expose_accessible_expanded_state():

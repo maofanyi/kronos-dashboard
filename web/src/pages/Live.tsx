@@ -201,6 +201,26 @@ interface LiveSafety {
     live_gate?: string;
     live_preflight?: string;
   };
+  report_refresh?: {
+    ready: boolean;
+    total: number;
+    missing_count: number;
+    stale_count: number;
+    blocked_count: number;
+    items: Array<{
+      key: string;
+      label: string;
+      report: string;
+      available: boolean;
+      ok: boolean;
+      fresh: boolean;
+      age_seconds?: number | null;
+      max_age_seconds?: number | null;
+      status: string;
+      next_action: string;
+      blockers?: string[];
+    }>;
+  };
   dryrun?: {
     ledger: string;
     ledger_count: number;
@@ -963,6 +983,49 @@ function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | nu
   );
 }
 
+function ReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["report_refresh"] | null }) {
+  const items = refresh?.items ?? [];
+  const issueCount = (refresh?.missing_count ?? 0) + (refresh?.stale_count ?? 0) + (refresh?.blocked_count ?? 0);
+  const statusTone = (status: string) => {
+    if (status === "ready") return "border-emerald-500/25 bg-emerald-500/10 text-emerald-300";
+    if (status === "stale" || status === "missing") return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    return "border-zinc-700 bg-zinc-900/70 text-zinc-300";
+  };
+  return (
+    <Panel
+      title="Report Freshness"
+      sub="live gate, preflight, and CLOB audit"
+      right={<StatusPill ok={refresh?.ready === true} label={refresh?.ready ? "Fresh" : `${issueCount} review`} />}
+    >
+      <div className="grid gap-3 p-4 lg:grid-cols-3">
+        {items.map((item) => (
+          <div key={item.key} className="min-w-0 rounded-md border border-zinc-900 bg-black/20 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="truncate text-sm font-medium text-zinc-100">{item.label}</div>
+              <span className={`rounded border px-2 py-0.5 font-mono text-[11px] uppercase ${statusTone(item.status)}`}>
+                {item.status}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <HealthTile label="Age" value={ageLabel(item.age_seconds)} ok={item.fresh} />
+              <HealthTile label="Max Age" value={ageLabel(item.max_age_seconds)} />
+            </div>
+            <div className="mt-3 truncate text-xs text-zinc-400">{item.next_action}</div>
+            <div className="mt-2 truncate font-mono text-[11px] text-zinc-600">
+              {item.report?.split(/[\\/]/).pop() || "-"}
+            </div>
+            {(item.blockers?.length ?? 0) > 0 && (
+              <div className="mt-2 truncate text-[11px] text-amber-300">
+                {item.blockers?.slice(0, 2).join(" / ")}
+              </div>
+            )}
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
 function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveSafety | null }) {
   const risk = intel?.risk;
   const maker = intel?.maker;
@@ -1096,6 +1159,8 @@ export default function Live() {
       <BTCMarketChart />
 
       <FirstOrderRail rail={safety?.first_order_rail} />
+
+      <ReportFreshnessPanel refresh={safety?.report_refresh} />
 
       <ClobReadonlyPanel audit={safety?.clob_readonly} />
 
