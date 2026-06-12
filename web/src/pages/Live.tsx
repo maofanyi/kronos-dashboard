@@ -221,6 +221,20 @@ interface LiveSafety {
       blockers?: string[];
     }>;
   };
+  market_data?: {
+    ready: boolean;
+    price?: number | null;
+    timestamp?: string;
+    source: string;
+    status: string;
+    price_age_seconds?: number | null;
+    received_at?: number | null;
+    received_age_seconds?: number | null;
+    max_price_age_seconds: number;
+    max_received_age_seconds: number;
+    next_action: string;
+    error?: string | null;
+  };
   dryrun?: {
     ledger: string;
     ledger_count: number;
@@ -1041,6 +1055,27 @@ function ReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["report_refres
   );
 }
 
+function MarketDataPanel({ data }: { data?: LiveSafety["market_data"] | null }) {
+  const sourceLabel = data?.source?.replace(/_/g, " ") || "-";
+  return (
+    <Panel
+      title="Market Data"
+      sub="Chainlink live reference"
+      right={<StatusPill ok={data?.ready === true} label={data?.ready ? "Fresh" : data?.status || "Waiting"} />}
+    >
+      <div className="grid grid-cols-2 gap-2 p-4 md:grid-cols-4 xl:grid-cols-6">
+        <HealthTile label="Source" value={sourceLabel} ok={data?.source?.includes("chainlink")} />
+        <HealthTile label="Status" value={data?.status || "-"} ok={data?.ready === true} />
+        <HealthTile label="BTC Price" value={data?.price == null ? "-" : money(data.price)} ok={data?.ready === true} />
+        <HealthTile label="Price Age" value={ageLabel(data?.price_age_seconds)} ok={(data?.price_age_seconds ?? 9999) <= (data?.max_price_age_seconds ?? 0)} />
+        <HealthTile label="Received Age" value={ageLabel(data?.received_age_seconds)} ok={(data?.received_age_seconds ?? 9999) <= (data?.max_received_age_seconds ?? 0)} />
+        <HealthTile label="Next Action" value={data?.next_action || "-"} ok={data?.ready === true} />
+        {data?.error && <HealthTile label="Error" value={data.error} ok={false} />}
+      </div>
+    </Panel>
+  );
+}
+
 function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveSafety | null }) {
   const risk = intel?.risk;
   const maker = intel?.maker;
@@ -1172,6 +1207,8 @@ export default function Live() {
       </div>
 
       <BTCMarketChart />
+
+      <MarketDataPanel data={safety?.market_data} />
 
       <FirstOrderRail rail={safety?.first_order_rail} />
 

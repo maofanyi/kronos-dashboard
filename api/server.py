@@ -41,6 +41,8 @@ RISK_LIMITS = {
 }
 LIVE_PREFLIGHT_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_LIVE_PREFLIGHT_MAX_AGE_SECONDS", "180"))
 CLOB_READONLY_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_CLOB_READONLY_MAX_AGE_SECONDS", "300"))
+BTC_LIVE_MAX_PRICE_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_PRICE_AGE_SECONDS", "15"))
+BTC_LIVE_MAX_RECEIVED_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_RECEIVED_AGE_SECONDS", "30"))
 
 
 def _configured_paper_source():
@@ -315,6 +317,55 @@ def _live_dryrun_today_summary(rows=None):
         "latest_status": str(latest.get("status") or ""),
         "latest_action": str(latest.get("action") or ""),
         "latest_block_reason": str(latest_blocked.get("block_reason") or latest_blocked.get("reason") or ""),
+    }
+
+
+def _btc_live_market_data_summary():
+    now_seconds = float(_btc_live_now())
+    now_dt = datetime.fromtimestamp(now_seconds, tz=timezone.utc)
+    with BTC_LIVE_LOCK:
+        cached = dict(BTC_LIVE_CACHE)
+    try:
+        price = float(cached.get("price"))
+    except (TypeError, ValueError):
+        price = None
+    timestamp = str(cached.get("timestamp") or "")
+    price_ts = _parse_dt(timestamp)
+    price_age_seconds = None
+    if price_ts is not None:
+        price_age_seconds = max(0, int((now_dt - price_ts).total_seconds()))
+    received_age_seconds = None
+    try:
+        received_at = float(cached.get("received_at"))
+        received_age_seconds = max(0, int(now_seconds - received_at))
+    except (TypeError, ValueError):
+        received_at = None
+    available = price is not None and price_ts is not None
+    price_fresh = price_age_seconds is not None and price_age_seconds <= BTC_LIVE_MAX_PRICE_AGE_SECONDS
+    received_fresh = received_age_seconds is not None and received_age_seconds <= BTC_LIVE_MAX_RECEIVED_AGE_SECONDS
+    ready = available and price_fresh and received_fresh and not cached.get("error")
+    if ready:
+        status = "fresh"
+        next_action = "Market data fresh"
+    elif available:
+        status = "stale"
+        next_action = "Refresh Chainlink live price feed"
+    else:
+        status = str(cached.get("status") or "warming_up")
+        next_action = "Wait for Chainlink live price"
+    return {
+        "ready": ready,
+        "price": price,
+        "timestamp": timestamp,
+        "source": str(cached.get("source") or "polymarket_rtds_chainlink"),
+        "status": status,
+        "price_age_seconds": price_age_seconds,
+        "received_at": received_at,
+        "received_age_seconds": received_age_seconds,
+        "max_price_age_seconds": BTC_LIVE_MAX_PRICE_AGE_SECONDS,
+        "max_received_age_seconds": BTC_LIVE_MAX_RECEIVED_AGE_SECONDS,
+        "next_action": next_action,
+        "error": cached.get("error"),
     }
 
 
@@ -978,6 +1029,7 @@ def _safety_report_summary():
     real_orders_enabled = real_orders_env == "YES"
     risk_summary = _live_risk_summary(checkpoint)
     today_summary = _live_today_summary(checkpoint, risk_summary, dryrun_summary)
+    market_data_summary = _btc_live_market_data_summary()
 
     checklist = [
         {
@@ -1268,6 +1320,7 @@ def _safety_report_summary():
         "dryrun": dryrun_summary,
         "live_gate": live_gate_summary,
         "preflight_chain": preflight_summary,
+        "market_data": market_data_summary,
         "checklist": checklist,
         "readiness_summary": readiness_summary,
         "clob_readonly": clob_readonly,

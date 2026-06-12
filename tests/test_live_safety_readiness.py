@@ -727,6 +727,56 @@ def test_live_safety_includes_report_refresh_summary(tmp_path, monkeypatch):
     assert items["clob_readonly"]["next_action"] == "Run live trade gate report"
 
 
+def test_live_safety_includes_market_data_freshness(monkeypatch):
+    monkeypatch.setattr(server, "_btc_live_now", lambda: 1000.0)
+    monkeypatch.setattr(
+        server,
+        "BTC_LIVE_CACHE",
+        {
+            "price": 63408.46,
+            "timestamp": datetime.fromtimestamp(995, tz=timezone.utc).isoformat(),
+            "received_at": 997.0,
+            "source": "polymarket_rtds_chainlink",
+            "status": "fresh",
+            "error": None,
+        },
+    )
+
+    market_data = server._safety_report_summary()["market_data"]
+
+    assert market_data["ready"] is True
+    assert market_data["source"] == "polymarket_rtds_chainlink"
+    assert market_data["status"] == "fresh"
+    assert market_data["price"] == 63408.46
+    assert market_data["price_age_seconds"] == 5
+    assert market_data["received_age_seconds"] == 3
+    assert market_data["next_action"] == "Market data fresh"
+
+
+def test_live_safety_marks_stale_market_data(monkeypatch):
+    monkeypatch.setattr(server, "_btc_live_now", lambda: 1000.0)
+    monkeypatch.setattr(
+        server,
+        "BTC_LIVE_CACHE",
+        {
+            "price": 63408.46,
+            "timestamp": datetime.fromtimestamp(900, tz=timezone.utc).isoformat(),
+            "received_at": 940.0,
+            "source": "polymarket_rtds_chainlink",
+            "status": "fresh",
+            "error": None,
+        },
+    )
+
+    market_data = server._safety_report_summary()["market_data"]
+
+    assert market_data["ready"] is False
+    assert market_data["status"] == "stale"
+    assert market_data["price_age_seconds"] == 100
+    assert market_data["received_age_seconds"] == 60
+    assert market_data["next_action"] == "Refresh Chainlink live price feed"
+
+
 def test_live_safety_marks_stale_preflight_report_as_critical(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -1144,6 +1194,19 @@ def test_live_page_surfaces_report_freshness_panel():
     assert "item.status" in source
     assert "item.age_seconds" in source
     assert "item.report" in source
+
+
+def test_live_page_surfaces_market_data_panel():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "market_data" in source
+    assert "function MarketDataPanel" in source
+    assert "<MarketDataPanel data={safety?.market_data}" in source
+    assert "Market Data" in source
+    assert "data?.price_age_seconds" in source
+    assert "data?.received_age_seconds" in source
+    assert "data?.next_action" in source
+    assert "data?.source" in source
 
 
 def test_live_collapsible_panels_expose_accessible_expanded_state():
