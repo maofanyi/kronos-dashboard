@@ -822,6 +822,7 @@ def _readiness_action(key):
         "minimum_allowance": "Approve USDC allowance",
         "open_orders_clear": "Cancel or reconcile open orders",
         "dryrun_no_submitted_orders": "Keep dry-run from submitting orders",
+        "market_data_fresh": "Refresh Chainlink live price feed",
         "live_trade_gate_available": "Generate live trade gate report",
         "live_trade_gate_ready": "Clear live gate blockers",
         "live_preflight_available": "Run live preflight chain",
@@ -864,7 +865,7 @@ def _first_order_rail(checklist):
         (
             "read_only_audit",
             "CLOB read-only audit",
-            ["clob_authenticated", "account_read_ok", "allowance_read_ok", "open_orders_clear"],
+            ["clob_authenticated", "account_read_ok", "allowance_read_ok", "open_orders_clear", "market_data_fresh"],
             "Run CLOB read-only audit",
         ),
         (
@@ -1088,6 +1089,14 @@ def _safety_report_summary():
             "label": "Dry-run no submissions",
             "ok": dryrun_summary["submitted_count"] == 0,
             "value": dryrun_summary["submitted_count"],
+            "severity": "critical",
+        },
+        {
+            "key": "market_data_fresh",
+            "label": "Market data fresh",
+            "ok": market_data_summary["ready"],
+            "value": market_data_summary.get("price_age_seconds"),
+            "expected": f"<= {BTC_LIVE_MAX_PRICE_AGE_SECONDS}s price, <= {BTC_LIVE_MAX_RECEIVED_AGE_SECONDS}s received",
             "severity": "critical",
         },
         {

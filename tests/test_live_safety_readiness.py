@@ -459,6 +459,19 @@ def test_live_safety_first_order_rail_requires_manual_confirmation_when_ready(tm
     monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
     monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
     monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+    monkeypatch.setattr(server, "_btc_live_now", lambda: 1000.0)
+    monkeypatch.setattr(
+        server,
+        "BTC_LIVE_CACHE",
+        {
+            "price": 63408.46,
+            "timestamp": datetime.fromtimestamp(995, tz=timezone.utc).isoformat(),
+            "received_at": 997.0,
+            "source": "polymarket_rtds_chainlink",
+            "status": "fresh",
+            "error": None,
+        },
+    )
 
     _write_json(
         report_dir / "live_trade_gate_latest.json",
@@ -768,13 +781,89 @@ def test_live_safety_marks_stale_market_data(monkeypatch):
         },
     )
 
-    market_data = server._safety_report_summary()["market_data"]
+    summary = server._safety_report_summary()
+    market_data = summary["market_data"]
+    checks = {item["key"]: item for item in summary["checklist"]}
 
     assert market_data["ready"] is False
     assert market_data["status"] == "stale"
     assert market_data["price_age_seconds"] == 100
     assert market_data["received_age_seconds"] == 60
     assert market_data["next_action"] == "Refresh Chainlink live price feed"
+    assert checks["market_data_fresh"]["ok"] is False
+    assert checks["market_data_fresh"]["severity"] == "critical"
+    assert checks["market_data_fresh"]["expected"] == f"<= {server.BTC_LIVE_MAX_PRICE_AGE_SECONDS}s price, <= {server.BTC_LIVE_MAX_RECEIVED_AGE_SECONDS}s received"
+    assert any(item["key"] == "market_data_fresh" for item in summary["readiness_summary"]["top_blockers"])
+
+
+def test_live_safety_first_order_rail_blocks_on_stale_market_data(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "_btc_live_now", lambda: 1000.0)
+    monkeypatch.setattr(
+        server,
+        "BTC_LIVE_CACHE",
+        {
+            "price": 63408.46,
+            "timestamp": datetime.fromtimestamp(900, tz=timezone.utc).isoformat(),
+            "received_at": 940.0,
+            "source": "polymarket_rtds_chainlink",
+            "status": "fresh",
+            "error": None,
+        },
+    )
+
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 12.5,
+                "min_allowance": 15.0,
+            },
+            "funding_requirements": {"funding_ready": True},
+            "market_probes": [
+                {"direction": "UP", "ok": True, "quote_executable": True},
+                {"direction": "DOWN", "ok": True, "quote_executable": True},
+            ],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True},
+                {"name": "allowance_meets_minimum", "ok": True},
+            ],
+        },
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": datetime.fromtimestamp(995, tz=timezone.utc).isoformat(),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {"gate_ready": True, "smoke_mode": "preview", "open_orders": 0, "settled": 0, "risk_ok": True},
+        },
+    )
+
+    rail = server._safety_report_summary()["first_order_rail"]
+    read_only_stage = next(stage for stage in rail["stages"] if stage["key"] == "read_only_audit")
+
+    assert rail["current_key"] == "read_only_audit"
+    assert read_only_stage["status"] == "blocked"
+    assert "Market data fresh" in read_only_stage["blockers"]
 
 
 def test_live_safety_marks_stale_preflight_report_as_critical(tmp_path, monkeypatch):
@@ -1252,6 +1341,8 @@ def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     assert "safety?.preflight_chain?.ok" in source
     assert "safety?.preflight_chain?.fresh" in source
     assert "safety?.preflight_chain?.age_seconds" in source
+    assert "market_data_fresh" in source
+    assert "Refresh Chainlink live price feed" in source
     assert "Dry-run" in source
     assert "Preflight" in source
 

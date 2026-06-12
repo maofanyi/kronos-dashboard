@@ -277,6 +277,7 @@ function readinessAction(key: string) {
     minimum_allowance: "Approve USDC allowance",
     open_orders_clear: "Cancel or reconcile open orders",
     dryrun_no_submitted_orders: "Keep dry-run from submitting orders",
+    market_data_fresh: "Refresh Chainlink live price feed",
     live_trade_gate_available: "Generate live trade gate report",
     live_trade_gate_ready: "Clear live gate blockers",
     live_preflight_available: "Run live preflight chain",
