@@ -1232,6 +1232,18 @@ def test_live_page_signal_condition_labels_are_readable():
     assert "Long macro veto" in source
 
 
+def test_btc_price_bar_uses_chainlink_live_price():
+    source = Path("web/src/components/BTCPriceBar.tsx").read_text(encoding="utf-8")
+
+    assert 'usePolling<BTCLivePrice>("/api/btc/live-price"' in source
+    assert "/api/btc/price" not in source
+    assert "BTC/USD" in source
+    assert "BTC/USDT" not in source
+    assert "data?.source" in source
+    assert "data?.status" in source
+    assert "priceAgeLabel(data?.timestamp)" in source
+
+
 def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
