@@ -717,6 +717,41 @@ def _decision_passed(event):
     return event.get("executable") is True and action != "HOLD"
 
 
+def _signal_action_counts(events):
+    counts = {"buy_up": 0, "buy_down": 0, "hold": 0, "other": 0}
+    for event in events:
+        action = str(event.get("action") or "").upper()
+        if action == "BUY_UP":
+            counts["buy_up"] += 1
+        elif action == "BUY_DOWN":
+            counts["buy_down"] += 1
+        elif action == "HOLD":
+            counts["hold"] += 1
+        else:
+            counts["other"] += 1
+    return counts
+
+
+def _top_signal_block_reason(events):
+    counts = {}
+    for event in events:
+        if _decision_passed(event):
+            continue
+        reason = str(
+            event.get("block_reason")
+            or event.get("reason_code")
+            or event.get("reason")
+            or ""
+        ).strip()
+        if not reason:
+            continue
+        counts[reason] = counts.get(reason, 0) + 1
+    if not counts:
+        return "", 0
+    reason, count = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[0]
+    return reason, count
+
+
 def _source_events_for_day(source, day, limit=1000):
     return [
         event for event in _tail_source_events(source, limit=limit)
@@ -748,6 +783,8 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
     ]
     passed = sum(1 for event in events if _decision_passed(event))
     blocked = max(0, len(events) - passed)
+    action_counts = _signal_action_counts(events)
+    top_block_reason, top_block_count = _top_signal_block_reason(events)
 
     audit_events = [
         event for event in _tail_audit_events(limit=1000)
@@ -786,6 +823,12 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
             "passed": passed,
             "blocked": blocked,
             "pass_rate": round(passed / len(events), 4) if events else 0.0,
+            "buy_up": action_counts["buy_up"],
+            "buy_down": action_counts["buy_down"],
+            "hold": action_counts["hold"],
+            "other": action_counts["other"],
+            "top_block_reason": top_block_reason,
+            "top_block_count": top_block_count,
         },
         "trades": {
             "settled": len(todays_settled),

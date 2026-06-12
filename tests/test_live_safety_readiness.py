@@ -1033,6 +1033,7 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
             "action": "HOLD",
             "filt": False,
             "executable": False,
+            "block_reason": "macro_gate",
             "_t": f"{today_prefix}T00:05:00Z",
         },
         {
@@ -1108,6 +1109,12 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
     assert today["signals"]["passed"] == 1
     assert today["signals"]["blocked"] == 1
     assert today["signals"]["pass_rate"] == 0.5
+    assert today["signals"]["buy_up"] == 1
+    assert today["signals"]["buy_down"] == 0
+    assert today["signals"]["hold"] == 1
+    assert today["signals"]["other"] == 0
+    assert today["signals"]["top_block_reason"] == "macro_gate"
+    assert today["signals"]["top_block_count"] == 1
     assert today["trades"]["settled"] == 2
     assert today["trades"]["wins"] == 1
     assert today["trades"]["losses"] == 1
@@ -1213,6 +1220,21 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "Today ${signedMoney(todayPnl)}" in source
     assert "today trades" in source
     assert "today pass rate" in source
+
+
+def test_live_page_surfaces_today_signal_distribution():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "buy_up: number" in source
+    assert "buy_down: number" in source
+    assert "top_block_reason?: string" in source
+    assert "today?.signals.buy_up" in source
+    assert "today?.signals.buy_down" in source
+    assert "today?.signals.hold" in source
+    assert "today?.signals.top_block_reason" in source
+    assert "Buy Up/Down" in source
+    assert "Signal Hold" in source
+    assert "Top Signal Block" in source
 
 
 def test_live_page_surfaces_readiness_summary_in_top_kpis():

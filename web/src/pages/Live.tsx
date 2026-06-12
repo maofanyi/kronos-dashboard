@@ -338,6 +338,12 @@ interface LiveSafety {
       passed: number;
       blocked: number;
       pass_rate: number;
+      buy_up: number;
+      buy_down: number;
+      hold: number;
+      other: number;
+      top_block_reason?: string;
+      top_block_count?: number;
     };
     trades: {
       settled: number;
@@ -865,6 +871,9 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
             value={`${today?.signals.passed ?? 0}/${today?.signals.total ?? 0} | ${percent(passRate)}`}
             ok={(today?.signals.total ?? 0) === 0 ? undefined : passRate > 0}
           />
+          <HealthTile label="Buy Up/Down" value={`${today?.signals.buy_up ?? 0}/${today?.signals.buy_down ?? 0}`} />
+          <HealthTile label="Signal Hold" value={`${today?.signals.hold ?? 0}`} ok={(today?.signals.hold ?? 0) === 0 ? undefined : false} />
+          <HealthTile label="Top Signal Block" value={today?.signals.top_block_reason || "-"} ok={today?.signals.top_block_reason ? false : undefined} />
           <HealthTile
             label="Open/Pending"
             value={`${today?.trades.open ?? 0}/${today?.trades.pending ?? 0}`}
