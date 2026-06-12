@@ -1813,11 +1813,9 @@ def _price_at(frame, ts):
 def _result_label(target_price, settle_price):
     if target_price is None or settle_price is None:
         return "PENDING"
-    if settle_price > target_price:
+    if settle_price >= target_price:
         return "UP"
-    if settle_price < target_price:
-        return "DOWN"
-    return "FLAT"
+    return "DOWN"
 
 
 def _build_history(frame, current_start, limit=8):

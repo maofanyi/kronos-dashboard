@@ -47,6 +47,10 @@ def test_chainlink_market_payload_is_readonly_and_calculates_prices():
     assert all(key not in payload for key in ("buy", "sell", "order", "trade", "clob", "wallet"))
 
 
+def test_chainlink_market_result_tie_resolves_up_like_polymarket_rule():
+    assert server._result_label(100.0, 100.0) == "UP"
+
+
 def test_chainlink_streams_auth_headers_match_official_hmac_shape():
     path = "/api/v1/ws?feedIDs=0xabc"
     headers = server._chainlink_streams_auth_headers(
