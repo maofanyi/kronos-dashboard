@@ -144,6 +144,10 @@ interface LiveSafety {
     available: boolean;
     ready: boolean;
     report: string;
+    report_mtime?: string | null;
+    report_age_seconds?: number | null;
+    fresh: boolean;
+    max_age_seconds: number;
     authenticated: boolean;
     account_read_ok: boolean;
     allowance_read_ok: boolean;
@@ -863,6 +867,11 @@ function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | nu
     >
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.55fr)]">
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <HealthTile
+            label="Report Age"
+            value={ageLabel(audit?.report_age_seconds)}
+            ok={audit?.fresh}
+          />
           <HealthTile label="CLOB Auth" value={audit?.authenticated ? "OK" : "-"} ok={audit?.authenticated} />
           <HealthTile label="Account Read" value={audit?.account_read_ok ? "OK" : "-"} ok={audit?.account_read_ok} />
           <HealthTile label="Allowance Read" value={audit?.allowance_read_ok ? "OK" : "-"} ok={audit?.allowance_read_ok} />

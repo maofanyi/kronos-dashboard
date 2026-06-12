@@ -40,6 +40,7 @@ RISK_LIMITS = {
     "max_open_or_pending_orders": int(os.environ.get("MAX_OPEN_OR_PENDING_ORDERS", "1")),
 }
 LIVE_PREFLIGHT_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_LIVE_PREFLIGHT_MAX_AGE_SECONDS", "180"))
+CLOB_READONLY_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_CLOB_READONLY_MAX_AGE_SECONDS", "300"))
 
 
 def _configured_paper_source():
@@ -941,6 +942,22 @@ def _safety_report_summary():
     open_orders_read_ok = bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok"))
     market_probe_count = int(live_gate_summary.get("market_probe_count", 0) or 0)
     quote_executable_count = int(live_gate_summary.get("quote_executable_count", 0) or 0)
+    clob_report_path = gate_path or allowance_path
+    clob_report_mtime = None
+    clob_report_age_seconds = None
+    if clob_report_path:
+        try:
+            clob_report_mtime_dt = datetime.fromtimestamp(clob_report_path.stat().st_mtime, tz=timezone.utc)
+            clob_report_mtime = clob_report_mtime_dt.isoformat()
+            clob_report_age_seconds = max(0, int((datetime.now(timezone.utc) - clob_report_mtime_dt).total_seconds()))
+        except OSError:
+            clob_report_mtime = None
+            clob_report_age_seconds = None
+    clob_report_fresh = (
+        bool(clob_report_path)
+        and clob_report_age_seconds is not None
+        and clob_report_age_seconds <= CLOB_READONLY_MAX_AGE_SECONDS
+    )
     clob_readonly_ready = (
         clob_authenticated
         and account_read_ok
@@ -949,11 +966,16 @@ def _safety_report_summary():
         and open_orders_count == 0
         and market_probe_count > 0
         and quote_executable_count == market_probe_count
+        and clob_report_fresh
     )
     clob_readonly = {
         "available": bool(live_gate_summary.get("available") or allowance_report),
         "ready": clob_readonly_ready,
-        "report": str(gate_path or allowance_path or ""),
+        "report": str(clob_report_path or ""),
+        "report_mtime": clob_report_mtime,
+        "report_age_seconds": clob_report_age_seconds,
+        "fresh": clob_report_fresh,
+        "max_age_seconds": CLOB_READONLY_MAX_AGE_SECONDS,
         "authenticated": clob_authenticated,
         "account_read_ok": account_read_ok,
         "allowance_read_ok": allowance_read_ok,

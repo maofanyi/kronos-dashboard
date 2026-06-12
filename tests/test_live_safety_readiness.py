@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -211,6 +212,57 @@ def test_live_safety_includes_clob_readonly_audit_summary(tmp_path, monkeypatch)
     assert audit["quote_executable_rate"] == 0.5
     assert audit["funding_ready"] is True
     assert audit["blockers"] == ["one quote not executable"]
+
+
+def test_live_safety_clob_readonly_marks_stale_report(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+
+    report_path = report_dir / "live_trade_gate_latest.json"
+    _write_json(
+        report_path,
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 12.5,
+                "min_allowance": 15.0,
+            },
+            "funding_requirements": {"funding_ready": True},
+            "market_probes": [
+                {"direction": "UP", "ok": True, "quote_executable": True},
+                {"direction": "DOWN", "ok": True, "quote_executable": True},
+            ],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True},
+                {"name": "allowance_meets_minimum", "ok": True},
+            ],
+        },
+    )
+    stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    os.utime(report_path, (stale_ts, stale_ts))
+
+    audit = server._safety_report_summary()["clob_readonly"]
+
+    assert audit["report_mtime"]
+    assert audit["report_age_seconds"] >= 600
+    assert audit["fresh"] is False
+    assert audit["max_age_seconds"] == server.CLOB_READONLY_MAX_AGE_SECONDS
+    assert audit["ready"] is False
 
 
 def test_live_safety_includes_first_order_rail(tmp_path, monkeypatch):
@@ -798,6 +850,9 @@ def test_live_page_surfaces_clob_readonly_panel():
     assert "Open Orders" in source
     assert "Min Allowance" in source
     assert "Allowance Count" in source
+    assert "Report Age" in source
+    assert "audit?.fresh" in source
+    assert "audit?.report_age_seconds" in source
 
 
 def test_live_collapsible_panels_expose_accessible_expanded_state():
