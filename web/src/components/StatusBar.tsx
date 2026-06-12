@@ -37,6 +37,23 @@ interface SafetyData {
     balance_expected?: string;
     allowance_expected?: string;
   };
+  dryrun?: {
+    ledger?: string;
+    ledger_count?: number;
+    would_place_count?: number;
+    blocked_count?: number;
+    submitted_count?: number;
+    latest?: Record<string, unknown> | null;
+  };
+  live_gate?: {
+    report?: string;
+    available?: boolean;
+    ok?: boolean;
+    ready_for_live_smoke?: boolean;
+    blockers?: string[];
+    market_probe_count?: number;
+    quote_executable_count?: number;
+  };
   checklist?: ChecklistItem[];
   risk?: {
     ok: boolean;
@@ -187,6 +204,8 @@ export default function StatusBar() {
   const checksTotal = checklist.length;
   const checksOk = checksTotal > 0 && checksPassed === checksTotal;
   const riskOk = safety?.risk?.ok ?? true;
+  const dryrunOk = (safety?.dryrun?.submitted_count ?? 0) === 0;
+  const liveGateReady = safety?.live_gate?.ready_for_live_smoke === true;
   const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk;
   const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
 
@@ -214,6 +233,14 @@ export default function StatusBar() {
                 ? `PnL ${signedMoney(metrics.daily_pnl_usdc)} · ${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders} open`
                 : "Risk -"
             }
+          />
+          <StatusChip
+            ok={dryrunOk}
+            label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
+          />
+          <StatusChip
+            ok={liveGateReady}
+            label={liveGateReady ? "Gate ready" : `Gate ${safety?.live_gate?.blockers?.length ?? 0}`}
           />
           <span className="min-w-0 max-w-[220px] truncate font-mono text-zinc-600 md:max-w-[360px]">{source}</span>
           <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} />
@@ -249,6 +276,16 @@ export default function StatusBar() {
               <DetailTile label="Checkpoint" value={ageLabel(health?.checkpoint_age_seconds)} ok={(health?.checkpoint_age_seconds ?? 9999) < 600} />
               <DetailTile label="Latest Event" value={ageLabel(health?.latest_event_age_seconds)} ok={(health?.latest_event_age_seconds ?? 9999) < 600} />
               <DetailTile label="Open/Pending" value={`${metrics?.open_or_pending_orders ?? health?.pending_count ?? 0}`} ok={riskOk} />
+              <DetailTile
+                label="Dry-run Ledger"
+                value={`${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
+                ok={dryrunOk}
+              />
+              <DetailTile
+                label="Live Gate"
+                value={liveGateReady ? "ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`}
+                ok={liveGateReady}
+              />
             </div>
 
             <div className="rounded-md border border-zinc-800 bg-black/20">

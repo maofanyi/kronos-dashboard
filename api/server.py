@@ -245,6 +245,59 @@ def _latest_json_report(pattern: str):
     return path, _read_json(path) or {}
 
 
+def _live_dryrun_ledger_summary():
+    source = _paper_run_source()
+    candidates = [
+        KRONOS_CHECKPOINT_DIR / f"{source}_ledger.json",
+        KRONOS_CHECKPOINT_DIR / "live_dryrun_aligned_prod_shift1_ledger.json",
+    ]
+    path = next((candidate for candidate in candidates if candidate.exists()), candidates[0])
+    payload = _read_json(path)
+    rows = payload if isinstance(payload, list) else []
+    submitted = [row for row in rows if isinstance(row, dict) and bool(row.get("submitted"))]
+    would_place = [
+        row
+        for row in rows
+        if isinstance(row, dict) and row.get("would_place_order") is True
+    ]
+    blocked = [
+        row
+        for row in rows
+        if isinstance(row, dict)
+        and (
+            str(row.get("status", "")).lower() == "blocked"
+            or bool(row.get("block_reason"))
+        )
+    ]
+    return {
+        "ledger": str(path),
+        "ledger_count": len(rows),
+        "would_place_count": len(would_place),
+        "blocked_count": len(blocked),
+        "submitted_count": len(submitted),
+        "latest": rows[-1] if rows else None,
+    }
+
+
+def _live_gate_report_summary(path=None, report=None):
+    if report is None:
+        path, report = _latest_json_report("live_trade_gate*.json")
+    report = report if isinstance(report, dict) else {}
+    probes = report.get("market_probes") if isinstance(report.get("market_probes"), list) else []
+    blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    return {
+        "report": str(path) if path else "",
+        "available": bool(report),
+        "ok": bool(report.get("ok")),
+        "ready_for_live_smoke": bool(report.get("ready_for_live_smoke")),
+        "blockers": blockers,
+        "market_probe_count": len(probes),
+        "quote_executable_count": sum(1 for probe in probes if probe.get("quote_executable")),
+        "account": report.get("account") if isinstance(report.get("account"), dict) else {},
+        "risk": report.get("risk") if isinstance(report.get("risk"), dict) else {},
+    }
+
+
 def _check_status(report: dict, name: str):
     for check in report.get("checks", []) or []:
         if check.get("name") == name:
@@ -392,16 +445,21 @@ def _safety_report_summary():
     allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
     if not allowance_report:
         allowance_path, allowance_report = _latest_json_report("polymarket_clob_account_read_audit*.json")
+    gate_path, gate_report = _latest_json_report("live_trade_gate*.json")
+    dryrun_summary = _live_dryrun_ledger_summary()
+    live_gate_summary = _live_gate_report_summary(gate_path, gate_report)
+    gate_account = gate_report.get("account") if isinstance(gate_report.get("account"), dict) else {}
     execution_path, execution_report = _latest_json_report("live_dryrun_execution_summary_latest.json")
     checkpoint = _read_json(_paper_checkpoint_path()) or {}
 
-    balance_check = _check_status(allowance_report, "minimum_balance")
-    allowance_check = _check_status(allowance_report, "minimum_allowance")
-    auth_check = _check_status(allowance_report, "readonly_authenticated_client")
+    balance_check = _check_status(allowance_report, "minimum_balance") or _check_status(gate_report, "balance_meets_minimum")
+    allowance_check = _check_status(allowance_report, "minimum_allowance") or _check_status(gate_report, "allowance_meets_minimum")
+    auth_check = _check_status(allowance_report, "readonly_authenticated_client") or _check_status(gate_report, "clob_account_authenticated")
     if auth_check is None:
         auth_check = _check_status(allowance_report, "clob_private_key_present")
-    balance_read = _check_status(allowance_report, "readonly_get_balance")
-    allowance_read = _check_status(allowance_report, "readonly_get_balance_allowance")
+    balance_read = _check_status(allowance_report, "readonly_get_balance") or _check_status(gate_report, "account_balance_read_ok")
+    allowance_read = _check_status(allowance_report, "readonly_get_balance_allowance") or _check_status(gate_report, "account_allowance_read_ok")
+    open_orders_read = _check_status(gate_report, "account_open_orders_read_ok")
 
     network_calls = (allowance_report.get("network") or {}).get("calls") or []
     balance_allowance_call = next(
@@ -412,8 +470,12 @@ def _safety_report_summary():
 
     real_orders_env = os.environ.get("KRONOS_ENABLE_REAL_ORDERS", "")
     run_source = _paper_run_source()
-    mode = "live" if run_source.startswith("live_") else "dry-run" if "dryrun" in run_source else "paper"
-    open_orders_count = len(checkpoint.get("open_orders", []) or [])
+    mode = "dry-run" if "dryrun" in run_source else "live" if run_source.startswith("live_") else "paper"
+    open_orders_count = int(
+        gate_account.get("open_orders_count", len(checkpoint.get("open_orders", []) or [])) or 0
+    )
+    balance_value = balance_allowance_call.get("balance", gate_account.get("usdc_balance"))
+    min_allowance_value = balance_allowance_call.get("min_allowance", gate_account.get("min_allowance"))
 
     clob_authenticated = bool(auth_check and auth_check.get("ok"))
     account_read_ok = bool(balance_read and balance_read.get("ok"))
@@ -475,6 +537,28 @@ def _safety_report_summary():
             "value": open_orders_count,
             "severity": "critical",
         },
+        {
+            "key": "dryrun_no_submitted_orders",
+            "label": "Dry-run no submissions",
+            "ok": dryrun_summary["submitted_count"] == 0,
+            "value": dryrun_summary["submitted_count"],
+            "severity": "critical",
+        },
+        {
+            "key": "live_trade_gate_available",
+            "label": "Live gate report",
+            "ok": live_gate_summary["available"],
+            "value": "ok" if live_gate_summary["available"] else "missing",
+            "severity": "critical",
+        },
+        {
+            "key": "live_trade_gate_ready",
+            "label": "Live smoke gate",
+            "ok": live_gate_summary["ready_for_live_smoke"],
+            "value": len(live_gate_summary["blockers"]),
+            "expected": "0 blockers",
+            "severity": "critical",
+        },
     ] + risk_summary["checks"]
 
     return {
@@ -489,22 +573,25 @@ def _safety_report_summary():
             "authenticated": clob_authenticated,
             "account_read_ok": account_read_ok,
             "allowance_read_ok": allowance_read_ok,
-            "open_orders_read_ok": bool(orders_call.get("ok")),
+            "open_orders_read_ok": bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok")),
             "open_orders_count": open_orders_count,
         },
         "funding": {
             "balance_ok": balance_ok,
             "allowance_ok": allowance_ok,
-            "balance": balance_allowance_call.get("balance"),
+            "balance": balance_value,
             "allowance_count": balance_allowance_call.get("allowance_count"),
-            "min_allowance": balance_allowance_call.get("min_allowance"),
+            "min_allowance": min_allowance_value,
             "balance_expected": balance_check.get("expected") if balance_check else None,
             "allowance_expected": allowance_check.get("expected") if allowance_check else None,
         },
         "reports": {
             "allowance": str(allowance_path) if allowance_path else "",
             "execution": str(execution_path) if execution_path else "",
+            "live_gate": str(gate_path) if gate_path else "",
         },
+        "dryrun": dryrun_summary,
+        "live_gate": live_gate_summary,
         "checklist": checklist,
         "risk": risk_summary,
         "execution_summary": execution_report.get("summary") or execution_report,

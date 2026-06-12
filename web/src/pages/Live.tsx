@@ -159,6 +159,24 @@ interface LiveSafety {
   reports: {
     allowance: string;
     execution: string;
+    live_gate?: string;
+  };
+  dryrun?: {
+    ledger: string;
+    ledger_count: number;
+    would_place_count: number;
+    blocked_count: number;
+    submitted_count: number;
+    latest?: Record<string, unknown> | null;
+  };
+  live_gate?: {
+    report: string;
+    available: boolean;
+    ok: boolean;
+    ready_for_live_smoke: boolean;
+    blockers: string[];
+    market_probe_count: number;
+    quote_executable_count: number;
   };
   checklist?: ChecklistItem[];
   risk?: {
@@ -370,15 +388,19 @@ function StatusPill({ ok, label }: { ok: boolean; label: string }) {
 function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null }) {
   const liveEnabled = safety?.real_orders_enabled === true;
   const source = safety?.run_source ?? health?.run_source ?? "-";
+  const dryrunClean = (safety?.dryrun?.submitted_count ?? 0) === 0;
+  const gateReady = safety?.live_gate?.ready_for_live_smoke === true;
   return (
     <CollapsiblePanel
       title="Live Safety"
       sub={source}
-      right={<StatusPill ok={!liveEnabled && health?.state === "ok"} label={!liveEnabled && health?.state === "ok" ? "Safe" : "Review"} />}
+      right={<StatusPill ok={!liveEnabled && health?.state === "ok" && dryrunClean} label={!liveEnabled && health?.state === "ok" && dryrunClean ? "Safe" : "Review"} />}
       summary={
         <div className="flex min-w-0 flex-wrap gap-2">
           <StatusPill ok={!liveEnabled} label={liveEnabled ? "Real orders enabled" : "Locked"} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
+          <StatusPill ok={dryrunClean} label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`} />
+          <StatusPill ok={gateReady} label={gateReady ? "Gate ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`} />
           <span className="min-w-0 truncate font-mono text-xs text-zinc-500">{source}</span>
         </div>
       }
@@ -389,6 +411,8 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={safety?.clob?.authenticated === true} label="CLOB auth" />
           <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${safety?.funding?.balance ?? "-"}`} />
           <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${safety?.funding?.min_allowance ?? "-"}`} />
+          <StatusPill ok={dryrunClean} label={`Dry-run submitted ${safety?.dryrun?.submitted_count ?? 0}`} />
+          <StatusPill ok={gateReady} label={`Gate blockers ${safety?.live_gate?.blockers?.length ?? 0}`} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
         </div>
       </div>
@@ -681,6 +705,11 @@ export default function Live() {
       </div>
 
       <BTCMarketChart />
+
+      <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
+        <SafetyStrip safety={safety} health={health} />
+        <ReadinessChecklist safety={safety} health={health} intel={intel} />
+      </div>
 
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]">
         <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
