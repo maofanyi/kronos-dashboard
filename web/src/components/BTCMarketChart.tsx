@@ -1,5 +1,5 @@
-import { Activity, Bitcoin, ChevronLeft, ChevronRight, Clock3, History, RadioTower, Target } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { Activity, Bitcoin, ChevronLeft, ChevronRight, Clock3, History, RadioTower, Target, Triangle } from "lucide-react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { usePolling } from "../hooks/usePolling";
 
 type Candle = {
@@ -64,19 +64,62 @@ type ChartPoint = {
   timestamp: string;
 };
 
-const money = new Intl.NumberFormat(undefined, {
-  style: "currency",
-  currency: "USD",
+type ChartSeriesPoint = {
+  timestamp: string;
+  price: number;
+};
+
+type ChartRange = {
+  min: number;
+  max: number;
+};
+
+type PriceTick = {
+  value: number;
+  y: number;
+};
+
+const LIVE_CHART_WINDOW_MS = 90_000;
+const Y_RANGE_ANIMATION_MS = 420;
+const BTC_PRICE_AXIS_MIN_STEP = 50;
+const PRICE_TICK_COUNT = 4;
+const PRICE_TICK_MAX_COUNT = 7;
+const ODOMETER_ANIMATION_MS = 420;
+const CHART_WIDTH = 1000;
+const CHART_HEIGHT = 320;
+const CHART_LEFT = 28;
+const CHART_PLOT_RIGHT = 900;
+const CHART_PRICE_LABEL_X = 988;
+const CHART_TARGET_PILL_X = 878;
+const CHART_TARGET_PILL_WIDTH = 82;
+const CHART_TARGET_PILL_HEIGHT = 26;
+const CHART_TARGET_PILL_NOTCH = 10;
+const CHART_TOP = 18;
+const CHART_BOTTOM = 42;
+
+const numberFormat = new Intl.NumberFormat("en-US", {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,
 });
 
-const compactMoney = (value?: number | null) => (value == null ? "-" : money.format(value));
+const axisNumberFormat = new Intl.NumberFormat("en-US", {
+  maximumFractionDigits: 0,
+});
+
+const compactMoney = (value?: number | null) => {
+  if (value == null) return "-";
+  return `$${numberFormat.format(value)}`;
+};
+
+const axisMoney = (value?: number | null) => {
+  if (value == null) return "-";
+  return `$${axisNumberFormat.format(Math.round(value))}`;
+};
 
 const signedMoney = (value?: number | null) => {
   if (value == null) return "-";
-  const sign = value > 0 ? "+" : value < 0 ? "" : "";
-  return `${sign}${money.format(value)}`;
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  return `${sign}$${numberFormat.format(Math.abs(value))}`;
 };
 
 const localTime = (value?: string | null) => {
@@ -117,6 +160,8 @@ const resultClass = (result: string) => {
   if (result === "UP") return "border-emerald-500/25 bg-emerald-500/10 text-emerald-300";
   if (result === "DOWN") return "border-rose-500/25 bg-rose-500/10 text-rose-300";
   if (result === "FLAT") return "border-zinc-500/25 bg-zinc-500/10 text-zinc-300";
+  if (result === "PENDING") return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+  if (result === "UPCOMING") return "border-sky-500/25 bg-sky-500/10 text-sky-300";
   return "border-amber-500/25 bg-amber-500/10 text-amber-300";
 };
 
@@ -143,6 +188,25 @@ function smoothPath(points: ChartPoint[]) {
   return commands.join(" ");
 }
 
+function targetPillPath(centerY: number) {
+  const x = CHART_TARGET_PILL_X;
+  const y = centerY - CHART_TARGET_PILL_HEIGHT / 2;
+  const width = CHART_TARGET_PILL_WIDTH;
+  const height = CHART_TARGET_PILL_HEIGHT;
+  const notch = CHART_TARGET_PILL_NOTCH;
+  const radius = 8;
+  return [
+    `M ${x + notch} ${y}`,
+    `H ${x + width - radius}`,
+    `Q ${x + width} ${y} ${x + width} ${y + radius}`,
+    `V ${y + height - radius}`,
+    `Q ${x + width} ${y + height} ${x + width - radius} ${y + height}`,
+    `H ${x + notch}`,
+    `L ${x} ${centerY}`,
+    "Z",
+  ].join(" ");
+}
+
 function useCountdown(endTs?: string) {
   const [label, setLabel] = useState(() => formatCountdown(endTs));
 
@@ -155,7 +219,148 @@ function useCountdown(endTs?: string) {
   return label;
 }
 
-function useChartGeometry(data?: MarketChartPayload | null) {
+function useLiveChartNow(active: boolean) {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!active) {
+      setNow(Date.now());
+      return;
+    }
+    let frame = 0;
+    const tick = () => {
+      setNow(Date.now());
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [active]);
+
+  return now;
+}
+
+const easeOutCubic = (progress: number) => 1 - (1 - progress) ** 3;
+
+function useAnimatedNumber(value?: number | null, durationMs = ODOMETER_ANIMATION_MS) {
+  const [displayValue, setDisplayValue] = useState<number | null>(() => value ?? null);
+  const displayValueRef = useRef<number | null>(value ?? null);
+
+  useEffect(() => {
+    if (typeof value !== "number" || !Number.isFinite(value)) {
+      displayValueRef.current = null;
+      setDisplayValue(null);
+      return;
+    }
+
+    const from = displayValueRef.current ?? value;
+    const delta = value - from;
+    if (Math.abs(delta) < 0.005) {
+      displayValueRef.current = value;
+      setDisplayValue(value);
+      return;
+    }
+
+    const startedAt = window.performance.now();
+    let frame = 0;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / durationMs);
+      const nextValue = from + delta * easeOutCubic(progress);
+      displayValueRef.current = nextValue;
+      setDisplayValue(nextValue);
+      if (progress < 1) {
+        frame = window.requestAnimationFrame(animate);
+      } else {
+        displayValueRef.current = value;
+        setDisplayValue(value);
+      }
+    };
+
+    frame = window.requestAnimationFrame(animate);
+    return () => window.cancelAnimationFrame(frame);
+  }, [durationMs, value]);
+
+  return displayValue;
+}
+
+function buildPriceAxis(prices: number[]) {
+  if (prices.length === 0) {
+    return { range: { min: 0, max: 1 }, values: [1, 0] };
+  }
+
+  const minPrice = Math.min(...prices);
+  const maxPrice = Math.max(...prices);
+  const rawSpan = Math.max(maxPrice - minPrice, 1);
+  const paddedSpan = Math.max(rawSpan * 1.25, BTC_PRICE_AXIS_MIN_STEP * (PRICE_TICK_COUNT - 1));
+  const center = (minPrice + maxPrice) / 2;
+  const paddedMin = center - paddedSpan / 2;
+  const paddedMax = center + paddedSpan / 2;
+  let step = BTC_PRICE_AXIS_MIN_STEP;
+  let top = Math.ceil(paddedMax / step) * step;
+  let bottom = Math.floor(paddedMin / step) * step;
+  let values = Array.from({ length: Math.round((top - bottom) / step) + 1 }, (_, index) => top - index * step);
+  while (values.length < PRICE_TICK_COUNT) {
+    bottom -= step;
+    values = Array.from({ length: Math.round((top - bottom) / step) + 1 }, (_, index) => top - index * step);
+  }
+  while (values.length > PRICE_TICK_MAX_COUNT) {
+    step += BTC_PRICE_AXIS_MIN_STEP;
+    top = Math.ceil(paddedMax / step) * step;
+    bottom = Math.floor(paddedMin / step) * step;
+    values = Array.from({ length: Math.round((top - bottom) / step) + 1 }, (_, index) => top - index * step);
+  }
+  return {
+    range: { min: values[values.length - 1], max: values[0] },
+    values,
+  };
+}
+
+function useAnimatedChartRange(targetRange: ChartRange | null) {
+  const [displayRange, setDisplayRange] = useState<ChartRange | null>(targetRange);
+  const displayRangeRef = useRef<ChartRange | null>(targetRange);
+
+  useEffect(() => {
+    if (!targetRange) {
+      displayRangeRef.current = null;
+      setDisplayRange(null);
+      return;
+    }
+
+    const from = displayRangeRef.current ?? targetRange;
+    const minDelta = Math.abs(from.min - targetRange.min);
+    const maxDelta = Math.abs(from.max - targetRange.max);
+    if (minDelta < 0.01 && maxDelta < 0.01) {
+      displayRangeRef.current = targetRange;
+      setDisplayRange(targetRange);
+      return;
+    }
+
+    const startedAt = window.performance.now();
+    let frame = 0;
+    const animate = (now: number) => {
+      const progress = Math.min(1, (now - startedAt) / Y_RANGE_ANIMATION_MS);
+      const eased = easeOutCubic(progress);
+      const nextRange = {
+        min: from.min + (targetRange.min - from.min) * eased,
+        max: from.max + (targetRange.max - from.max) * eased,
+      };
+      displayRangeRef.current = nextRange;
+      setDisplayRange(nextRange);
+      if (progress < 1) {
+        frame = window.requestAnimationFrame(animate);
+      } else {
+        displayRangeRef.current = targetRange;
+        setDisplayRange(targetRange);
+      }
+    };
+
+    frame = window.requestAnimationFrame(animate);
+    return () => window.cancelAnimationFrame(frame);
+  }, [targetRange?.min, targetRange?.max]);
+
+  return displayRange;
+}
+
+function useChartModel(data?: MarketChartPayload | null, animationNowMs?: number) {
   return useMemo(() => {
     const candles = data?.candles ?? [];
     const ticks = data?.ticks ?? [];
@@ -167,70 +372,215 @@ function useChartGeometry(data?: MarketChartPayload | null) {
       timestamp: item.timestamp,
       price: item.close,
     }));
-    const series = liveSeries.length >= 2 ? liveSeries : candleSeries;
-    const prices = series.map((item) => item.price);
+    const marketStart = data?.market.start_ts ? new Date(data.market.start_ts).getTime() : NaN;
+    const marketEnd = data?.market.end_ts ? new Date(data.market.end_ts).getTime() : NaN;
+    const wallClockNowMs = Number.isFinite(animationNowMs) ? Number(animationNowMs) : Date.now();
+    const chartNowMs = Number.isFinite(marketEnd) ? Math.min(wallClockNowMs, marketEnd) : wallClockNowMs;
+    const isUpcomingWindow = Number.isFinite(marketStart) && wallClockNowMs < marketStart;
+    const chartStartMs = isUpcomingWindow ? Math.floor(chartNowMs / 300_000) * 300_000 : marketStart;
+    const currentPrice = data?.current_price;
+    const liveChartActive = Number.isFinite(marketStart)
+      && Number.isFinite(marketEnd)
+      && ((marketStart <= wallClockNowMs && wallClockNowMs < marketEnd) || isUpcomingWindow)
+      && liveSeries.length >= 2
+      && typeof currentPrice === "number";
+    const elapsedMs = chartNowMs - chartStartMs;
+    const liveWindowFilled = elapsedMs >= LIVE_CHART_WINDOW_MS;
+    let series: ChartSeriesPoint[] = liveSeries.length >= 2 ? liveSeries : candleSeries;
+    if (liveChartActive) {
+      const visibleCutoff = liveWindowFilled ? chartNowMs - LIVE_CHART_WINDOW_MS - 2_000 : chartStartMs - 2_000;
+      const visibleLiveSeries = liveSeries.filter((item) => {
+        const ts = new Date(item.timestamp).getTime();
+        return Number.isFinite(ts) && visibleCutoff <= ts && ts <= chartNowMs + 1_000;
+      });
+      series = visibleLiveSeries.length >= 2 ? visibleLiveSeries : liveSeries.slice(-2);
+      series = [
+        ...series,
+        {
+          timestamp: new Date(chartNowMs).toISOString(),
+          price: currentPrice,
+        },
+      ];
+    }
+    const yScaleSeries = liveChartActive ? liveSeries : series;
+    const prices = yScaleSeries.map((item) => item.price);
     if (liveSeries.length < 2) {
       prices.push(...candles.slice(-24).flatMap((item) => [item.high, item.low, item.close]));
     }
-    if (data?.target_price != null) prices.push(data.target_price);
     if (data?.current_price != null) prices.push(data.current_price);
     if (prices.length === 0) {
-      return { points: [] as ChartPoint[], path: "", areaPath: "", targetY: null as number | null, min: 0, max: 1 };
+      return {
+        candles,
+        liveSeries,
+        series: [] as ChartSeriesPoint[],
+        range: null as ChartRange | null,
+        priceTickValues: [] as number[],
+        marketStart,
+        marketEnd,
+        chartStartMs,
+        chartNowMs,
+        liveChartActive,
+        liveWindowFilled,
+      };
     }
 
-    const minPrice = Math.min(...prices);
-    const maxPrice = Math.max(...prices);
-    const padding = Math.max((maxPrice - minPrice) * 0.2, 4);
-    const min = minPrice - padding;
-    const max = maxPrice + padding;
-    const width = 1000;
-    const height = 320;
-    const left = 28;
-    const right = 70;
-    const top = 18;
-    const bottom = 42;
-    const innerWidth = width - left - right;
-    const innerHeight = height - top - bottom;
-    const yFor = (price: number) => top + ((max - price) / (max - min)) * innerHeight;
-    const marketStart = data?.market.start_ts ? new Date(data.market.start_ts).getTime() : NaN;
-    const marketEnd = data?.market.end_ts ? new Date(data.market.end_ts).getTime() : NaN;
-    const useMarketScale = Number.isFinite(marketStart) && Number.isFinite(marketEnd) && marketEnd > marketStart && liveSeries.length >= 2;
-    const points = series.map((item, index) => {
-      const ts = new Date(item.timestamp).getTime();
-      const progress = useMarketScale && Number.isFinite(ts)
-        ? Math.min(1, Math.max(0, (ts - marketStart) / (marketEnd - marketStart)))
-        : series.length <= 1 ? 1 : index / (series.length - 1);
+    const axis = buildPriceAxis(prices);
+    return {
+      candles,
+      liveSeries,
+      series,
+      range: axis.range,
+      priceTickValues: axis.values,
+      marketStart,
+      marketEnd,
+      chartStartMs,
+      chartNowMs,
+      liveChartActive,
+      liveWindowFilled,
+    };
+  }, [data, animationNowMs]);
+}
+
+function useChartGeometry(data?: MarketChartPayload | null, animationNowMs?: number) {
+  const model = useChartModel(data, animationNowMs);
+  const animatedRange = useAnimatedChartRange(model.range);
+
+  return useMemo(() => {
+    if (!model.range || model.series.length === 0) {
       return {
-        x: left + progress * innerWidth,
+        points: [] as ChartPoint[],
+        path: "",
+        areaPath: "",
+        targetY: null as number | null,
+        currentY: null as number | null,
+        priceTicks: [] as PriceTick[],
+        min: 0,
+        max: 1,
+      };
+    }
+
+    const projection = { range: animatedRange ?? model.range };
+    const { min, max } = projection.range;
+    const plotBottom = CHART_HEIGHT - CHART_BOTTOM;
+    const innerWidth = CHART_PLOT_RIGHT - CHART_LEFT;
+    const innerHeight = CHART_HEIGHT - CHART_TOP - CHART_BOTTOM;
+    const yFor = (price: number) => CHART_TOP + ((max - price) / (max - min)) * innerHeight;
+    const useMarketScale = Number.isFinite(model.marketStart)
+      && Number.isFinite(model.marketEnd)
+      && model.marketEnd > model.marketStart
+      && model.liveSeries.length >= 2;
+    const { chartNowMs, liveWindowFilled, chartStartMs } = model;
+    const points = model.series.map((item, index) => {
+      const ts = new Date(item.timestamp).getTime();
+      const liveProgress = liveWindowFilled ? 1 - (chartNowMs - ts) / LIVE_CHART_WINDOW_MS : (ts - chartStartMs) / LIVE_CHART_WINDOW_MS;
+      const progress = model.liveChartActive && Number.isFinite(ts)
+        ? Math.min(1, Math.max(0, liveProgress))
+        : useMarketScale && Number.isFinite(ts)
+        ? Math.min(1, Math.max(0, (ts - model.marketStart) / (model.marketEnd - model.marketStart)))
+        : model.series.length <= 1 ? 1 : index / (model.series.length - 1);
+      return {
+        x: CHART_LEFT + progress * innerWidth,
         y: yFor(item.price),
         price: item.price,
         timestamp: item.timestamp,
       };
     });
     const path = smoothPath(points);
-    const areaPath = path ? `${path} L ${points[points.length - 1].x.toFixed(1)} 278 L ${points[0].x.toFixed(1)} 278 Z` : "";
-    const targetY = data?.target_price == null ? null : yFor(data.target_price);
-    return { points, path, areaPath, targetY, min, max };
-  }, [data]);
+    const areaPath = path ? `${path} L ${points[points.length - 1].x.toFixed(1)} ${plotBottom} L ${points[0].x.toFixed(1)} ${plotBottom} Z` : "";
+    const priceTicks = model.priceTickValues.map((value) => ({ value, y: yFor(value) }));
+    const currentY = data?.current_price == null ? null : yFor(data.current_price);
+    const targetY = data?.target_price == null ? null : Math.min(plotBottom, Math.max(CHART_TOP, yFor(data.target_price)));
+    return { points, path, areaPath, targetY, currentY, priceTicks, min, max };
+  }, [animatedRange, data?.current_price, data?.target_price, model]);
 }
 
 function Metric({
   label,
   value,
   tone = "text-zinc-100",
-  valueKey,
-  animated = false,
 }: {
   label: string;
   value: string;
   tone?: string;
-  valueKey?: string;
-  animated?: boolean;
 }) {
+  return (
+    <div className="min-w-[250px]">
+      <div className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</div>
+      <div className={`mt-1 text-3xl font-semibold sm:text-4xl ${tone}`}>{value}</div>
+    </div>
+  );
+}
+
+function RollingText({ value, className = "" }: { value: string; className?: string }) {
+  const chars = Array.from(value);
+  return (
+    <span className={`chainlink-odometer-value ${className}`} aria-label={value}>
+      {chars.map((char, index) => {
+        return (
+          <span
+            key={`${index}-${char}`}
+            className={`chainlink-odometer-glyph ${char === ":" ? "chainlink-odometer-separator" : ""}`}
+            aria-hidden="true"
+          >
+            {char}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
+function AnimatedMetric({
+  label,
+  value,
+  tone = "text-zinc-100",
+  formatValue,
+}: {
+  label: string;
+  value?: number | null;
+  tone?: string;
+  formatValue: (value?: number | null) => string;
+}) {
+  const animatedValue = useAnimatedNumber(value);
+  const renderedValue = formatValue(animatedValue);
+
   return (
     <div className="min-w-[150px]">
       <div className="text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">{label}</div>
-      <div key={valueKey} className={`mt-1 font-mono text-xl font-semibold sm:text-2xl ${tone} ${animated ? "chainlink-price-flash" : ""}`}>{value}</div>
+      <div className={`mt-1 text-xl font-semibold sm:text-2xl ${tone} chainlink-metric-odometer`}>
+        <RollingText value={renderedValue} />
+      </div>
+    </div>
+  );
+}
+
+function CurrentPriceMetric({
+  price,
+  delta,
+  showDelta = true,
+}: {
+  price?: number | null;
+  delta?: number | null;
+  showDelta?: boolean;
+}) {
+  const animatedPrice = useAnimatedNumber(price);
+  const animatedDelta = useAnimatedNumber(delta);
+  const deltaIsUp = (animatedDelta ?? 0) >= 0;
+
+  return (
+    <div className="chainlink-current-price-metric">
+      <div className="flex items-center gap-4">
+        <div className="text-xs font-semibold uppercase tracking-[0.14em] text-amber-400">Current price</div>
+        {showDelta && typeof delta === "number" && (
+          <div className={`chainlink-current-delta ${deltaIsUp ? "text-emerald-300" : "text-rose-300"}`}>
+            <Triangle className={`h-3.5 w-3.5 fill-current ${deltaIsUp ? "" : "rotate-180"}`} />
+            <RollingText value={signedMoney(animatedDelta)} />
+          </div>
+        )}
+      </div>
+      <div className="mt-1 text-3xl font-semibold text-amber-400 sm:text-4xl chainlink-metric-odometer">
+        <RollingText value={compactMoney(animatedPrice)} />
+      </div>
     </div>
   );
 }
@@ -244,15 +594,30 @@ export default function BTCMarketChart() {
   const url = selectedStart
     ? `/api/btc/market-chart?start_ts=${encodeURIComponent(selectedStart)}`
     : "/api/btc/market-chart";
-  const { data, error, loading } = usePolling<MarketChartPayload>(url, selectedStart ? 15000 : 1000);
+  const { data, error, loading } = usePolling<MarketChartPayload>(url, selectedStart ? 15000 : 3000);
+  const wallClockNowMs = Date.now();
+  const marketStartMs = data ? new Date(data.market.start_ts).getTime() : NaN;
+  const marketEndMs = data ? new Date(data.market.end_ts).getTime() : NaN;
+  const isUpcomingWindow = data ? wallClockNowMs < marketStartMs : false;
+  const liveChartActive = Boolean(
+    data
+    && data.ticks.length >= 2
+    && typeof data.current_price === "number"
+    && ((marketStartMs <= wallClockNowMs && wallClockNowMs < marketEndMs) || isUpcomingWindow)
+  );
+  const animationNowMs = useLiveChartNow(liveChartActive);
   const countdown = useCountdown(data?.market.end_ts);
-  const geometry = useChartGeometry(data);
+  const geometry = useChartGeometry(data, animationNowMs);
   const latestPoint = geometry.points[geometry.points.length - 1];
-  const deltaTone = (data?.delta ?? 0) >= 0 ? "text-emerald-300" : "text-rose-300";
-  const isCurrentWindow = data ? new Date(data.market.start_ts).getTime() <= Date.now() && Date.now() < new Date(data.market.end_ts).getTime() : false;
+  const isCurrentWindow = data ? marketStartMs <= Date.now() && Date.now() < marketEndMs : false;
   const statusLabel = isCurrentWindow ? countdown : new Date(data?.market.end_ts ?? 0).getTime() <= Date.now() ? "settled" : "upcoming";
   const targetIsExact = data?.target_source === "exact";
-  const chartAnimationKey = `${data?.market.slug ?? "empty"}-${data?.current_price_ts ?? "none"}-${data?.current_price ?? "none"}`;
+  const showTargetPrice = !isUpcomingWindow && data?.target_price != null;
+  const marketSlug = data?.market.slug ?? "empty";
+  const renderedMarketRef = useRef<string | null>(null);
+  const marketTabRefs = useRef<Record<string, HTMLButtonElement | null>>({});
+  const [marketPillStyle, setMarketPillStyle] = useState({ transform: "translateX(0px)", width: "0px" });
+  const hasRenderedChart = renderedMarketRef.current === marketSlug;
   const liveIsFresh = data?.live_status === "fresh";
   const liveSourceLabel = data?.live_source === "polymarket_rtds_chainlink"
     ? "Polymarket RTDS Chainlink"
@@ -270,8 +635,32 @@ export default function BTCMarketChart() {
     }
   }, [data, selectedStart]);
 
+  useEffect(() => {
+    if (!geometry.path || !marketSlug) return;
+    const frame = window.requestAnimationFrame(() => {
+      renderedMarketRef.current = marketSlug;
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [geometry.path, marketSlug]);
+
+  useLayoutEffect(() => {
+    const activeKey = data?.market.start_ts;
+    if (!activeKey) return;
+    const movePill = () => {
+      const activeTab = marketTabRefs.current[activeKey];
+      if (!activeTab) return;
+      setMarketPillStyle({
+        transform: `translateX(${activeTab.offsetLeft}px)`,
+        width: `${activeTab.offsetWidth}px`,
+      });
+    };
+    movePill();
+    window.addEventListener("resize", movePill);
+    return () => window.removeEventListener("resize", movePill);
+  }, [data?.market.start_ts, data?.markets.length]);
+
   return (
-    <section className="mx-auto w-full max-w-[1180px] overflow-hidden rounded-md border border-zinc-800 bg-[#11171b]">
+    <section className="chainlink-market-chart mx-auto w-full max-w-[1180px] overflow-hidden rounded-md border border-zinc-800 bg-[#11171b]">
       <div className="flex flex-col gap-3 border-b border-zinc-800 px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-amber-500 text-white shadow-lg shadow-amber-500/10">
@@ -299,14 +688,16 @@ export default function BTCMarketChart() {
                 <Clock3 className="h-4 w-4 text-zinc-500" />
                 {windowLabel(data?.market.start_ts, data?.market.end_ts)}
               </span>
-              <span className="font-mono text-xs text-zinc-600">{liveSourceLabel}</span>
+              <span className="text-xs text-zinc-600">{liveSourceLabel}</span>
             </div>
           </div>
         </div>
 
         <div className="flex shrink-0 items-center gap-5">
           <div className="text-right">
-            <div className="font-mono text-2xl font-bold text-rose-400 sm:text-3xl">{statusLabel}</div>
+            <div className="text-2xl font-bold text-rose-400 sm:text-3xl">
+              <RollingText value={statusLabel} className="chainlink-clock-odometer" />
+            </div>
             <div className="mt-1 text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">market clock</div>
           </div>
         </div>
@@ -314,52 +705,78 @@ export default function BTCMarketChart() {
 
       <div className="grid gap-4 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_220px]">
         <div className="min-w-0 space-y-3">
-          <div className="flex flex-wrap gap-6">
-            <Metric label={targetIsExact ? "Target price" : "Reference price"} value={compactMoney(data?.target_price)} tone="text-zinc-400" />
-            <Metric label="Current price" value={compactMoney(data?.current_price)} tone="text-amber-400" valueKey={chartAnimationKey} animated />
-            <Metric label="Difference" value={signedMoney(data?.delta)} tone={deltaTone} valueKey={`delta-${chartAnimationKey}`} animated />
+          <div className="flex flex-wrap items-start gap-9">
+            {showTargetPrice && (
+              <Metric label={targetIsExact ? "Target price" : "Reference price"} value={compactMoney(data?.target_price)} tone="text-zinc-400" />
+            )}
+            <CurrentPriceMetric price={data?.current_price} delta={data?.delta} showDelta={!isUpcomingWindow} />
           </div>
-          {data && !targetIsExact && (
+          {data && showTargetPrice && !targetIsExact && (
             <div className="rounded-md border border-amber-500/20 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">
               Waiting for the exact Chainlink target candle; showing the latest available close as reference.
             </div>
           )}
 
           <div className="relative h-[340px] overflow-hidden rounded-md border border-zinc-800 bg-[#11171b]">
-            <svg viewBox="0 0 1000 320" className="h-full w-full" preserveAspectRatio="none">
+            <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} className="h-full w-full" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="chainlinkLineFill" x1="0" x2="0" y1="0" y2="1">
                   <stop offset="0%" stopColor="#f59e0b" stopOpacity="0.12" />
                   <stop offset="100%" stopColor="#f59e0b" stopOpacity="0" />
                 </linearGradient>
               </defs>
-              {[60, 125, 190, 255].map((y) => (
-                <line key={y} x1="28" x2="930" y1={y} y2={y} stroke="#272f36" strokeWidth="1" />
+              {geometry.priceTicks.map((tick) => (
+                <line key={tick.value} x1={CHART_LEFT} x2={CHART_PLOT_RIGHT} y1={tick.y} y2={tick.y} stroke="#272f36" strokeWidth="1" />
               ))}
-              {geometry.targetY != null && (
+              {showTargetPrice && geometry.targetY != null && (
                 <g>
-                  <line x1="28" x2="930" y1={geometry.targetY} y2={geometry.targetY} stroke="#f59e0b" strokeDasharray="6 8" strokeOpacity="0.8" />
-                  <rect x="838" y={geometry.targetY - 16} width="92" height="28" rx="8" fill="#64748b" />
-                  <text x="884" y={geometry.targetY + 5} textAnchor="middle" fill="#f8fafc" fontSize="14" fontWeight="700">
+                  <line className="chainlink-target-line" x1={CHART_LEFT} x2={CHART_PLOT_RIGHT} y1={geometry.targetY} y2={geometry.targetY} />
+                  <path className="chainlink-target-pill" d={targetPillPath(geometry.targetY)} />
+                  <text x={CHART_TARGET_PILL_X + 39} y={geometry.targetY + 5} textAnchor="middle" fill="#f8fafc" fontSize="14" fontWeight="700">
                     {targetIsExact ? "Target" : "Latest"}
                   </text>
+                  <path
+                    className="chainlink-target-pill-chevron"
+                    d={`M ${CHART_TARGET_PILL_X + 61} ${geometry.targetY - 5} L ${CHART_TARGET_PILL_X + 67} ${geometry.targetY + 1} L ${CHART_TARGET_PILL_X + 73} ${geometry.targetY - 5}`}
+                  />
+                  <path
+                    className="chainlink-target-pill-chevron"
+                    d={`M ${CHART_TARGET_PILL_X + 61} ${geometry.targetY + 1} L ${CHART_TARGET_PILL_X + 67} ${geometry.targetY + 7} L ${CHART_TARGET_PILL_X + 73} ${geometry.targetY + 1}`}
+                  />
                 </g>
+              )}
+              {geometry.currentY != null && (
+                <line className="chainlink-current-line" x1={CHART_LEFT} x2={CHART_PLOT_RIGHT} y1={geometry.currentY} y2={geometry.currentY} />
               )}
               {geometry.path && (
                 <g>
-                  <path key={`area-${chartAnimationKey}`} d={geometry.areaPath} fill="url(#chainlinkLineFill)" opacity="0.65" />
-                  <path key={`line-${chartAnimationKey}`} className="chainlink-line-draw" d={geometry.path} fill="none" stroke="#ff9900" strokeLinecap="round" strokeLinejoin="round" strokeWidth="3.5" />
+                  <path d={geometry.areaPath} className="chainlink-area-live" fill="url(#chainlinkLineFill)" opacity="0.65" />
+                  <path
+                    key={`line-${marketSlug}`}
+                    className={hasRenderedChart ? "chainlink-line-live" : "chainlink-line-draw chainlink-line-live"}
+                    d={geometry.path}
+                    fill="none"
+                    stroke="#ff9900"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    strokeWidth="3.5"
+                  />
                 </g>
               )}
               {latestPoint && (
                 <g>
-                  <line x1={latestPoint.x} x2={latestPoint.x} y1="18" y2="278" stroke="#f59e0b" strokeOpacity="0.08" />
-                  <circle className="chainlink-price-pulse" cx={latestPoint.x} cy={latestPoint.y} r="14" fill="#f59e0b" opacity="0.18" />
-                  <circle key={`dot-${chartAnimationKey}`} className="chainlink-latest-dot" cx={latestPoint.x} cy={latestPoint.y} r="5.5" fill="#ff9900" />
+                  <line x1={latestPoint.x} x2={latestPoint.x} y1={CHART_TOP} y2={CHART_HEIGHT - CHART_BOTTOM} stroke="#f59e0b" strokeOpacity="0.08" />
+                  <g className="chainlink-latest-marker" style={{ transform: `translate(${latestPoint.x}px, ${latestPoint.y}px)` }}>
+                    <circle className="chainlink-price-pulse" cx="0" cy="0" r="14" fill="#f59e0b" opacity="0.18" />
+                    <circle className="chainlink-latest-dot" cx="0" cy="0" r="5.5" fill="#ff9900" />
+                  </g>
                 </g>
               )}
-              <text x="988" y="58" textAnchor="end" fill="#8b98a5" fontSize="16">{compactMoney(geometry.max)}</text>
-              <text x="988" y="255" textAnchor="end" fill="#8b98a5" fontSize="16">{compactMoney(geometry.min)}</text>
+              {geometry.priceTicks.map((tick) => (
+                <text key={`price-${tick.value}`} x={CHART_PRICE_LABEL_X} y={tick.y + 5} textAnchor="end" fill="#8b98a5" fontSize="16">
+                  {axisMoney(tick.value)}
+                </text>
+              ))}
             </svg>
 
             {loading && !data && <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">Loading Chainlink chart...</div>}
@@ -379,38 +796,47 @@ export default function BTCMarketChart() {
               <Activity className="h-4 w-4" />
               Live
             </button>
-            {(data?.markets ?? []).map((item) => {
-              const itemStart = new Date(item.start_ts).getTime();
-              const itemEnd = new Date(item.end_ts).getTime();
-              const itemIsLiveWindow = itemStart <= Date.now() && Date.now() < itemEnd;
-              return (
-                <button
-                  type="button"
-                  key={`${item.key}-${item.start_ts}`}
-                  className={`inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold transition ${
-                    item.start_ts === data?.market.start_ts
-                      ? "border-zinc-200 bg-zinc-100 text-zinc-950"
-                      : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
-                  }`}
-                  onClick={() => setSelectedStart(itemIsLiveWindow ? null : item.start_ts)}
-                >
-                  {item.key === "previous" ? <ChevronLeft className="h-4 w-4" /> : item.key === "next" ? <ChevronRight className="h-4 w-4" /> : <Target className="h-4 w-4" />}
-                  {shortTime(item.start_ts)}
-                  <span className="font-mono text-xs opacity-70">{item.result}</span>
-                </button>
-              );
-            })}
-            <span className="ml-auto font-mono text-xs text-zinc-600">Last refresh {localTime(data?.now)}</span>
+            <div className="chainlink-market-switcher t-tabs" role="tablist">
+              <span className="t-tabs-pill" style={marketPillStyle} aria-hidden="true" />
+              {(data?.markets ?? []).map((item) => {
+                const itemStart = new Date(item.start_ts).getTime();
+                const itemEnd = new Date(item.end_ts).getTime();
+                const itemIsLiveWindow = itemStart <= Date.now() && Date.now() < itemEnd;
+                const itemIsSelected = item.start_ts === data?.market.start_ts;
+                return (
+                  <button
+                    type="button"
+                    role="tab"
+                    aria-selected={itemIsSelected}
+                    ref={(node) => {
+                      marketTabRefs.current[item.start_ts] = node;
+                    }}
+                    key={`${item.key}-${item.start_ts}`}
+                    className={`t-tab inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm font-semibold ${
+                      itemIsSelected
+                        ? "border-zinc-500 bg-zinc-800/80 text-zinc-50 shadow-inner shadow-black/20"
+                        : "border-zinc-800 bg-zinc-900 text-zinc-300 hover:border-zinc-700 hover:text-zinc-100"
+                    }`}
+                    onClick={() => setSelectedStart(itemIsLiveWindow ? null : item.start_ts)}
+                  >
+                    {item.key === "previous" ? <ChevronLeft className="h-4 w-4" /> : item.key === "next" ? <ChevronRight className="h-4 w-4" /> : <Target className="h-4 w-4" />}
+                    {shortTime(item.start_ts)}
+                    <ResultPill result={item.result} />
+                  </button>
+                );
+              })}
+            </div>
+            <span className="ml-auto text-xs text-zinc-600">Last refresh {localTime(data?.now)}</span>
           </div>
         </div>
 
-        <aside className="min-w-0 rounded-md border border-zinc-800 bg-zinc-950/60">
+        <aside className="min-w-0 rounded-md border border-zinc-800 bg-zinc-950/60 t-panel-slide" data-open={data ? "true" : "false"}>
           <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
               <History className="h-4 w-4 text-zinc-500" />
               Recent results
             </div>
-            <span className="font-mono text-xs text-zinc-600">{localTime(data?.current_price_ts)}</span>
+            <span className="text-xs text-zinc-600">{localTime(data?.current_price_ts)}</span>
           </div>
           <div className="max-h-[420px] divide-y divide-zinc-900 overflow-auto">
             {(data?.history ?? []).length === 0 ? (
@@ -424,17 +850,17 @@ export default function BTCMarketChart() {
                   onClick={() => setSelectedStart(item.start_ts)}
                 >
                   <div className="flex items-center justify-between gap-3">
-                    <span className="font-mono text-sm text-zinc-300">{windowLabel(item.start_ts, item.end_ts)}</span>
+                    <span className="text-sm text-zinc-300">{windowLabel(item.start_ts, item.end_ts)}</span>
                     <ResultPill result={item.result} />
                   </div>
                   <div className="mt-2 grid grid-cols-2 gap-3 text-xs">
                     <div>
                       <div className="text-zinc-600">target</div>
-                      <div className="font-mono text-zinc-300">{compactMoney(item.target_price)}</div>
+                      <div className="text-zinc-300">{compactMoney(item.target_price)}</div>
                     </div>
                     <div>
                       <div className="text-zinc-600">settle</div>
-                      <div className="font-mono text-zinc-300">{compactMoney(item.settle_price)}</div>
+                      <div className="text-zinc-300">{compactMoney(item.settle_price)}</div>
                     </div>
                   </div>
                 </button>

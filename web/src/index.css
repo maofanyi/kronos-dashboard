@@ -25,6 +25,17 @@
   --chart-4: #f59e0b;
   --chart-5: #8b5cf6;
   --radius: 0.5rem;
+  --tabs-dur: 250ms;
+  --tabs-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --tabs-text-muted: #a1a1aa;
+  --tabs-text-active: #fafafa;
+  --tabs-bar-bg: rgba(24, 24, 27, 0.55);
+  --tabs-pill-bg: rgba(39, 39, 42, 0.88);
+  --panel-open-dur: 400ms;
+  --panel-close-dur: 350ms;
+  --panel-translate-y: 16px;
+  --panel-blur: 2px;
+  --panel-ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
 body {
@@ -46,17 +57,6 @@ body {
   to {
     stroke-dashoffset: 0;
     opacity: 1;
-  }
-}
-
-@keyframes chainlink-price-flash {
-  0% {
-    filter: brightness(1.75);
-    transform: translateY(-1px);
-  }
-  100% {
-    filter: brightness(1);
-    transform: translateY(0);
   }
 }
 
@@ -90,13 +90,123 @@ body {
   }
 }
 
+@keyframes chainlink-marker-pulse {
+  0% {
+    filter: drop-shadow(0 0 0 rgba(245, 158, 11, 0));
+  }
+  45% {
+    filter: drop-shadow(0 0 8px rgba(245, 158, 11, 0.35));
+  }
+  100% {
+    filter: drop-shadow(0 0 0 rgba(245, 158, 11, 0));
+  }
+}
+
+@keyframes chainlink-odometer-roll {
+  0% {
+    opacity: 0.35;
+    filter: blur(2px) brightness(1.45);
+    transform: translateY(0.52em) scaleY(0.92);
+  }
+  58% {
+    opacity: 1;
+    filter: blur(0) brightness(1.22);
+    transform: translateY(-0.08em) scaleY(1.03);
+  }
+  100% {
+    opacity: 1;
+    filter: blur(0) brightness(1);
+    transform: translateY(0) scaleY(1);
+  }
+}
+
 .chainlink-line-draw {
   stroke-dasharray: 1200;
   animation: chainlink-line-draw 520ms ease-out;
 }
 
-.chainlink-price-flash {
-  animation: chainlink-price-flash 650ms ease-out;
+.chainlink-line-live {
+  transition: opacity 180ms ease-out;
+}
+
+.chainlink-area-live {
+  transition: opacity 180ms ease-out;
+}
+
+.chainlink-current-line {
+  stroke: #f59e0b;
+  stroke-dasharray: 5 7;
+  stroke-opacity: 0.82;
+}
+
+.chainlink-target-line {
+  stroke: #94a3b8;
+  stroke-dasharray: 6 8;
+  stroke-opacity: 0.45;
+}
+
+.chainlink-target-pill {
+  fill: #64748b;
+}
+
+.chainlink-target-pill-chevron {
+  fill: none;
+  stroke: #f8fafc;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 2.3;
+}
+
+.chainlink-market-chart {
+  font-family: Inter, "Inter Fallback", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+  font-feature-settings: "calt", "cv01", "cv02", "cv03", "cv04", "cv09" 0, "cv11", "liga";
+}
+
+.chainlink-odometer-value {
+  display: inline-flex;
+  align-items: baseline;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0;
+}
+
+.chainlink-odometer-glyph {
+  display: inline-block;
+  min-width: 0.58em;
+  transform-origin: 50% 70%;
+  animation: chainlink-odometer-roll 520ms cubic-bezier(0.2, 0.82, 0.22, 1);
+}
+
+.chainlink-odometer-separator {
+  min-width: 0.28em;
+  animation-duration: 260ms;
+}
+
+.chainlink-metric-odometer {
+  text-shadow: 0 0 12px rgba(245, 158, 11, 0.08);
+}
+
+.chainlink-current-price-metric {
+  min-width: 250px;
+}
+
+.chainlink-current-delta {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  font-size: 0.95rem;
+  font-weight: 700;
+  line-height: 1;
+}
+
+.chainlink-current-delta .chainlink-odometer-glyph {
+  min-width: 0.54em;
+  animation-duration: 440ms;
+}
+
+.chainlink-clock-odometer .chainlink-odometer-glyph {
+  min-width: 0.56em;
+  animation-duration: 420ms;
 }
 
 .chainlink-price-pulse {
@@ -109,4 +219,94 @@ body {
   transform-box: fill-box;
   transform-origin: center;
   animation: chainlink-dot-enter 420ms ease-out;
+}
+
+.chainlink-latest-marker {
+  transform-box: view-box;
+  transform-origin: 0 0;
+  animation: chainlink-marker-pulse 900ms ease-out;
+}
+
+.t-tabs {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.t-tab {
+  position: relative;
+  z-index: 1;
+  transition:
+    color var(--tabs-dur) var(--tabs-ease),
+    border-color var(--tabs-dur) var(--tabs-ease),
+    background-color var(--tabs-dur) var(--tabs-ease);
+}
+
+.t-tab[aria-selected="true"] {
+  color: var(--tabs-text-active);
+}
+
+.t-tabs-pill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 0;
+  z-index: 0;
+  width: 0;
+  border: 1px solid rgba(113, 113, 122, 0.85);
+  border-radius: 0.375rem;
+  background: var(--tabs-pill-bg);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.03), 0 10px 24px rgba(0, 0, 0, 0.22);
+  pointer-events: none;
+  transform: translateX(0);
+  transition:
+    transform var(--tabs-dur) var(--tabs-ease),
+    width var(--tabs-dur) var(--tabs-ease);
+  will-change: transform, width;
+}
+
+.chainlink-market-switcher {
+  flex-wrap: wrap;
+}
+
+.chainlink-market-switcher .t-tab[aria-selected="true"] {
+  background: transparent;
+  border-color: rgba(113, 113, 122, 0.4);
+  box-shadow: none;
+}
+
+.t-panel-slide {
+  transform: translateY(var(--panel-translate-y));
+  opacity: 0;
+  filter: blur(var(--panel-blur));
+  pointer-events: none;
+  transition:
+    transform var(--panel-close-dur) var(--panel-ease),
+    opacity var(--panel-close-dur) var(--panel-ease),
+    filter var(--panel-close-dur) var(--panel-ease);
+  will-change: transform, opacity, filter;
+}
+
+.t-panel-slide[data-open="true"] {
+  transform: translateY(0);
+  opacity: 1;
+  filter: blur(0);
+  pointer-events: auto;
+  transition:
+    transform var(--panel-open-dur) var(--panel-ease),
+    opacity var(--panel-open-dur) var(--panel-ease),
+    filter var(--panel-open-dur) var(--panel-ease);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chainlink-odometer-glyph {
+    animation: none !important;
+  }
+
+  .t-tabs-pill,
+  .t-tab,
+  .t-panel-slide {
+    transition: none !important;
+  }
 }

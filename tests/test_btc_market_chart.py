@@ -192,6 +192,49 @@ def test_api_btc_market_chart_can_select_market_window(monkeypatch):
     assert payload["delta"] == -1.0
 
 
+def test_api_btc_market_chart_future_window_uses_live_chart_without_target(monkeypatch):
+    rows = pd.DataFrame(
+        [
+            {"timestamp": "2026-06-12T10:20:00+00:00", "open": 100.0, "high": 102.0, "low": 98.0, "close": 101.0},
+            {"timestamp": "2026-06-12T10:25:00+00:00", "open": 101.0, "high": 103.0, "low": 100.0, "close": 102.0},
+        ]
+    )
+    server.BTC_LIVE_TICKS.clear()
+    server.BTC_LIVE_TICKS.extend(
+        [
+            {"timestamp": "2026-06-12T10:27:45+00:00", "price": 103.1, "source": "polymarket_rtds_chainlink"},
+            {"timestamp": "2026-06-12T10:28:00+00:00", "price": 103.4, "source": "polymarket_rtds_chainlink"},
+        ]
+    )
+    monkeypatch.setattr(
+        server,
+        "_latest_btc_live_price",
+        lambda now=None: {
+            "price": 103.4,
+            "timestamp": "2026-06-12T10:28:00+00:00",
+            "source": "polymarket_rtds_chainlink",
+            "status": "fresh",
+            "error": None,
+        },
+    )
+
+    payload = server._build_btc_market_chart_payload(
+        rows,
+        now=datetime(2026, 6, 12, 10, 28, tzinfo=timezone.utc),
+        start_ts="2026-06-12T10:30:00Z",
+    )
+
+    assert payload["market"]["start_ts"] == "2026-06-12T10:30:00+00:00"
+    assert payload["target_price"] is None
+    assert payload["target_source"] == "upcoming"
+    assert payload["delta"] is None
+    assert payload["current_price"] == 103.4
+    assert payload["live_status"] == "fresh"
+    assert [item["price"] for item in payload["ticks"]][-2:] == [103.1, 103.4]
+    assert payload["markets"][0]["result"] == "PENDING"
+    assert payload["markets"][1]["result"] == "UPCOMING"
+
+
 def test_frontend_market_chart_is_readonly_and_uses_chart_api():
     root = Path(__file__).resolve().parents[1]
     component = root / "web" / "src" / "components" / "BTCMarketChart.tsx"
@@ -220,7 +263,7 @@ def test_frontend_market_chart_uses_compact_dashboard_layout():
     assert "h-[340px]" in source
     assert "lg:grid-cols-[minmax(0,1fr)_220px]" in source
     assert "max-h-[420px]" in source
-    assert "font-mono text-xl font-semibold" in source
+    assert "text-3xl font-semibold" in source
     assert "h-10 w-10" in source
     assert re.search(r'(?<!max-)h-\[360px\]', source) is None
     assert "max-w-[1320px]" not in source
@@ -232,13 +275,13 @@ def test_frontend_market_chart_has_refresh_and_animation_cues():
     source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
     css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
 
-    assert "usePolling<MarketChartPayload>(url, selectedStart ? 15000 : 1000)" in source
+    assert "usePolling<MarketChartPayload>(url, selectedStart ? 15000 : 3000)" in source
     assert "chainlink-line-draw" in source
-    assert "chainlink-price-flash" in source
+    assert "chainlink-odometer-value" in source
     assert "chainlink-price-pulse" in source
     assert "Last refresh" in source
     assert "@keyframes chainlink-line-draw" in css
-    assert "@keyframes chainlink-price-flash" in css
+    assert "@keyframes chainlink-odometer-roll" in css
     assert "@keyframes chainlink-price-pulse" in css
 
 
@@ -255,6 +298,228 @@ def test_frontend_market_chart_matches_live_polymarket_motion_cues():
     assert "chainlink-latest-dot" in source
     assert "stopOpacity=\"0.12\"" in source
     assert "@keyframes chainlink-dot-enter" in css
+
+
+def test_frontend_market_chart_updates_incrementally_without_remounting_line():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    assert "hasRenderedChart" in source
+    assert "chainlink-line-live" in source
+    assert "chainlink-latest-marker" in source
+    assert "key={`area-${chartAnimationKey}`}" not in source
+    assert "key={`line-${chartAnimationKey}`}" not in source
+    assert "key={`dot-${chartAnimationKey}`}" not in source
+    assert "@keyframes chainlink-marker-pulse" in css
+    assert "transition: transform 80ms linear" not in css
+
+
+def test_frontend_market_chart_marker_does_not_lag_behind_path():
+    root = Path(__file__).resolve().parents[1]
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    marker_block = re.search(r"\.chainlink-latest-marker\s*\{(?P<body>[^}]+)\}", css)
+
+    assert marker_block is not None
+    assert "transition" not in marker_block.group("body")
+
+
+def test_frontend_market_chart_slides_time_axis_between_price_refreshes():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "LIVE_CHART_WINDOW_MS" in source
+    assert "useLiveChartNow" in source
+    assert "requestAnimationFrame" in source
+    assert "animationNowMs" in source
+    assert "useChartGeometry(data, animationNowMs)" in source
+    assert "timestamp: new Date(chartNowMs).toISOString()" in source
+    assert "1 - (chartNowMs - ts) / LIVE_CHART_WINDOW_MS" in source
+
+
+def test_frontend_market_chart_grows_from_left_before_live_window_fills():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "const liveWindowFilled = elapsedMs >= LIVE_CHART_WINDOW_MS" in source
+    assert "? 1 - (chartNowMs - ts) / LIVE_CHART_WINDOW_MS" in source
+    assert ": (ts - chartStartMs) / LIVE_CHART_WINDOW_MS" in source
+
+
+def test_frontend_market_chart_animates_y_axis_range_changes():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "Y_RANGE_ANIMATION_MS" in source
+    assert "useAnimatedChartRange" in source
+    assert "easeOutCubic" in source
+    assert "setDisplayRange" in source
+    assert "range: animatedRange ?? model.range" in source
+
+
+def test_frontend_market_chart_uses_current_price_line_and_polymarket_axis_ticks():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "BTC_PRICE_AXIS_MIN_STEP = 50" in source
+    assert "PRICE_TICK_COUNT = 4" in source
+    assert "buildPriceAxis" in source
+    assert "priceTicks" in source
+    assert "currentY" in source
+    assert "chainlink-current-line" in source
+    assert "chainlink-target-line" in source
+    assert "chainlink-target-pill" in source
+    assert "data?.target_price != null) prices.push(data.target_price)" not in source
+
+
+def test_frontend_market_chart_uses_odometer_metrics_for_price_difference_and_clock():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    assert "useAnimatedNumber" in source
+    assert "AnimatedMetric" in source
+    assert "CurrentPriceMetric" in source
+    assert "RollingText" in source
+    assert "ODOMETER_ANIMATION_MS" in source
+    assert "<CurrentPriceMetric price={data?.current_price} delta={data?.delta}" in source
+    assert "<RollingText value={statusLabel}" in source
+    assert "valueKey={chartAnimationKey}" not in source
+    assert "chainlink-odometer-value" in css
+    assert "chainlink-odometer-glyph" in css
+    assert "chainlink-clock-odometer" in css
+    assert "@keyframes chainlink-odometer-roll" in css
+
+
+def test_frontend_current_price_uses_custom_odometer_interpolation_not_number_pop_in():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+    current_price_fn = re.search(r"function CurrentPriceMetric\([\s\S]+?\nfunction ResultPill", source)
+
+    assert current_price_fn is not None
+    assert "const animatedPrice = useAnimatedNumber(price)" in current_price_fn.group(0)
+    assert "const animatedDelta = useAnimatedNumber(delta)" in current_price_fn.group(0)
+    assert "<RollingText value={signedMoney(animatedDelta)} />" in current_price_fn.group(0)
+    assert "<RollingText value={compactMoney(animatedPrice)} />" in current_price_fn.group(0)
+    assert "replayKey" not in source
+    assert "key={replayKey ?? value}" not in source
+    assert "@keyframes chainlink-odometer-roll" in css
+    assert "animation: chainlink-odometer-roll" in css
+    assert "t-digit-pop-in" not in css
+
+
+def test_frontend_market_chart_uses_dollar_only_price_format_and_inline_delta():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    assert "numberFormat" in source
+    assert "return `$${numberFormat.format(value)}`" in source
+    assert "currency: \"USD\"" not in source
+    assert "CurrentPriceMetric" in source
+    assert "chainlink-current-price-metric" in source
+    assert "chainlink-current-delta" in source
+    assert "Triangle" in source
+    assert "<AnimatedMetric label=\"Difference\"" not in source
+    assert "Difference" not in source
+    assert "chainlink-current-price-metric" in css
+    assert "chainlink-current-delta" in css
+
+
+def test_frontend_market_chart_hides_target_for_upcoming_and_colors_switcher_results():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "isUpcomingWindow" in source
+    assert "showTargetPrice" in source
+    assert "showDelta={!isUpcomingWindow}" in source
+    assert "{showTargetPrice && (" in source
+    assert "{showTargetPrice && geometry.targetY != null" in source
+    assert "<ResultPill result={item.result} />" in source
+    assert '<span className="text-xs opacity-70">{item.result}</span>' not in source
+    assert 'if (result === "PENDING")' in source
+    assert 'if (result === "UPCOMING")' in source
+
+
+def test_frontend_market_chart_uses_dark_selected_market_button():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "border-zinc-500 bg-zinc-800/80 text-zinc-50 shadow-inner shadow-black/20" in source
+    assert "bg-zinc-100" not in source
+    assert "text-zinc-950" not in source
+    assert "border-zinc-200" not in source
+
+
+def test_frontend_market_chart_keeps_price_axis_separate_from_live_line():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "CHART_PLOT_RIGHT = 900" in source
+    assert "CHART_PRICE_LABEL_X = 988" in source
+    assert "CHART_TARGET_PILL_X = 878" in source
+    assert "const innerWidth = CHART_PLOT_RIGHT - CHART_LEFT" in source
+    assert 'x2={CHART_PLOT_RIGHT}' in source
+    assert 'x={CHART_PRICE_LABEL_X}' in source
+    assert 'x2="930"' not in source
+    assert 'x="838"' not in source
+
+
+def test_frontend_market_chart_uses_polymarket_style_target_tag():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    assert "CHART_TARGET_PILL_WIDTH = 82" in source
+    assert "CHART_TARGET_PILL_HEIGHT = 26" in source
+    assert "CHART_TARGET_PILL_NOTCH = 10" in source
+    assert "targetPillPath" in source
+    assert "chainlink-target-pill-chevron" in source
+    assert '<rect className="chainlink-target-pill"' not in source
+    assert '<path className="chainlink-target-pill"' in source
+    assert ".chainlink-target-pill-chevron" in css
+
+
+def test_frontend_market_chart_formats_price_axis_as_whole_dollars():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+
+    assert "axisMoney" in source
+    assert "maximumFractionDigits: 0" in source
+    assert "{axisMoney(tick.value)}" in source
+    assert "{compactMoney(tick.value)}" not in source
+
+
+def test_frontend_market_chart_uses_inter_data_font_instead_of_monospace():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    assert "chainlink-market-chart" in source
+    assert ".chainlink-market-chart" in css
+    assert 'font-family: Inter, "Inter Fallback"' in css
+    assert "font-feature-settings" in css
+    assert "font-mono" not in source
+    assert "font-family: ui-monospace" not in css
+
+
+def test_frontend_market_chart_uses_transitions_dev_motion_primitives():
+    root = Path(__file__).resolve().parents[1]
+    source = (root / "web" / "src" / "components" / "BTCMarketChart.tsx").read_text(encoding="utf-8")
+    css = (root / "web" / "src" / "index.css").read_text(encoding="utf-8")
+
+    assert "--tabs-dur" in css
+    assert "--panel-open-dur" in css
+    assert ".t-tabs-pill" in css
+    assert '.t-panel-slide[data-open="true"]' in css
+    assert "chainlink-market-switcher t-tabs" in source
+    assert "t-tabs-pill" in source
+    assert "marketPillStyle" in source
+    assert "aria-selected" in source
+    assert "t-panel-slide" in source
+    assert "key={value}" not in source
 
 
 def test_frontend_current_market_button_keeps_live_polling():
@@ -292,3 +557,34 @@ def test_chainlink_candles_are_cached_between_chart_refreshes():
 
     assert calls["count"] == 1
     assert first.equals(second)
+
+
+def test_chainlink_candle_cache_revalidates_incomplete_settlement_frame():
+    server.BTC_CANDLE_CACHE.clear()
+    calls = {"count": 0}
+
+    missing_settle = pd.DataFrame(
+        [{"timestamp": "2026-06-12T10:35:00+00:00", "open": 100, "high": 101, "low": 99, "close": 100}]
+    )
+    with_settle = pd.DataFrame(
+        [
+            {"timestamp": "2026-06-12T10:35:00+00:00", "open": 100, "high": 101, "low": 99, "close": 100},
+            {"timestamp": "2026-06-12T10:40:00+00:00", "open": 102, "high": 103, "low": 101, "close": 102},
+        ]
+    )
+    required_ts = server._utc_timestamp("2026-06-12T10:40:00+00:00")
+
+    def fetcher():
+        calls["count"] += 1
+        return missing_settle if calls["count"] == 1 else with_settle
+
+    def has_settle(frame):
+        normalized = server._normalize_ohlc_frame(frame)
+        return required_ts in normalized.index
+
+    first = server._get_cached_btc_candles(("BTCUSD", "2026-06-12T10:40:00+00:00"), 60, fetcher, cache_validator=has_settle)
+    second = server._get_cached_btc_candles(("BTCUSD", "2026-06-12T10:40:00+00:00"), 60, fetcher, cache_validator=has_settle)
+
+    assert calls["count"] == 2
+    assert server._normalize_ohlc_frame(first).index[-1] < required_ts
+    assert required_ts in server._normalize_ohlc_frame(second).index

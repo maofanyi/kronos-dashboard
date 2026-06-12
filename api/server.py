@@ -1713,18 +1713,30 @@ def _live_ticks_between(start_ts, end_ts):
     ]
 
 
-def _get_cached_btc_candles(cache_key, ttl_seconds, fetcher):
+def _get_cached_btc_candles(cache_key, ttl_seconds, fetcher, cache_validator=None):
     now = _btc_live_now()
     with BTC_CANDLE_LOCK:
         cached = BTC_CANDLE_CACHE.get(cache_key)
         if cached and now - cached["ts"] <= float(ttl_seconds):
-            return cached["frame"].copy()
+            cached_frame = cached["frame"].copy()
+            if cache_validator is None or cache_validator(cached_frame):
+                return cached_frame
 
     frame = fetcher()
     normalized = frame.copy() if hasattr(frame, "copy") else frame
     with BTC_CANDLE_LOCK:
         BTC_CANDLE_CACHE[cache_key] = {"ts": now, "frame": normalized.copy() if hasattr(normalized, "copy") else normalized}
     return normalized
+
+
+def _btc_candle_cache_has_boundaries(frame, boundaries):
+    if not boundaries:
+        return True
+    normalized = _normalize_ohlc_frame(frame)
+    if normalized.empty:
+        return False
+    index = normalized.index
+    return all(_utc_timestamp(boundary) in index for boundary in boundaries)
 
 
 def _utc_timestamp(value=None):
@@ -1833,7 +1845,16 @@ def _build_history(frame, current_start, limit=8):
     return history
 
 
-def _build_market_switcher(frame, market):
+def _market_result_for_window(frame, start, end, now_ts):
+    if now_ts < start:
+        return "UPCOMING"
+    if start <= now_ts < end:
+        return "PENDING"
+    return _result_label(_price_at(frame, start), _price_at(frame, end))
+
+
+def _build_market_switcher(frame, market, now=None):
+    now_ts = _utc_timestamp(now)
     current_start = _utc_timestamp(market["start_ts"])
     windows = [
         ("previous", current_start - pd.Timedelta(minutes=5)),
@@ -1854,7 +1875,7 @@ def _build_market_switcher(frame, market):
                 "end_ts": _iso_timestamp(end),
                 "target_price": target_price,
                 "settle_price": settle_price,
-                "result": _result_label(target_price, settle_price) if key != "next" else "UPCOMING",
+                "result": _market_result_for_window(frame, start, end, now_ts),
             }
         )
     return items
@@ -1866,20 +1887,27 @@ def _build_btc_market_chart_payload(frame, now=None, start_ts=None):
     normalized = _normalize_ohlc_frame(frame)
     current_start = _utc_timestamp(market["start_ts"])
     current_end = _utc_timestamp(market["end_ts"])
+    is_upcoming_market = now_ts < current_start
+    live_market = _btc_market_window(now_ts)
+    live_start = _utc_timestamp(live_market["start_ts"]) if is_upcoming_market else current_start
+    live_end = _utc_timestamp(live_market["end_ts"]) if is_upcoming_market else current_end
 
     target_price = _price_at(normalized, current_start)
     target_source = "exact"
-    if target_price is None:
+    if is_upcoming_market:
+        target_price = None
+        target_source = "upcoming"
+    elif target_price is None:
         _, target_price = _price_at_or_before(normalized, current_start)
         target_source = "previous_close" if target_price is not None else "missing"
 
     price_cursor = min(now_ts, current_end)
     latest_ts, current_price = _price_at_or_before(normalized, price_cursor)
     live = {"price": None, "timestamp": None, "source": "chainlink_candlestick", "status": "fallback", "error": None}
-    if current_start <= now_ts < current_end:
+    if live_start <= now_ts < live_end:
         live = _latest_btc_live_price(now=now_ts)
         live_ts = _utc_timestamp(live.get("timestamp")) if live.get("timestamp") else None
-        if live.get("price") is not None and live_ts is not None and current_start <= live_ts <= current_end + pd.Timedelta(seconds=5):
+        if live.get("price") is not None and live_ts is not None and live_start <= live_ts <= live_end + pd.Timedelta(seconds=5):
             current_price = float(live["price"])
             latest_ts = live_ts
     delta = None
@@ -1898,7 +1926,7 @@ def _build_btc_market_chart_payload(frame, now=None, start_ts=None):
         }
         for ts, row in normalized.tail(80).iterrows()
     ]
-    if current_price is not None and latest_ts is not None and current_start <= latest_ts <= current_end + pd.Timedelta(seconds=5):
+    if current_price is not None and latest_ts is not None and live_start <= latest_ts <= live_end + pd.Timedelta(seconds=5):
         live_close = round(float(current_price), 2)
         if candles and candles[-1]["timestamp"] == _iso_timestamp(latest_ts):
             candles[-1]["high"] = max(candles[-1]["high"], live_close)
@@ -1914,8 +1942,8 @@ def _build_btc_market_chart_payload(frame, now=None, start_ts=None):
                     "close": live_close,
                 }
             )
-    live_ticks = _live_ticks_between(current_start, current_end)
-    if current_price is not None and latest_ts is not None and current_start <= latest_ts <= current_end + pd.Timedelta(seconds=5):
+    live_ticks = _live_ticks_between(live_start, live_end)
+    if current_price is not None and latest_ts is not None and live_start <= latest_ts <= live_end + pd.Timedelta(seconds=5):
         live_tick_ts = _iso_timestamp(latest_ts)
         if not any(item["timestamp"] == live_tick_ts for item in live_ticks):
             live_ticks.append(
@@ -1936,7 +1964,7 @@ def _build_btc_market_chart_payload(frame, now=None, start_ts=None):
         "resolution": "5m",
         "now": _iso_timestamp(now_ts),
         "market": market,
-        "markets": _build_market_switcher(normalized, market),
+        "markets": _build_market_switcher(normalized, market, now=now_ts),
         "target_price": round(target_price, 2) if target_price is not None else None,
         "target_source": target_source,
         "current_price": round(current_price, 2) if current_price is not None else None,
@@ -1962,8 +1990,9 @@ def _fetch_chainlink_btc_candles(symbol=None, now=None, start_ts=None, lookback_
     now_ts = _utc_timestamp(now)
     window = _btc_market_window(now_ts, start_ts=start_ts)
     current_start = _utc_timestamp(window["start_ts"])
+    current_end = current_start + pd.Timedelta(minutes=5)
     start = current_start - pd.Timedelta(minutes=int(lookback_minutes))
-    end = current_start + pd.Timedelta(minutes=5)
+    end = current_end
     symbol = symbol or os.environ.get("CHAINLINK_SYMBOL", "BTCUSD")
     base_url = os.environ.get("CHAINLINK_CANDLESTICK_BASE_URL", "https://priceapi.dataengine.chain.link")
     client = ChainlinkCandlestickClient(
@@ -1979,6 +2008,11 @@ def _fetch_chainlink_btc_candles(symbol=None, now=None, start_ts=None, lookback_
         base_url,
     )
     cache_seconds = float(os.environ.get("CHAINLINK_CANDLE_CACHE_SECONDS", "20"))
+    required_boundaries = []
+    if now_ts >= current_start:
+        required_boundaries.append(current_start)
+    if now_ts >= current_end:
+        required_boundaries.append(current_end)
     return _get_cached_btc_candles(
         cache_key,
         cache_seconds,
@@ -1989,6 +2023,7 @@ def _fetch_chainlink_btc_candles(symbol=None, now=None, start_ts=None, lookback_
             end=end,
             max_window_days=1,
         ),
+        cache_validator=lambda frame: _btc_candle_cache_has_boundaries(frame, required_boundaries),
     )
 
 
