@@ -1349,6 +1349,14 @@ def test_live_page_surfaces_today_activity_summary():
     assert "Latest Dry-run" in source
 
 
+def test_live_page_labels_pending_queue_precisely():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert 'Panel title="Pending Queue" sub="awaiting settlement"' in source
+    assert "No pending orders" in source
+    assert "No open orders" not in source
+
+
 def test_live_page_surfaces_clob_readonly_panel():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

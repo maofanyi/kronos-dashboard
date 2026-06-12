@@ -1368,10 +1368,10 @@ export default function Live() {
         </Panel>
 
         <div className="min-w-0 max-w-full space-y-5">
-          <Panel title="Pending Orders" sub="current checkpoint queue" right={<span className="font-mono text-xs text-zinc-500">{pending.length}</span>}>
+          <Panel title="Pending Queue" sub="awaiting settlement" right={<span className="font-mono text-xs text-zinc-500">{pending.length}</span>}>
             <div className="max-h-[220px] divide-y divide-zinc-900 overflow-auto">
               {pending.length === 0 ? (
-                <div className="px-4 py-8 text-center text-sm text-zinc-500">No open orders</div>
+                <div className="px-4 py-8 text-center text-sm text-zinc-500">No pending orders</div>
               ) : (
                 pending.map((trade) => (
                   <div key={trade.id} className="px-4 py-3">
