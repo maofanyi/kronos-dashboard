@@ -1302,9 +1302,16 @@ export default function Live() {
         </Panel>
         <Panel title="Recent Signals" sub="aligned-prod decisions" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
           <div className="max-h-[280px] overflow-auto">
-            {(events ?? []).slice(0, 14).map((event) => (
-              <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
-            ))}
+            {(events?.length ?? 0) === 0 ? (
+              <div className="px-4 py-8 text-center">
+                <div className="text-sm text-zinc-400">No recent signals</div>
+                <div className="mt-1 text-xs text-zinc-600">Waiting for aligned-prod decisions</div>
+              </div>
+            ) : (
+              (events ?? []).slice(0, 14).map((event) => (
+                <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
+              ))
+            )}
           </div>
         </Panel>
       </div>
@@ -1331,7 +1338,14 @@ export default function Live() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-900">
-                {settledDesc.map((trade) => {
+                {settledDesc.length === 0 ? (
+                  <tr>
+                    <td colSpan={7} className="px-4 py-10 text-center">
+                      <div className="text-sm text-zinc-400">No completed trades</div>
+                      <div className="mt-1 text-xs text-zinc-600">Settled trades will appear here</div>
+                    </td>
+                  </tr>
+                ) : settledDesc.map((trade) => {
                   const open = expandedTrade === trade.id;
                   const details = parseJson<SignalDetails>(trade.details);
                   return (

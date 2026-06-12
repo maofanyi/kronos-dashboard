@@ -1200,6 +1200,17 @@ def test_live_page_surfaces_funnel_conversion_rates():
     assert "percent(item.value)" in source
 
 
+def test_live_page_shows_empty_states_for_activity_lists():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "(events?.length ?? 0) === 0" in source
+    assert "No recent signals" in source
+    assert "Waiting for aligned-prod decisions" in source
+    assert "settledDesc.length === 0" in source
+    assert "No completed trades" in source
+    assert "Settled trades will appear here" in source
+
+
 def test_live_page_surfaces_funding_shortfalls():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
