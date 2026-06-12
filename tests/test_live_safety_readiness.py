@@ -42,6 +42,17 @@ def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypat
                 "open_orders_count": 0,
                 "usdc_balance": 0.0,
                 "min_allowance": 0.0,
+                "allowance_count": 3,
+                "min_allowance_spender": "spender-a",
+            },
+            "funding_requirements": {
+                "required_min_balance_usdc": 10.0,
+                "required_smoke_notional_usdc": 2.6,
+                "required_min_allowance_usdc": 10.0,
+                "balance_shortfall_usdc": 10.0,
+                "smoke_notional_shortfall_usdc": 2.6,
+                "allowance_shortfall_usdc": 10.0,
+                "funding_ready": False,
             },
             "market_probes": [
                 {"direction": "UP", "ok": True, "quote_executable": True},
@@ -70,10 +81,18 @@ def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypat
     assert summary["live_gate"]["blockers"] == ["balance_meets_minimum", "allowance_meets_minimum"]
     assert summary["funding"]["balance"] == 0.0
     assert summary["funding"]["min_allowance"] == 0.0
+    assert summary["funding"]["allowance_count"] == 3
+    assert summary["funding"]["min_allowance_spender"] == "spender-a"
+    assert summary["funding"]["balance_shortfall_usdc"] == 10.0
+    assert summary["funding"]["smoke_notional_shortfall_usdc"] == 2.6
+    assert summary["funding"]["allowance_shortfall_usdc"] == 10.0
+    assert summary["funding"]["funding_ready"] is False
     assert checks["dryrun_no_submitted_orders"]["ok"] is True
     assert checks["live_trade_gate_ready"]["ok"] is False
     assert checks["minimum_balance"]["ok"] is False
+    assert checks["minimum_balance"]["value"] == 0.0
     assert checks["minimum_allowance"]["ok"] is False
+    assert checks["minimum_allowance"]["value"] == 0.0
 
 
 def test_live_safety_marks_dryrun_submitted_order_as_critical(tmp_path, monkeypatch):
@@ -96,6 +115,76 @@ def test_live_safety_marks_dryrun_submitted_order_as_critical(tmp_path, monkeypa
     assert summary["dryrun"]["submitted_count"] == 1
     assert checks["dryrun_no_submitted_orders"]["ok"] is False
     assert checks["dryrun_no_submitted_orders"]["severity"] == "critical"
+
+
+def test_live_safety_prefers_live_gate_funding_over_older_allowance_audit(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+
+    _write_json(
+        report_dir / "polymarket_clob_allowance_audit_old.json",
+        {
+            "checks": [
+                {"name": "minimum_balance", "ok": False, "value": 0.0, "expected": ">= 5.0"},
+                {"name": "minimum_allowance", "ok": False, "value": 0.0, "expected": ">= 5.0"},
+                {"name": "readonly_get_balance", "ok": True},
+                {"name": "readonly_get_balance_allowance", "ok": True},
+                {"name": "readonly_authenticated_client", "ok": True},
+            ],
+            "network": {
+                "calls": [
+                    {"name": "get_balance_allowance", "balance": 0.0, "min_allowance": 0.0, "allowance_count": 3}
+                ]
+            },
+        },
+    )
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": False,
+            "ready_for_live_smoke": False,
+            "blockers": ["balance_meets_minimum", "allowance_meets_minimum"],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 0.0,
+                "min_allowance": 0.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {
+                "required_min_balance_usdc": 10.0,
+                "required_smoke_notional_usdc": 2.6,
+                "required_min_allowance_usdc": 10.0,
+                "balance_shortfall_usdc": 10.0,
+                "smoke_notional_shortfall_usdc": 2.6,
+                "allowance_shortfall_usdc": 10.0,
+                "funding_ready": False,
+            },
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": False, "value": 0.0, "expected": ">= 10.0"},
+                {"name": "allowance_meets_minimum", "ok": False, "value": 0.0, "expected": ">= 10.0"},
+            ],
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["funding"]["balance_expected"] == ">= 10.0"
+    assert summary["funding"]["allowance_expected"] == ">= 10.0"
+    assert checks["minimum_balance"]["expected"] == ">= 10.0"
+    assert checks["minimum_allowance"]["expected"] == ">= 10.0"
 
 
 def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
@@ -216,6 +305,16 @@ def test_live_page_surfaces_preflight_chain_status():
     assert "Preflight" in source
 
 
+def test_live_page_surfaces_funding_shortfalls():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "safety?.funding?.balance_shortfall_usdc" in source
+    assert "safety?.funding?.allowance_shortfall_usdc" in source
+    assert "safety?.funding?.funding_ready" in source
+    assert "Balance Gap" in source
+    assert "Allowance Gap" in source
+
+
 def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
@@ -226,3 +325,13 @@ def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     assert "safety?.preflight_chain?.age_seconds" in source
     assert "Dry-run" in source
     assert "Preflight" in source
+
+
+def test_status_bar_surfaces_funding_shortfalls():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "safety?.funding?.balance_shortfall_usdc" in source
+    assert "safety?.funding?.allowance_shortfall_usdc" in source
+    assert "safety?.funding?.funding_ready" in source
+    assert "Balance Gap" in source
+    assert "Allowance Gap" in source

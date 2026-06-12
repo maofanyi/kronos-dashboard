@@ -33,9 +33,18 @@ interface SafetyData {
     balance_ok?: boolean;
     allowance_ok?: boolean;
     balance?: number;
+    allowance_count?: number;
     min_allowance?: number;
+    min_allowance_spender?: string;
     balance_expected?: string;
     allowance_expected?: string;
+    required_min_balance_usdc?: number;
+    required_smoke_notional_usdc?: number;
+    required_min_allowance_usdc?: number;
+    balance_shortfall_usdc?: number;
+    smoke_notional_shortfall_usdc?: number;
+    allowance_shortfall_usdc?: number;
+    funding_ready?: boolean;
   };
   dryrun?: {
     ledger?: string;
@@ -229,7 +238,12 @@ export default function StatusBar() {
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
   const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
-  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady;
+  const fundingReady = safety?.funding?.funding_ready === true;
+  const fundingGap = Math.max(
+    safety?.funding?.balance_shortfall_usdc ?? 0,
+    safety?.funding?.allowance_shortfall_usdc ?? 0,
+  );
+  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady;
   const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
 
   return (
@@ -262,6 +276,11 @@ export default function StatusBar() {
             label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
           />
           <StatusChip
+            ok={fundingReady}
+            label={fundingReady ? "Funding ready" : `Funding gap ${money(fundingGap)}`}
+            icon="wallet"
+          />
+          <StatusChip
             ok={liveGateReady}
             label={liveGateReady ? "Gate ready" : `Gate ${safety?.live_gate?.blockers?.length ?? 0}`}
           />
@@ -290,6 +309,8 @@ export default function StatusBar() {
               <DetailTile label="CLOB Auth" value={safety?.clob?.authenticated ? "OK" : "-"} ok={safety?.clob?.authenticated} />
               <DetailTile label="Balance" value={money(safety?.funding?.balance)} ok={safety?.funding?.balance_ok} />
               <DetailTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
+              <DetailTile label="Balance Gap" value={money(safety?.funding?.balance_shortfall_usdc)} ok={(safety?.funding?.balance_shortfall_usdc ?? 0) === 0} />
+              <DetailTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc)} ok={(safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
               <DetailTile
                 label="Daily Trades"
                 value={metrics && limits ? `${metrics.daily_trades}/${limits.max_daily_trades}` : "-"}

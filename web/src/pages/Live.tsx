@@ -153,8 +153,16 @@ interface LiveSafety {
     balance?: number;
     allowance_count?: number;
     min_allowance?: number;
+    min_allowance_spender?: string;
     balance_expected?: string;
     allowance_expected?: string;
+    required_min_balance_usdc?: number;
+    required_smoke_notional_usdc?: number;
+    required_min_allowance_usdc?: number;
+    balance_shortfall_usdc?: number;
+    smoke_notional_shortfall_usdc?: number;
+    allowance_shortfall_usdc?: number;
+    funding_ready?: boolean;
   };
   reports: {
     allowance: string;
@@ -414,15 +422,21 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
   const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
+  const fundingReady = safety?.funding?.funding_ready === true;
+  const fundingGap = Math.max(
+    safety?.funding?.balance_shortfall_usdc ?? 0,
+    safety?.funding?.allowance_shortfall_usdc ?? 0,
+  );
   return (
     <CollapsiblePanel
       title="Live Safety"
       sub={source}
-      right={<StatusPill ok={!liveEnabled && health?.state === "ok" && dryrunClean && preflightReady} label={!liveEnabled && health?.state === "ok" && dryrunClean && preflightReady ? "Safe" : "Review"} />}
+      right={<StatusPill ok={!liveEnabled && health?.state === "ok" && dryrunClean && preflightReady && fundingReady} label={!liveEnabled && health?.state === "ok" && dryrunClean && preflightReady && fundingReady ? "Safe" : "Review"} />}
       summary={
         <div className="flex min-w-0 flex-wrap gap-2">
           <StatusPill ok={!liveEnabled} label={liveEnabled ? "Real orders enabled" : "Locked"} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
+          <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : `Funding gap ${money(fundingGap)}`} />
           <StatusPill ok={dryrunClean} label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`} />
           <StatusPill ok={gateReady} label={gateReady ? "Gate ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`} />
           <StatusPill ok={preflightReady} label={preflightReady ? `Preflight ${preflightAge}` : `Preflight ${preflightBlockers}`} />
@@ -436,6 +450,8 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={safety?.clob?.authenticated === true} label="CLOB auth" />
           <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${safety?.funding?.balance ?? "-"}`} />
           <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${safety?.funding?.min_allowance ?? "-"}`} />
+          <StatusPill ok={fundingReady} label={`Balance Gap ${money(safety?.funding?.balance_shortfall_usdc ?? 0)}`} />
+          <StatusPill ok={fundingReady} label={`Allowance Gap ${money(safety?.funding?.allowance_shortfall_usdc ?? 0)}`} />
           <StatusPill ok={dryrunClean} label={`Dry-run submitted ${safety?.dryrun?.submitted_count ?? 0}`} />
           <StatusPill ok={gateReady} label={`Gate blockers ${safety?.live_gate?.blockers?.length ?? 0}`} />
           <StatusPill ok={preflightReady} label={preflightSubmitted ? "Preflight submitted" : `Preflight ${preflightAge}`} />
@@ -616,11 +632,14 @@ function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveS
   const liveRisk = safety?.risk;
   const metrics = liveRisk?.metrics;
   const limits = liveRisk?.limits;
+  const fundingReady = safety?.funding?.funding_ready === true;
   return (
     <Panel title="Risk & Funding" sub="limits, exposure, readiness">
       <div className="grid grid-cols-2 gap-2 p-4">
         <HealthTile label="Balance" value={String(safety?.funding?.balance ?? "-")} ok={safety?.funding?.balance_ok} />
         <HealthTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
+        <HealthTile label="Balance Gap" value={money(safety?.funding?.balance_shortfall_usdc ?? 0)} ok={fundingReady || (safety?.funding?.balance_shortfall_usdc ?? 0) === 0} />
+        <HealthTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc ?? 0)} ok={fundingReady || (safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
         <HealthTile
           label="Daily PnL"
           value={metrics ? signedMoney(metrics.daily_pnl_usdc) : "-"}

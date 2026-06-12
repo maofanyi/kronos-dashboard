@@ -286,6 +286,11 @@ def _live_gate_report_summary(path=None, report=None):
     report = report if isinstance(report, dict) else {}
     probes = report.get("market_probes") if isinstance(report.get("market_probes"), list) else []
     blockers = report.get("blockers") if isinstance(report.get("blockers"), list) else []
+    funding_requirements = (
+        report.get("funding_requirements")
+        if isinstance(report.get("funding_requirements"), dict)
+        else {}
+    )
     return {
         "report": str(path) if path else "",
         "available": bool(report),
@@ -296,6 +301,7 @@ def _live_gate_report_summary(path=None, report=None):
         "quote_executable_count": sum(1 for probe in probes if probe.get("quote_executable")),
         "account": report.get("account") if isinstance(report.get("account"), dict) else {},
         "risk": report.get("risk") if isinstance(report.get("risk"), dict) else {},
+        "funding_requirements": funding_requirements,
     }
 
 
@@ -484,11 +490,16 @@ def _safety_report_summary():
     live_gate_summary = _live_gate_report_summary(gate_path, gate_report)
     preflight_summary = _live_preflight_chain_summary(preflight_path, preflight_report)
     gate_account = gate_report.get("account") if isinstance(gate_report.get("account"), dict) else {}
+    gate_funding = (
+        gate_report.get("funding_requirements")
+        if isinstance(gate_report.get("funding_requirements"), dict)
+        else {}
+    )
     execution_path, execution_report = _latest_json_report("live_dryrun_execution_summary_latest.json")
     checkpoint = _read_json(_paper_checkpoint_path()) or {}
 
-    balance_check = _check_status(allowance_report, "minimum_balance") or _check_status(gate_report, "balance_meets_minimum")
-    allowance_check = _check_status(allowance_report, "minimum_allowance") or _check_status(gate_report, "allowance_meets_minimum")
+    balance_check = _check_status(gate_report, "balance_meets_minimum") or _check_status(allowance_report, "minimum_balance")
+    allowance_check = _check_status(gate_report, "allowance_meets_minimum") or _check_status(allowance_report, "minimum_allowance")
     auth_check = _check_status(allowance_report, "readonly_authenticated_client") or _check_status(gate_report, "clob_account_authenticated")
     if auth_check is None:
         auth_check = _check_status(allowance_report, "clob_private_key_present")
@@ -511,6 +522,8 @@ def _safety_report_summary():
     )
     balance_value = balance_allowance_call.get("balance", gate_account.get("usdc_balance"))
     min_allowance_value = balance_allowance_call.get("min_allowance", gate_account.get("min_allowance"))
+    allowance_count = balance_allowance_call.get("allowance_count", gate_account.get("allowance_count"))
+    min_allowance_spender = gate_account.get("min_allowance_spender", "")
 
     clob_authenticated = bool(auth_check and auth_check.get("ok"))
     account_read_ok = bool(balance_read and balance_read.get("ok"))
@@ -553,7 +566,7 @@ def _safety_report_summary():
             "key": "minimum_balance",
             "label": "Minimum balance",
             "ok": balance_ok,
-            "value": balance_allowance_call.get("balance"),
+            "value": balance_value,
             "expected": balance_check.get("expected") if balance_check else None,
             "severity": "funding",
         },
@@ -561,7 +574,7 @@ def _safety_report_summary():
             "key": "minimum_allowance",
             "label": "Minimum allowance",
             "ok": allowance_ok,
-            "value": balance_allowance_call.get("min_allowance"),
+            "value": min_allowance_value,
             "expected": allowance_check.get("expected") if allowance_check else None,
             "severity": "funding",
         },
@@ -645,10 +658,18 @@ def _safety_report_summary():
             "balance_ok": balance_ok,
             "allowance_ok": allowance_ok,
             "balance": balance_value,
-            "allowance_count": balance_allowance_call.get("allowance_count"),
+            "allowance_count": allowance_count,
             "min_allowance": min_allowance_value,
+            "min_allowance_spender": min_allowance_spender,
             "balance_expected": balance_check.get("expected") if balance_check else None,
             "allowance_expected": allowance_check.get("expected") if allowance_check else None,
+            "required_min_balance_usdc": gate_funding.get("required_min_balance_usdc"),
+            "required_smoke_notional_usdc": gate_funding.get("required_smoke_notional_usdc"),
+            "required_min_allowance_usdc": gate_funding.get("required_min_allowance_usdc"),
+            "balance_shortfall_usdc": gate_funding.get("balance_shortfall_usdc"),
+            "smoke_notional_shortfall_usdc": gate_funding.get("smoke_notional_shortfall_usdc"),
+            "allowance_shortfall_usdc": gate_funding.get("allowance_shortfall_usdc"),
+            "funding_ready": gate_funding.get("funding_ready"),
         },
         "reports": {
             "allowance": str(allowance_path) if allowance_path else "",
