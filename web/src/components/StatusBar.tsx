@@ -80,6 +80,17 @@ interface SafetyData {
     risk_ok?: boolean;
     components?: Record<string, unknown>;
   };
+  market_data?: {
+    ready?: boolean;
+    price?: number | null;
+    timestamp?: string;
+    source?: string;
+    status?: string;
+    price_age_seconds?: number | null;
+    received_age_seconds?: number | null;
+    next_action?: string;
+    error?: string | null;
+  };
   checklist?: ChecklistItem[];
   readiness_summary?: {
     ready: boolean;
@@ -360,12 +371,14 @@ export default function StatusBar() {
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
   const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
+  const marketDataReady = safety?.market_data?.ready === true;
+  const marketDataAge = ageLabel(safety?.market_data?.price_age_seconds);
   const fundingReady = safety?.funding?.funding_ready === true;
   const fundingGap = Math.max(
     safety?.funding?.balance_shortfall_usdc ?? 0,
     safety?.funding?.allowance_shortfall_usdc ?? 0,
   );
-  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady;
+  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
   const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
 
   return (
@@ -402,6 +415,10 @@ export default function StatusBar() {
           <StatusChip
             ok={dryrunOk}
             label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
+          />
+          <StatusChip
+            ok={marketDataReady}
+            label={`Market ${marketDataReady ? marketDataAge : safety?.market_data?.status ?? "-"}`}
           />
           <StatusChip
             ok={fundingReady}
@@ -455,6 +472,11 @@ export default function StatusBar() {
               <DetailTile label="Checkpoint" value={ageLabel(health?.checkpoint_age_seconds)} ok={(health?.checkpoint_age_seconds ?? 9999) < 600} />
               <DetailTile label="Latest Event" value={ageLabel(health?.latest_event_age_seconds)} ok={(health?.latest_event_age_seconds ?? 9999) < 600} />
               <DetailTile label="Open/Pending" value={`${metrics?.open_or_pending_orders ?? health?.pending_count ?? 0}`} ok={riskOk} />
+              <DetailTile
+                label="Market Data"
+                value={`${safety?.market_data?.status ?? "-"} / ${safety?.market_data?.source ?? "-"}`}
+                ok={marketDataReady}
+              />
               <DetailTile
                 label="Dry-run Ledger"
                 value={`${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}

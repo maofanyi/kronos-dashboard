@@ -1347,6 +1347,17 @@ def test_status_bar_surfaces_dryrun_gate_and_preflight_status():
     assert "Preflight" in source
 
 
+def test_status_bar_surfaces_market_data_status():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "market_data?: {" in source
+    assert "const marketDataReady = safety?.market_data?.ready === true" in source
+    assert "const marketDataAge = ageLabel(safety?.market_data?.price_age_seconds)" in source
+    assert "Market Data" in source
+    assert "Market ${marketDataReady ? marketDataAge : safety?.market_data?.status ?? \"-\"}" in source
+    assert "safety?.market_data?.source" in source
+
+
 def test_status_bar_surfaces_funding_shortfalls():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
