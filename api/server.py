@@ -927,6 +927,44 @@ def _first_order_rail(checklist):
     }
 
 
+def _operator_summary(readiness_summary, first_order_rail):
+    stages = first_order_rail.get("stages") or []
+    current_key = first_order_rail.get("current_key")
+    current_stage = next((stage for stage in stages if stage.get("key") == current_key), stages[-1] if stages else {})
+    ready = bool(first_order_rail.get("ready_for_manual_confirmation"))
+    stage_status = str(current_stage.get("status") or "")
+    if ready:
+        status = "manual_confirmation"
+    elif stage_status == "blocked":
+        status = "blocked"
+    else:
+        status = "waiting"
+
+    blocker_keys = current_stage.get("blocker_keys") or []
+    blockers = current_stage.get("blockers") or []
+    top_blocker = (readiness_summary.get("top_blockers") or [{}])[0] or {}
+    primary_blocker_key = blocker_keys[0] if blocker_keys else top_blocker.get("key")
+    primary_blocker = blockers[0] if blockers else top_blocker.get("label")
+    if status == "manual_confirmation":
+        primary_blocker_key = None
+        primary_blocker = None
+
+    return {
+        "ready": ready,
+        "status": status,
+        "current_stage_key": current_stage.get("key") or current_key,
+        "current_stage_label": current_stage.get("label") or "Live safety",
+        "next_action": current_stage.get("action") or top_blocker.get("action") or "Review readiness",
+        "primary_blocker_key": primary_blocker_key,
+        "primary_blocker": primary_blocker,
+        "readiness_passed": readiness_summary.get("passed", 0),
+        "readiness_total": readiness_summary.get("total", 0),
+        "critical_blockers": readiness_summary.get("critical_blockers", 0),
+        "funding_blockers": readiness_summary.get("funding_blockers", 0),
+        "risk_blockers": readiness_summary.get("risk_blockers", 0),
+    }
+
+
 def _clob_quote_probe_summary(probe):
     return {
         "direction": str(probe.get("direction") or probe.get("side") or probe.get("outcome") or "").upper(),
@@ -1148,6 +1186,7 @@ def _safety_report_summary():
 
     readiness_summary = _readiness_summary(checklist)
     first_order_rail = _first_order_rail(checklist)
+    operator_summary = _operator_summary(readiness_summary, first_order_rail)
     open_orders_read_ok = bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok"))
     market_probe_count = int(live_gate_summary.get("market_probe_count", 0) or 0)
     quote_executable_count = int(live_gate_summary.get("quote_executable_count", 0) or 0)
@@ -1332,6 +1371,7 @@ def _safety_report_summary():
         "market_data": market_data_summary,
         "checklist": checklist,
         "readiness_summary": readiness_summary,
+        "operator_summary": operator_summary,
         "clob_readonly": clob_readonly,
         "report_refresh": report_refresh,
         "first_order_rail": first_order_rail,

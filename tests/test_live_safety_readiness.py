@@ -450,6 +450,18 @@ def test_live_safety_includes_first_order_rail(tmp_path, monkeypatch):
     assert guarded["status"] == "waiting"
     assert guarded["action"] == "Wait for explicit user confirmation"
 
+    operator = summary["operator_summary"]
+    assert operator["ready"] is False
+    assert operator["status"] == "blocked"
+    assert operator["current_stage_key"] == "read_only_audit"
+    assert operator["current_stage_label"] == "CLOB read-only audit"
+    assert operator["next_action"] == "Run CLOB read-only audit"
+    assert operator["primary_blocker_key"] == "clob_authenticated"
+    assert operator["primary_blocker"] == "CLOB authenticated"
+    assert operator["critical_blockers"] > 0
+    assert operator["readiness_passed"] == summary["readiness_summary"]["passed"]
+    assert operator["readiness_total"] == summary["readiness_summary"]["total"]
+
 
 def test_live_safety_first_order_rail_requires_manual_confirmation_when_ready(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
@@ -536,6 +548,17 @@ def test_live_safety_first_order_rail_requires_manual_confirmation_when_ready(tm
     assert stages["tiny_guarded_order"]["requires_confirmation"] is True
     assert stages["tiny_guarded_order"]["action"] == "Wait for explicit user confirmation"
     assert stages["settle_tracking"]["status"] == "waiting"
+
+    operator = summary["operator_summary"]
+    assert operator["ready"] is True
+    assert operator["status"] == "manual_confirmation"
+    assert operator["current_stage_key"] == "tiny_guarded_order"
+    assert operator["current_stage_label"] == "Tiny guarded order"
+    assert operator["next_action"] == "Wait for explicit user confirmation"
+    assert operator["primary_blocker_key"] is None
+    assert operator["primary_blocker"] is None
+    assert operator["critical_blockers"] == 0
+    assert operator["readiness_passed"] == operator["readiness_total"]
 
 
 def test_live_safety_marks_dryrun_submitted_order_as_critical(tmp_path, monkeypatch):
@@ -1232,6 +1255,18 @@ def test_live_page_surfaces_first_order_rail():
     assert "First Order Path" in source
     assert "Manual confirmation" in source
     assert "requires_confirmation" in source
+
+
+def test_live_page_surfaces_operator_summary_card():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "operator_summary" in source
+    assert "const operator = safety?.operator_summary" in source
+    assert "operator?.current_stage_label" in source
+    assert "operator?.next_action" in source
+    assert "operator?.primary_blocker" in source
+    assert 'label="Next"' in source
+    assert "xl:grid-cols-8" in source
 
 
 def test_live_page_surfaces_today_dryrun_summary():

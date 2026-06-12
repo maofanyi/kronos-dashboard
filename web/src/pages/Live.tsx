@@ -288,6 +288,20 @@ interface LiveSafety {
     }>;
     by_severity?: Record<string, number>;
   };
+  operator_summary?: {
+    ready: boolean;
+    status: string;
+    current_stage_key?: string;
+    current_stage_label?: string;
+    next_action?: string;
+    primary_blocker_key?: string | null;
+    primary_blocker?: string | null;
+    readiness_passed: number;
+    readiness_total: number;
+    critical_blockers: number;
+    funding_blockers: number;
+    risk_blockers: number;
+  };
   first_order_rail?: {
     current_key: string;
     ready_for_manual_confirmation: boolean;
@@ -1193,10 +1207,19 @@ export default function Live() {
   const todaySignalPassed = todayStats?.signals.passed ?? 0;
   const todaySignalTotal = todayStats?.signals.total ?? 0;
   const todaySignalPassRate = todayStats?.signals.pass_rate ?? 0;
+  const operator = safety?.operator_summary;
+  const operatorStageLabel = operator?.current_stage_label ?? "Live safety";
+  const operatorValue = operator?.ready ? "Confirm" : operator?.status === "blocked" ? "Blocked" : operator?.status === "waiting" ? "Waiting" : "Review";
+  const operatorSub = operator?.primary_blocker
+    ? `${operator?.primary_blocker} -> ${operator?.next_action ?? "Review readiness"}`
+    : operator?.next_action ?? operatorStageLabel;
+  const operatorTone = operator?.ready ? "text-amber-300" : operator?.status === "blocked" ? "text-rose-300" : "text-zinc-100";
+  const operatorIcon = operator?.ready ? CheckCircle2 : operator?.status === "blocked" ? AlertTriangle : ShieldCheck;
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-7">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-8">
+        <StatCard label="Next" value={operatorValue} sub={operatorSub} icon={operatorIcon} tone={operatorTone} />
         <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`Today ${signedMoney(todayPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
         <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />
