@@ -466,6 +466,14 @@ const timeOrBar = (value?: number | string) => {
 const rangeLabel = (entry?: number | string, settle?: number | string) =>
   `${timeOrBar(entry)} -> ${timeOrBar(settle)}`;
 
+const pendingStatusLabel = (settle?: number | string) => {
+  const settleMs = sortValue(settle);
+  if (!settleMs) return "awaiting settlement";
+  const seconds = Math.round((settleMs - Date.now()) / 1000);
+  if (seconds <= 0) return "awaiting refresh";
+  return `settles in ${ageLabel(seconds)}`;
+};
+
 const tradeRecordedAt = (trade: TradeItem, details: SignalDetails | null) =>
   details?.settled_at || details?.created_at || trade.created_at;
 
@@ -1480,6 +1488,7 @@ export default function Live() {
                       <span className="inline-flex items-center gap-1 text-zinc-300">{directionIcon(trade.direction)}{directionLabel(trade.direction)}</span>
                       <span className="font-mono">{money(trade.size ?? 0)}</span>
                     </div>
+                    <div className="mt-2 font-mono text-[11px] uppercase tracking-[0.12em] text-amber-300">{pendingStatusLabel(trade.settle_bar)}</div>
                   </div>
                 ))
               )}

@@ -1640,6 +1640,15 @@ def test_live_page_labels_pending_queue_precisely():
     assert "No open orders" not in source
 
 
+def test_live_page_labels_overdue_pending_orders_as_awaiting_refresh():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const pendingStatusLabel = (settle?: number | string)" in source
+    assert '"awaiting refresh"' in source
+    assert "`settles in ${ageLabel(seconds)}`" in source
+    assert "{pendingStatusLabel(trade.settle_bar)}" in source
+
+
 def test_live_page_completed_trades_uses_per_trade_recorded_time_from_details():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
