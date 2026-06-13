@@ -1266,6 +1266,10 @@ export default function Live() {
   const todaySignalPassed = todayStats?.signals.passed ?? 0;
   const todaySignalTotal = todayStats?.signals.total ?? 0;
   const todaySignalPassRate = todayStats?.signals.pass_rate ?? 0;
+  const latestSignalKpiAge = todayStats?.activity?.latest_signal_age_seconds;
+  const latestSignalFresh = (latestSignalKpiAge ?? 9999) < 600;
+  const signalKpiSub = `${percent(todaySignalPassRate)} today pass rate / latest ${ageLabel(latestSignalKpiAge)}`;
+  const signalKpiTone = todaySignalTotal === 0 ? "text-zinc-100" : latestSignalFresh ? "text-emerald-300" : "text-amber-300";
   const operator = safety?.operator_summary;
   const operatorStageLabel = operator?.current_stage_label ?? "Live safety";
   const operatorValue = operator?.ready ? "Confirm" : operator?.status === "blocked" ? "Blocked" : operator?.status === "waiting" ? "Waiting" : "Review";
@@ -1324,7 +1328,7 @@ export default function Live() {
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
         <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />
         <StatCard label="Pending" value={openPendingValue} sub={openPendingSub} icon={Clock3} tone={openPendingTone} />
-        <StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={`${percent(todaySignalPassRate)} today pass rate`} icon={CheckCircle2} />
+        <StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={signalKpiSub} icon={CheckCircle2} tone={signalKpiTone} />
         <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
         <StatCard label="Health" value={healthValue} sub={healthSub} icon={ShieldCheck} tone={healthTone} />
       </div>

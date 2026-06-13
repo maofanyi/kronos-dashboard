@@ -1244,6 +1244,17 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "today pass rate" in source
 
 
+def test_live_page_uses_signal_freshness_for_top_signals_kpi():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const latestSignalKpiAge = todayStats?.activity?.latest_signal_age_seconds" in source
+    assert "const latestSignalFresh = (latestSignalKpiAge ?? 9999) < 600" in source
+    assert "const signalKpiSub = `${percent(todaySignalPassRate)} today pass rate / latest ${ageLabel(latestSignalKpiAge)}`" in source
+    assert "const signalKpiTone = todaySignalTotal === 0 ? \"text-zinc-100\" : latestSignalFresh ? \"text-emerald-300\" : \"text-amber-300\"" in source
+    assert 'StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={signalKpiSub}' in source
+    assert "tone={signalKpiTone}" in source
+
+
 def test_live_page_uses_clob_funding_for_top_balance_kpi():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
