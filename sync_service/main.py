@@ -15,6 +15,14 @@ def configured_paper_source():
     return (os.environ.get("DASHBOARD_RUN_SOURCE") or os.environ.get("RUN_SOURCE") or "").strip()
 
 
+def configured_dashboard_db_source():
+    value = (os.environ.get("DASHBOARD_DB_SOURCE") or "").strip()
+    allowed = {"paper", "dryrun_aligned_prod_shift1", "shadow_live", "live_real", "history"}
+    if value in allowed:
+        return value
+    return "paper"
+
+
 def paper_run_source(kronos_dir: Path):
     configured = configured_paper_source()
     if configured:
@@ -158,7 +166,7 @@ def import_live_snapshot(conn, path: Path, db_source: str | None = None):
     if not path.exists():
         return
     data = json.loads(path.read_text(encoding="utf-8"))
-    source = db_source or ("live" if str(data.get("mode", "")).startswith("paper_live") else "history")
+    source = db_source or ("paper" if str(data.get("mode", "")).startswith("paper_live") else "history")
 
     # Snapshot
     trades_list = data.get("trades", [])
@@ -252,6 +260,7 @@ def main():
     live_event_count = 0
     hist_event_count = 0
     live_event_path = None
+    db_source = configured_dashboard_db_source()
 
     # First run: check if empty, do full import
     cur = conn.execute("SELECT COUNT(*) FROM events")
@@ -259,7 +268,7 @@ def main():
         print("First run 鈥?full import...")
         live_source = paper_run_source(kronos_dir)
         live_event_path = event_jsonl_path(kronos_dir, live_source)
-        live_event_count = import_jsonl(conn, "live",
+        live_event_count = import_jsonl(conn, db_source,
                                         live_event_path, 0)
         hist_event_count = import_jsonl(conn, "history",
                                         event_jsonl_path(kronos_dir, "history"), 0)
@@ -273,9 +282,9 @@ def main():
             if live_event_path != current_live_event_path:
                 live_event_path = current_live_event_path
                 live_event_count = 0
-            import_live_snapshot(conn, kronos_dir / f"{live_source}.json", db_source="live")
+            import_live_snapshot(conn, kronos_dir / f"{live_source}.json", db_source=db_source)
             live_event_count = import_jsonl(
-                conn, "live", live_event_path, live_event_count
+                conn, db_source, live_event_path, live_event_count
             )
 
             # Historical paper
