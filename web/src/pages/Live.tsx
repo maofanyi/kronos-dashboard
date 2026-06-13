@@ -1281,12 +1281,18 @@ export default function Live() {
   const readinessBlockers = readinessSummary?.blockers ?? 0;
   const readinessReady = readinessSummary?.ready === true;
   const readinessTone = readinessReady ? "text-emerald-300" : readinessCritical > 0 ? "text-rose-300" : "text-amber-300";
+  const marketData = safety?.market_data;
+  const marketReady = marketData?.ready === true;
+  const marketAgeBudget = ageBudgetLabel(marketData?.price_age_seconds, marketData?.max_price_age_seconds);
+  const marketValue = marketReady ? "Fresh" : marketData?.status ? marketData.status : "Waiting";
+  const marketTone = marketReady ? "text-emerald-300" : marketData?.status === "stale" ? "text-rose-300" : "text-amber-300";
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-9">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-10">
         <StatCard label="Next" value={operatorValue} sub={operatorSub} icon={operatorIcon} tone={operatorTone} />
         <StatCard label="Readiness" value={`${readinessPassed}/${readinessTotal}`} sub={`Critical ${readinessCritical} / Blockers ${readinessBlockers}`} icon={Gauge} tone={readinessTone} />
+        <StatCard label="Market" value={marketValue} sub={marketAgeBudget} icon={RadioTower} tone={marketTone} />
         <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`Today ${signedMoney(todayPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
         <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />

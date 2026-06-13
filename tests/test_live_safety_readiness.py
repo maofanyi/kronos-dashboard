@@ -1268,7 +1268,19 @@ def test_live_page_surfaces_readiness_summary_in_top_kpis():
     assert 'label="Readiness"' in source
     assert 'value={`${readinessPassed}/${readinessTotal}`}' in source
     assert "Critical ${readinessCritical}" in source
-    assert "xl:grid-cols-9" in source
+    assert "xl:grid-cols-10" in source
+
+
+def test_live_page_surfaces_market_data_in_top_kpis():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const marketData = safety?.market_data" in source
+    assert "const marketReady = marketData?.ready === true" in source
+    assert "const marketAgeBudget = ageBudgetLabel(marketData?.price_age_seconds, marketData?.max_price_age_seconds)" in source
+    assert "const marketValue = marketReady ? \"Fresh\" : marketData?.status ? marketData.status : \"Waiting\"" in source
+    assert 'StatCard label="Market"' in source
+    assert "value={marketValue}" in source
+    assert "sub={marketAgeBudget}" in source
 
 
 def test_live_page_today_cockpit_uses_readable_separators():
@@ -1335,7 +1347,7 @@ def test_live_page_surfaces_operator_summary_card():
     assert "operator?.next_action" in source
     assert "operator?.primary_blocker" in source
     assert 'label="Next"' in source
-    assert "xl:grid-cols-9" in source
+    assert "xl:grid-cols-10" in source
 
 
 def test_live_page_surfaces_today_dryrun_summary():
