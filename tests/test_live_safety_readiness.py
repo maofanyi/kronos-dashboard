@@ -1244,6 +1244,19 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "today pass rate" in source
 
 
+def test_live_page_uses_clob_funding_for_top_balance_kpi():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const funding = safety?.funding" in source
+    assert "const fundingBalance = funding?.balance ?? status?.balance ?? INITIAL_BALANCE" in source
+    assert "const fundingBalanceGap = funding?.balance_shortfall_usdc ?? 0" in source
+    assert "const fundingBalanceSub = fundingBalanceGap > 0 ? `Gap ${money(fundingBalanceGap)}` : `Today ${signedMoney(todayPnl)}`" in source
+    assert "const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? \"text-emerald-300\" : fundingBalanceGap > 0 ? \"text-rose-300\" : \"text-zinc-100\"" in source
+    assert "value={money(fundingBalance)}" in source
+    assert "sub={fundingBalanceSub}" in source
+    assert "tone={fundingBalanceTone}" in source
+
+
 def test_live_page_surfaces_today_signal_distribution():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

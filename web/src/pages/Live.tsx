@@ -1286,6 +1286,11 @@ export default function Live() {
   const marketAgeBudget = ageBudgetLabel(marketData?.price_age_seconds, marketData?.max_price_age_seconds);
   const marketValue = marketReady ? "Fresh" : marketData?.status ? marketData.status : "Waiting";
   const marketTone = marketReady ? "text-emerald-300" : marketData?.status === "stale" ? "text-rose-300" : "text-amber-300";
+  const funding = safety?.funding;
+  const fundingBalance = funding?.balance ?? status?.balance ?? INITIAL_BALANCE;
+  const fundingBalanceGap = funding?.balance_shortfall_usdc ?? 0;
+  const fundingBalanceSub = fundingBalanceGap > 0 ? `Gap ${money(fundingBalanceGap)}` : `Today ${signedMoney(todayPnl)}`;
+  const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? "text-emerald-300" : fundingBalanceGap > 0 ? "text-rose-300" : "text-zinc-100";
 
   return (
     <div className="space-y-5">
@@ -1293,7 +1298,7 @@ export default function Live() {
         <StatCard label="Next" value={operatorValue} sub={operatorSub} icon={operatorIcon} tone={operatorTone} />
         <StatCard label="Readiness" value={`${readinessPassed}/${readinessTotal}`} sub={`Critical ${readinessCritical} / Blockers ${readinessBlockers}`} icon={Gauge} tone={readinessTone} />
         <StatCard label="Market" value={marketValue} sub={marketAgeBudget} icon={RadioTower} tone={marketTone} />
-        <StatCard label="Balance" value={money(status?.balance ?? INITIAL_BALANCE)} sub={`Today ${signedMoney(todayPnl)}`} icon={Wallet} tone={(status?.balance ?? INITIAL_BALANCE) >= INITIAL_BALANCE ? "text-emerald-300" : "text-rose-300"} />
+        <StatCard label="Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
         <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />
         <StatCard label="Pending" value={`${todayOpen}/${todayPending}`} sub={todayOpen || todayPending ? "open / pending" : "queue clear"} icon={Clock3} />
