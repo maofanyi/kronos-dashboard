@@ -63,6 +63,8 @@ type SignalDetails = {
   p4_up?: number;
   long_score?: number;
   short_score?: number;
+  created_at?: string;
+  settled_at?: string;
   ts?: string;
   close?: number;
   balance?: number;
@@ -463,6 +465,9 @@ const timeOrBar = (value?: number | string) => {
 
 const rangeLabel = (entry?: number | string, settle?: number | string) =>
   `${timeOrBar(entry)} -> ${timeOrBar(settle)}`;
+
+const tradeRecordedAt = (trade: TradeItem, details: SignalDetails | null) =>
+  details?.settled_at || details?.created_at || trade.created_at;
 
 const parseJson = <T,>(text?: string): T | null => {
   if (!text) return null;
@@ -1435,7 +1440,7 @@ export default function Live() {
                           <span className="inline-flex items-center gap-1 font-mono text-xs text-zinc-300">{directionIcon(trade.direction)}{directionLabel(trade.direction)}</span>
                         </td>
                         <td className="px-3 py-2.5"><ResultPill won={trade.won} /></td>
-                        <td className="px-3 py-2.5 font-mono text-xs text-zinc-400">{localTime(trade.created_at)}</td>
+                        <td className="px-3 py-2.5 font-mono text-xs text-zinc-400">{localTime(tradeRecordedAt(trade, details))}</td>
                         <td className="px-3 py-2.5 text-right font-mono text-zinc-300">{money(trade.size ?? 0)}</td>
                         <td className={`px-3 py-2.5 text-right font-mono font-semibold ${trade.pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(trade.pnl ?? 0)}</td>
                         <td className="px-3 py-2.5 text-right"><ChevronDown className={`ml-auto h-3.5 w-3.5 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} /></td>

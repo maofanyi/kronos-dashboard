@@ -1640,6 +1640,17 @@ def test_live_page_labels_pending_queue_precisely():
     assert "No open orders" not in source
 
 
+def test_live_page_completed_trades_uses_per_trade_recorded_time_from_details():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "settled_at?: string" in source
+    assert "created_at?: string" in source
+    assert "const tradeRecordedAt = (trade: TradeItem, details: SignalDetails | null)" in source
+    assert "details?.settled_at || details?.created_at || trade.created_at" in source
+    assert "{localTime(tradeRecordedAt(trade, details))}" in source
+    assert "{localTime(trade.created_at)}</td>" not in source
+
+
 def test_live_page_surfaces_clob_readonly_panel():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
