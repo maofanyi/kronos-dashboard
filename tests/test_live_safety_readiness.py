@@ -1498,6 +1498,13 @@ def test_live_page_surfaces_report_freshness_panel():
     assert "item.report" in source
 
 
+def test_live_page_renders_blocked_report_freshness_as_alert():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert 'if (status === "blocked") return "border-rose-500/25 bg-rose-500/10 text-rose-300"' in source
+    assert 'if (status === "stale" || status === "missing")' in source
+
+
 def test_live_page_surfaces_market_data_panel():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
