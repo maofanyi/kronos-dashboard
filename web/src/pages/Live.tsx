@@ -1326,7 +1326,7 @@ export default function Live() {
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-11">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11">
         <StatCard label="Next" value={operatorValue} sub={operatorSub} icon={operatorIcon} tone={operatorTone} />
         <StatCard label="Readiness" value={`${readinessPassed}/${readinessTotal}`} sub={`Critical ${readinessCritical} / Blockers ${readinessBlockers}`} icon={Gauge} tone={readinessTone} />
         <StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub} icon={ListChecks} tone={dryrunTone} />
