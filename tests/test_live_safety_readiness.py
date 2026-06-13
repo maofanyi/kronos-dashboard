@@ -1349,10 +1349,41 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "const todayPnl = todayStats?.trades.pnl_usdc" in source
     assert "const todaySettled = todayStats?.trades.settled" in source
     assert "const todayWinRate = todayStats?.trades.win_rate" in source
-    assert "const todaySignalPassRate = todayStats?.signals.pass_rate" in source
-    assert "Today ${signedMoney(todayPnl)}" in source
-    assert "today trades" in source
-    assert "today pass rate" in source
+    assert 'StatCard label="Today PnL" value={signedMoney(todayPnl)} sub={`${todaySettled} settled today`}' in source
+    assert 'StatCard label="W/L" value={`${todayWins}/${todayLosses}`} sub="wins / losses today"' in source
+    assert 'StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`}' in source
+
+
+def test_live_page_defaults_to_trading_console_layout():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "Trading Console" in source
+    assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
+    assert 'StatCard label="Balance"' in source
+    assert 'StatCard label="Allowance"' in source
+    assert 'StatCard label="Open/Pending"' in source
+    assert 'StatCard label="Today PnL"' in source
+    assert 'StatCard label="W/L"' in source
+    assert 'StatCard label="Win Rate"' in source
+    assert 'StatCard label="Dry-run"' in source
+    assert 'StatCard label="Mode"' in source
+    assert 'StatCard label="Readiness"' not in source
+    assert 'StatCard label="Health"' not in source
+
+
+def test_live_page_moves_audit_panels_into_diagnostics_section():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert 'title="Live Diagnostics"' in source
+    assert 'sub="safety gates, audits, and raw signal detail"' in source
+    assert "<SafetyStrip safety={safety} health={health} />" in source
+    assert "<ReadinessChecklist safety={safety} health={health} intel={intel} />" in source
+    assert "<MarketDataPanel data={safety?.market_data} />" in source
+    assert "<ClobReadonlyPanel audit={safety?.clob_readonly} />" in source
+    assert "<ReportFreshnessPanel refresh={safety?.report_refresh} />" in source
+    assert "<FunnelPanel funnel={intel?.funnel} />" in source
+    assert "<RiskPanel intel={intel} safety={safety} />" in source
+    assert "<MakerPanel intel={intel} />" in source
 
 
 def test_live_page_uses_signal_freshness_for_top_signals_kpi():
@@ -1360,10 +1391,10 @@ def test_live_page_uses_signal_freshness_for_top_signals_kpi():
 
     assert "const latestSignalKpiAge = todayStats?.activity?.latest_signal_age_seconds" in source
     assert "const latestSignalFresh = (latestSignalKpiAge ?? 9999) < 600" in source
-    assert "const signalKpiSub = `${percent(todaySignalPassRate)} today pass rate / latest ${ageLabel(latestSignalKpiAge)}`" in source
     assert "const signalKpiTone = todaySignalTotal === 0 ? \"text-zinc-100\" : latestSignalFresh ? \"text-emerald-300\" : \"text-amber-300\"" in source
-    assert 'StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={signalKpiSub}' in source
-    assert "tone={signalKpiTone}" in source
+    assert "<span className=\"text-zinc-500\">Signals</span>" in source
+    assert '<span className={`font-mono ${signalKpiTone}`}>{todaySignalPassed}/{todaySignalTotal}</span>' in source
+    assert 'StatCard label="Signals"' not in source
 
 
 def test_live_page_surfaces_dryrun_safety_in_top_kpis():
@@ -1376,7 +1407,7 @@ def test_live_page_surfaces_dryrun_safety_in_top_kpis():
     assert "const dryrunTone = dryrunSubmitted === 0 ? \"text-emerald-300\" : \"text-rose-300\"" in source
     assert 'StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub}' in source
     assert "tone={dryrunTone}" in source
-    assert "xl:grid-cols-6 2xl:grid-cols-11" in source
+    assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
 
 
 def test_live_page_uses_clob_funding_for_top_balance_kpi():
@@ -1406,7 +1437,7 @@ def test_live_page_uses_risk_limit_for_top_pending_kpi():
     assert "const openPendingValue = openPendingLimit == null ? `${todayOpen}/${todayPending}` : `${openPendingUsed}/${openPendingLimit}`" in source
     assert "const openPendingSub = openPendingLimit == null ? (todayOpen || todayPending ? \"open / pending\" : \"queue clear\") : \"risk open/pending\"" in source
     assert "const openPendingTone = openPendingLimit == null ? \"text-zinc-100\" : openPendingUsed < openPendingLimit ? \"text-emerald-300\" : \"text-rose-300\"" in source
-    assert 'StatCard label="Pending" value={openPendingValue} sub={openPendingSub}' in source
+    assert 'StatCard label="Open/Pending" value={openPendingValue} sub={openPendingSub}' in source
     assert "tone={openPendingTone}" in source
 
 
@@ -1419,10 +1450,10 @@ def test_live_page_uses_runtime_freshness_for_top_health_kpi():
     assert "const latestEventFresh = (latestEventAge ?? 9999) < 600" in source
     assert "const runtimeFresh = checkpointFresh && latestEventFresh" in source
     assert 'const healthValue = isHealthy && runtimeFresh ? "OK" : "Review"' in source
-    assert "const healthSub = `ckpt ${ageLabel(checkpointAge)} / event ${ageLabel(latestEventAge)}`" in source
     assert "const healthTone = healthValue === \"OK\" ? \"text-emerald-300\" : \"text-amber-300\"" in source
-    assert 'StatCard label="Health" value={healthValue} sub={healthSub}' in source
-    assert "tone={healthTone}" in source
+    assert "<span className=\"text-zinc-500\">Health</span>" in source
+    assert '<span className={`font-mono ${healthTone}`}>{healthValue}</span>' in source
+    assert 'StatCard label="Health"' not in source
 
 
 def test_live_page_surfaces_today_signal_distribution():
@@ -1446,17 +1477,17 @@ def test_live_page_surfaces_readiness_summary_in_top_kpis():
     assert "const readinessSummary = safety?.readiness_summary" in source
     assert "const readinessPassed = readinessSummary?.passed" in source
     assert "const readinessCritical = readinessSummary?.critical_blockers" in source
-    assert 'label="Readiness"' in source
-    assert 'value={`${readinessPassed}/${readinessTotal}`}' in source
-    assert "Critical ${readinessCritical}" in source
-    assert "xl:grid-cols-6 2xl:grid-cols-11" in source
+    assert "<span className=\"text-zinc-500\">Readiness</span>" in source
+    assert '<span className={`font-mono ${readinessTone}`}>{readinessPassed}/{readinessTotal}</span>' in source
+    assert "Critical blockers" in source
+    assert 'StatCard label="Readiness"' not in source
 
 
 def test_live_page_top_kpis_wrap_before_ultrawide():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
-    assert "grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11" in source
-    assert "grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-11" not in source
+    assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
+    assert "grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11" not in source
 
 
 def test_live_page_surfaces_market_data_in_top_kpis():
@@ -1464,11 +1495,11 @@ def test_live_page_surfaces_market_data_in_top_kpis():
 
     assert "const marketData = safety?.market_data" in source
     assert "const marketReady = marketData?.ready === true" in source
-    assert "const marketAgeBudget = ageBudgetLabel(marketData?.price_age_seconds, marketData?.max_price_age_seconds)" in source
     assert "const marketValue = marketReady ? \"Fresh\" : marketData?.status ? marketData.status : \"Waiting\"" in source
-    assert 'StatCard label="Market"' in source
-    assert "value={marketValue}" in source
-    assert "sub={marketAgeBudget}" in source
+    assert "<span className=\"text-zinc-500\">Market</span>" in source
+    assert '<span className={`font-mono ${marketTone}`}>{marketValue}</span>' in source
+    assert "<MarketDataPanel data={safety?.market_data} />" in source
+    assert 'StatCard label="Market"' not in source
 
 
 def test_live_page_today_cockpit_uses_readable_separators():
@@ -1531,11 +1562,11 @@ def test_live_page_surfaces_operator_summary_card():
 
     assert "operator_summary" in source
     assert "const operator = safety?.operator_summary" in source
-    assert "operator?.current_stage_label" in source
     assert "operator?.next_action" in source
     assert "operator?.primary_blocker" in source
-    assert 'label="Next"' in source
-    assert "xl:grid-cols-6 2xl:grid-cols-11" in source
+    assert 'title="Trading Status"' in source
+    assert "Next Action" in source
+    assert "Primary Blocker" in source
 
 
 def test_live_page_surfaces_today_dryrun_summary():

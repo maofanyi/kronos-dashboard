@@ -7,11 +7,9 @@ import {
   ChevronDown,
   CircleDollarSign,
   Clock3,
-  Gauge,
   ListChecks,
   Lock,
   RadioTower,
-  ShieldCheck,
   Target,
   Wallet,
 } from "lucide-react";
@@ -935,6 +933,57 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
   );
 }
 
+function TradingStatusPanel({ safety, health }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null }) {
+  const funding = safety?.funding;
+  const operator = safety?.operator_summary;
+  const rail = safety?.first_order_rail;
+  const currentStage = rail?.stages?.find((stage) => stage.key === rail?.current_key);
+  const fundingReady = funding?.funding_ready === true;
+  const allowanceReady = funding?.allowance_ok === true || funding?.funding_ready === true;
+  const balanceReady = funding?.balance_ok === true || funding?.funding_ready === true;
+  const riskMetrics = safety?.risk?.metrics;
+  const riskLimits = safety?.risk?.limits;
+  const openPending = riskMetrics?.open_or_pending_orders ?? (safety?.today?.trades.open ?? 0) + (safety?.today?.trades.pending ?? 0);
+  const openPendingLimit = riskLimits?.max_open_or_pending_orders;
+  const primaryBlocker = operator?.primary_blocker || currentStage?.blockers?.[0] || "none";
+  const nextAction = operator?.next_action || currentStage?.action || "Review trading readiness";
+  const modeLabel = safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : `${(safety?.mode ?? "paper").toUpperCase()} / locked`;
+
+  return (
+    <Panel
+      title="Trading Status"
+      sub="account, orders, and next action"
+      right={<StatusPill ok={!safety?.real_orders_enabled && fundingReady && openPending === 0} label={fundingReady ? "Ready checks" : "Funding needed"} />}
+    >
+      <div className="grid gap-3 p-4">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <HealthTile label="Balance" value={funding?.balance == null ? "-" : money(funding.balance)} ok={balanceReady} />
+          <HealthTile label="Allowance" value={funding?.min_allowance == null ? "-" : money(funding.min_allowance)} ok={allowanceReady} />
+          <HealthTile label="Open/Pending" value={openPendingLimit == null ? `${openPending}` : `${openPending}/${openPendingLimit}`} ok={openPendingLimit == null ? openPending === 0 : openPending < openPendingLimit} />
+          <HealthTile label="Mode" value={modeLabel} ok={!safety?.real_orders_enabled} />
+        </div>
+        <div className="rounded-md border border-zinc-900 bg-black/20 p-3">
+          <div className="grid gap-3 md:grid-cols-[minmax(0,0.65fr)_minmax(0,1fr)]">
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Next Action</div>
+              <div className="mt-1 text-sm font-medium text-zinc-100">{nextAction}</div>
+            </div>
+            <div>
+              <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Primary Blocker</div>
+              <div className={primaryBlocker === "none" ? "mt-1 text-sm text-emerald-300" : "mt-1 text-sm text-amber-300"}>{primaryBlocker}</div>
+            </div>
+          </div>
+          <div className="mt-3 flex flex-wrap gap-2">
+            <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Runtime OK" : "Runtime review"} />
+            <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : `Funding gap ${money(Math.max(funding?.balance_shortfall_usdc ?? 0, funding?.allowance_shortfall_usdc ?? 0))}`} />
+            <StatusPill ok={(safety?.dryrun?.submitted_count ?? 0) === 0} label={`Dry-run submitted ${safety?.dryrun?.submitted_count ?? 0}`} />
+          </div>
+        </div>
+      </div>
+    </Panel>
+  );
+}
+
 function FirstOrderRail({ rail }: { rail?: LiveSafety["first_order_rail"] | null }) {
   const stages = rail?.stages ?? [];
   const currentStage = stages.find((stage) => stage.key === rail?.current_key);
@@ -1280,24 +1329,14 @@ export default function Live() {
   const todayPending = todayStats?.trades.pending ?? 0;
   const todaySignalPassed = todayStats?.signals.passed ?? 0;
   const todaySignalTotal = todayStats?.signals.total ?? 0;
-  const todaySignalPassRate = todayStats?.signals.pass_rate ?? 0;
   const latestSignalKpiAge = todayStats?.activity?.latest_signal_age_seconds;
   const latestSignalFresh = (latestSignalKpiAge ?? 9999) < 600;
-  const signalKpiSub = `${percent(todaySignalPassRate)} today pass rate / latest ${ageLabel(latestSignalKpiAge)}`;
   const signalKpiTone = todaySignalTotal === 0 ? "text-zinc-100" : latestSignalFresh ? "text-emerald-300" : "text-amber-300";
   const operator = safety?.operator_summary;
-  const operatorStageLabel = operator?.current_stage_label ?? "Live safety";
-  const operatorValue = operator?.ready ? "Confirm" : operator?.status === "blocked" ? "Blocked" : operator?.status === "waiting" ? "Waiting" : "Review";
-  const operatorSub = operator?.primary_blocker
-    ? `${operator?.primary_blocker} -> ${operator?.next_action ?? "Review readiness"}`
-    : operator?.next_action ?? operatorStageLabel;
-  const operatorTone = operator?.ready ? "text-amber-300" : operator?.status === "blocked" ? "text-rose-300" : "text-zinc-100";
-  const operatorIcon = operator?.ready ? CheckCircle2 : operator?.status === "blocked" ? AlertTriangle : ShieldCheck;
   const readinessSummary = safety?.readiness_summary;
   const readinessPassed = readinessSummary?.passed ?? 0;
   const readinessTotal = readinessSummary?.total ?? 0;
   const readinessCritical = readinessSummary?.critical_blockers ?? 0;
-  const readinessBlockers = readinessSummary?.blockers ?? 0;
   const readinessReady = readinessSummary?.ready === true;
   const readinessTone = readinessReady ? "text-emerald-300" : readinessCritical > 0 ? "text-rose-300" : "text-amber-300";
   const dryrun = safety?.dryrun;
@@ -1307,7 +1346,6 @@ export default function Live() {
   const dryrunTone = dryrunSubmitted === 0 ? "text-emerald-300" : "text-rose-300";
   const marketData = safety?.market_data;
   const marketReady = marketData?.ready === true;
-  const marketAgeBudget = ageBudgetLabel(marketData?.price_age_seconds, marketData?.max_price_age_seconds);
   const marketValue = marketReady ? "Fresh" : marketData?.status ? marketData.status : "Waiting";
   const marketTone = marketReady ? "text-emerald-300" : marketData?.status === "stale" ? "text-rose-300" : "text-amber-300";
   const funding = safety?.funding;
@@ -1335,73 +1373,41 @@ export default function Live() {
   const latestEventFresh = (latestEventAge ?? 9999) < 600;
   const runtimeFresh = checkpointFresh && latestEventFresh;
   const healthValue = isHealthy && runtimeFresh ? "OK" : "Review";
-  const healthSub = `ckpt ${ageLabel(checkpointAge)} / event ${ageLabel(latestEventAge)}`;
   const healthTone = healthValue === "OK" ? "text-emerald-300" : "text-amber-300";
+  const allowanceValue = funding?.min_allowance == null ? "-" : money(funding.min_allowance);
+  const allowanceSub = fundingAllowanceGap > 0 ? `Allowance gap ${money(fundingAllowanceGap)}` : funding?.allowance_ok ? "approved" : "allowance review";
+  const allowanceTone = funding?.funding_ready === true || funding?.allowance_ok === true ? "text-emerald-300" : fundingAllowanceGap > 0 ? "text-rose-300" : "text-zinc-100";
+  const recentSettled = settledDesc.slice(0, 10);
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-6 2xl:grid-cols-11">
-        <StatCard label="Next" value={operatorValue} sub={operatorSub} icon={operatorIcon} tone={operatorTone} />
-        <StatCard label="Readiness" value={`${readinessPassed}/${readinessTotal}`} sub={`Critical ${readinessCritical} / Blockers ${readinessBlockers}`} icon={Gauge} tone={readinessTone} />
-        <StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub} icon={ListChecks} tone={dryrunTone} />
-        <StatCard label="Market" value={marketValue} sub={marketAgeBudget} icon={RadioTower} tone={marketTone} />
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold text-zinc-100">Trading Console</h1>
+          <p className="mt-1 text-xs text-zinc-500">balances, orders, fills, and the current 5m market</p>
+        </div>
+        <StatusPill ok={!safety?.real_orders_enabled} label={safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">
         <StatCard label="Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
+        <StatCard label="Allowance" value={allowanceValue} sub={allowanceSub} icon={CircleDollarSign} tone={allowanceTone} />
+        <StatCard label="Open/Pending" value={openPendingValue} sub={openPendingSub} icon={Clock3} tone={openPendingTone} />
+        <StatCard label="Today PnL" value={signedMoney(todayPnl)} sub={`${todaySettled} settled today`} icon={CircleDollarSign} tone={todayPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
+        <StatCard label="W/L" value={`${todayWins}/${todayLosses}`} sub="wins / losses today" icon={ListChecks} tone={todaySettled === 0 ? "text-zinc-100" : todayWins >= todayLosses ? "text-emerald-300" : "text-amber-300"} />
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
-        <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />
-        <StatCard label="Pending" value={openPendingValue} sub={openPendingSub} icon={Clock3} tone={openPendingTone} />
-        <StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={signalKpiSub} icon={CheckCircle2} tone={signalKpiTone} />
+        <StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub} icon={ListChecks} tone={dryrunTone} />
         <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
-        <StatCard label="Health" value={healthValue} sub={healthSub} icon={ShieldCheck} tone={healthTone} />
       </div>
 
-      <BTCMarketChart />
-
-      <MarketDataPanel data={safety?.market_data} />
-
-      <FirstOrderRail rail={safety?.first_order_rail} />
-
-      <ReportFreshnessPanel refresh={safety?.report_refresh} />
-
-      <ClobReadonlyPanel audit={safety?.clob_readonly} />
-
-      <TodayCockpit today={safety?.today} />
-
-      <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
-        <SafetyStrip safety={safety} health={health} />
-        <ReadinessChecklist safety={safety} health={health} intel={intel} />
-      </div>
-
-      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]">
-        <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
-          <div className="h-[280px] p-4">
-            <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
-          </div>
-        </Panel>
-        <Panel title="Recent Signals" sub="aligned-prod decisions" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
-          <div className="max-h-[280px] overflow-auto">
-            {(events?.length ?? 0) === 0 ? (
-              <div className="px-4 py-8 text-center">
-                <div className="text-sm text-zinc-400">No recent signals</div>
-                <div className="mt-1 text-xs text-zinc-600">Waiting for aligned-prod decisions</div>
-              </div>
-            ) : (
-              (events ?? []).slice(0, 14).map((event) => (
-                <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
-              ))
-            )}
-          </div>
-        </Panel>
-      </div>
-
-      <div className="grid gap-5 xl:grid-cols-3">
-        <FunnelPanel funnel={intel?.funnel} />
-        <RiskPanel intel={intel} safety={safety} />
-        <MakerPanel intel={intel} />
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.48fr)]">
+        <BTCMarketChart />
+        <TradingStatusPanel safety={safety} health={health} />
       </div>
 
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(380px,0.7fr)]">
-        <Panel title="Completed Trades" sub="newest first" right={<span className="font-mono text-xs text-zinc-500">{settledDesc.length} rows</span>}>
-          <div className="max-h-[560px] w-full max-w-[calc(100vw-2rem)] overflow-x-auto overflow-y-auto">
+        <Panel title="Completed Trades" sub="latest fills" right={<span className="font-mono text-xs text-zinc-500">latest {Math.min(10, settledDesc.length)} / {settledDesc.length}</span>}>
+          <div className="max-h-[420px] w-full max-w-[calc(100vw-2rem)] overflow-x-auto overflow-y-auto">
             <table className="w-full table-fixed text-sm tabular-nums md:min-w-[760px]">
               <thead className="sticky top-0 z-10 border-b border-zinc-800 bg-zinc-950/95 text-xs uppercase tracking-[0.12em] text-zinc-500">
                 <tr>
@@ -1422,7 +1428,7 @@ export default function Live() {
                       <div className="mt-1 text-xs text-zinc-600">Settled trades will appear here</div>
                     </td>
                   </tr>
-                ) : settledDesc.map((trade) => {
+                ) : recentSettled.map((trade) => {
                   const open = expandedTrade === trade.id;
                   const details = parseJson<SignalDetails>(trade.details);
                   return (
@@ -1479,6 +1485,78 @@ export default function Live() {
               )}
             </div>
           </Panel>
+        </div>
+      </div>
+
+      <CollapsiblePanel
+        title="Live Diagnostics"
+        sub="safety gates, audits, and raw signal detail"
+        right={<StatusPill ok={readinessReady && runtimeFresh} label={readinessReady && runtimeFresh ? "Clean" : "Review"} />}
+        summary={
+          <div className="grid gap-2 text-xs md:grid-cols-4">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-zinc-500">Readiness</span>
+              <span className={`font-mono ${readinessTone}`}>{readinessPassed}/{readinessTotal}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-zinc-500">Health</span>
+              <span className={`font-mono ${healthTone}`}>{healthValue}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-zinc-500">Market</span>
+              <span className={`font-mono ${marketTone}`}>{marketValue}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-zinc-500">Signals</span>
+              <span className={`font-mono ${signalKpiTone}`}>{todaySignalPassed}/{todaySignalTotal}</span>
+            </div>
+          </div>
+        }
+      >
+        <div className="space-y-5 p-4">
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
+            <SafetyStrip safety={safety} health={health} />
+            <ReadinessChecklist safety={safety} health={health} intel={intel} />
+          </div>
+
+          <div className="grid gap-5 xl:grid-cols-3">
+            <MarketDataPanel data={safety?.market_data} />
+            <ReportFreshnessPanel refresh={safety?.report_refresh} />
+            <RiskPanel intel={intel} safety={safety} />
+          </div>
+
+          <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.8fr)]">
+            <ClobReadonlyPanel audit={safety?.clob_readonly} />
+            <FirstOrderRail rail={safety?.first_order_rail} />
+          </div>
+
+          <div className="grid gap-5 xl:grid-cols-3">
+            <TodayCockpit today={safety?.today} />
+            <FunnelPanel funnel={intel?.funnel} />
+            <MakerPanel intel={intel} />
+          </div>
+
+          <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]">
+            <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
+              <div className="h-[280px] p-4">
+                <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
+              </div>
+            </Panel>
+            <Panel title="Recent Signals" sub="aligned-prod decisions" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
+              <div className="max-h-[280px] overflow-auto">
+                {(events?.length ?? 0) === 0 ? (
+                  <div className="px-4 py-8 text-center">
+                    <div className="text-sm text-zinc-400">No recent signals</div>
+                    <div className="mt-1 text-xs text-zinc-600">Waiting for aligned-prod decisions</div>
+                  </div>
+                ) : (
+                  (events ?? []).slice(0, 14).map((event) => (
+                    <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
+                  ))
+                )}
+              </div>
+            </Panel>
+          </div>
 
           <Panel title="System Health" sub="runner, checkpoint, events, logs" right={<StatusPill ok={isHealthy} label={isHealthy ? "OK" : "Review"} />}>
             <div className="space-y-3 p-4">
@@ -1511,7 +1589,7 @@ export default function Live() {
             </div>
           </Panel>
         </div>
-      </div>
+      </CollapsiblePanel>
     </div>
   );
 }
