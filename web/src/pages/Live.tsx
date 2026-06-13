@@ -1289,8 +1289,15 @@ export default function Live() {
   const funding = safety?.funding;
   const fundingBalance = funding?.balance ?? status?.balance ?? INITIAL_BALANCE;
   const fundingBalanceGap = funding?.balance_shortfall_usdc ?? 0;
-  const fundingBalanceSub = fundingBalanceGap > 0 ? `Gap ${money(fundingBalanceGap)}` : `Today ${signedMoney(todayPnl)}`;
-  const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? "text-emerald-300" : fundingBalanceGap > 0 ? "text-rose-300" : "text-zinc-100";
+  const fundingAllowanceGap = funding?.allowance_shortfall_usdc ?? 0;
+  const fundingLargestGap = Math.max(fundingBalanceGap, fundingAllowanceGap);
+  const fundingBalanceSub =
+    fundingBalanceGap > 0
+      ? `Balance gap ${money(fundingBalanceGap)}`
+      : fundingAllowanceGap > 0
+        ? `Allowance gap ${money(fundingAllowanceGap)}`
+        : `Today ${signedMoney(todayPnl)}`;
+  const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? "text-emerald-300" : fundingLargestGap > 0 ? "text-rose-300" : "text-zinc-100";
 
   return (
     <div className="space-y-5">
