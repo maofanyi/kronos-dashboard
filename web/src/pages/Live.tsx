@@ -1101,7 +1101,17 @@ function ReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["report_refres
       right={<StatusPill ok={refresh?.ready === true} label={refresh?.ready ? "Fresh" : `${issueCount} review`} />}
     >
       <div className="grid gap-3 p-4 lg:grid-cols-3">
-        {items.map((item) => (
+        {items.length === 0 ? (
+          <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3 lg:col-span-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-amber-200">
+              <AlertTriangle className="h-4 w-4 shrink-0" />
+              <span>No freshness reports</span>
+            </div>
+            <div className="mt-2 text-xs text-zinc-500">
+              Waiting for live gate, preflight, and CLOB audit reports
+            </div>
+          </div>
+        ) : items.map((item) => (
           <div key={item.key} className="min-w-0 rounded-md border border-zinc-900 bg-black/20 p-3">
             <div className="flex items-center justify-between gap-2">
               <div className="truncate text-sm font-medium text-zinc-100">{item.label}</div>

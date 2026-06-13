@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -1147,6 +1148,107 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
     assert today["activity"]["latest_dryrun_age_seconds"] >= 0
 
 
+def test_live_safety_backfills_today_summary_from_dashboard_db_when_checkpoint_is_empty(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "DB_PATH", db_path)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_live")
+    monkeypatch.setattr(
+        server,
+        "RISK_LIMITS",
+        {
+            "max_daily_loss_usdc": 20.0,
+            "max_daily_trades": 10,
+            "max_consecutive_losses": 4,
+            "max_open_or_pending_orders": 3,
+        },
+    )
+
+    now = datetime.now(timezone.utc)
+    today_prefix = now.strftime("%Y-%m-%d")
+    yesterday_prefix = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    _write_json(checkpoint_dir / "paper_live.json", {"trades": [], "pending_orders": [], "open_orders": []})
+    (checkpoint_dir / "paper_live_events.jsonl").write_text("", encoding="utf-8")
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE trades (
+            source TEXT,
+            pnl REAL,
+            won INTEGER,
+            regime TEXT,
+            direction TEXT,
+            size REAL,
+            entry_bar TEXT,
+            settle_bar TEXT,
+            created_at TEXT,
+            details TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE events (
+            source TEXT,
+            kline_n INTEGER,
+            action TEXT,
+            dir5 TEXT,
+            dir4 TEXT,
+            regime TEXT,
+            filt_passed INTEGER,
+            reason TEXT,
+            created_at TEXT,
+            details TEXT
+        )"""
+    )
+    trade_rows = [
+        (26.02, 1, "BUY_UP", f"{today_prefix} 00:00:00+00:00", f"{today_prefix} 00:05:00+00:00"),
+        (-25.0, 0, "BUY_DOWN", f"{today_prefix} 00:05:00+00:00", f"{today_prefix} 00:10:00+00:00"),
+        (26.02, 1, "BUY_UP", f"{today_prefix}T00:10:00+00:00", f"{today_prefix}T00:15:00+00:00"),
+        (26.02, 1, "BUY_UP", f"{yesterday_prefix}T23:50:00+00:00", f"{yesterday_prefix}T23:55:00+00:00"),
+    ]
+    conn.executemany(
+        """INSERT INTO trades (source, pnl, won, regime, direction, size, entry_bar, settle_bar, created_at, details)
+           VALUES ('live', ?, ?, 'test', ?, 25.0, ?, ?, ?, '{}')""",
+        [(pnl, won, direction, entry, settle, f"{today_prefix}T01:00:00Z") for pnl, won, direction, entry, settle in trade_rows],
+    )
+    event_rows = [
+        ("BUY_UP", 1, "LONG passed", f"{today_prefix}T00:00:00Z"),
+        ("BUY_DOWN", 1, "SHORT passed", f"{today_prefix}T00:05:00Z"),
+        ("HOLD", 0, "macro_gate", f"{today_prefix}T00:10:00Z"),
+        ("BUY_UP", 1, "old", f"{yesterday_prefix}T23:55:00Z"),
+    ]
+    conn.executemany(
+        """INSERT INTO events (source, kline_n, action, dir5, dir4, regime, filt_passed, reason, created_at, details)
+           VALUES ('live', 0, ?, 'UP', 'UP', 'test', ?, ?, ?, '{}')""",
+        event_rows,
+    )
+    conn.commit()
+    conn.close()
+
+    today = server._safety_report_summary()["today"]
+
+    assert today["trades"]["settled"] == 3
+    assert today["trades"]["wins"] == 2
+    assert today["trades"]["losses"] == 1
+    assert today["trades"]["win_rate"] == 0.6667
+    assert today["trades"]["pnl_usdc"] == 27.04
+    assert today["signals"]["total"] == 3
+    assert today["signals"]["passed"] == 2
+    assert today["signals"]["blocked"] == 1
+    assert today["signals"]["pass_rate"] == 0.6667
+    assert today["signals"]["buy_up"] == 1
+    assert today["signals"]["buy_down"] == 1
+    assert today["signals"]["hold"] == 1
+    assert today["signals"]["top_block_reason"] == "macro_gate"
+    assert today["risk_usage"]["daily_trades"] == 0.3
+    assert today["activity"]["latest_trade_at"] == f"{today_prefix}T00:15:00Z"
+    assert today["activity"]["latest_signal_at"] == f"{today_prefix}T00:10:00Z"
+
+
 def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -1512,6 +1614,14 @@ def test_live_page_surfaces_report_freshness_panel():
     assert "item.status" in source
     assert "item.age_seconds" in source
     assert "item.report" in source
+
+
+def test_live_page_shows_empty_state_for_missing_report_freshness_items():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "items.length === 0" in source
+    assert "No freshness reports" in source
+    assert "Waiting for live gate, preflight, and CLOB audit reports" in source
 
 
 def test_live_page_renders_blocked_report_freshness_as_alert():

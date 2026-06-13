@@ -752,6 +752,91 @@ def _top_signal_block_reason(events):
     return reason, count
 
 
+def _dashboard_today_trade_records(day, source="live"):
+    if not DB_PATH.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT pnl, won, regime, direction, size, entry_bar, settle_bar, created_at, details
+               FROM trades
+               WHERE source=? AND won!=-1 AND substr(settle_bar, 1, 10)=?
+               ORDER BY settle_bar ASC, entry_bar ASC""",
+            (source, day.isoformat()),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    records = []
+    for row in rows:
+        won = row["won"]
+        records.append(
+            {
+                "status": "SETTLED",
+                "pnl": row["pnl"],
+                "won": True if won == 1 else False if won == 0 else None,
+                "regime": row["regime"],
+                "direction": row["direction"],
+                "size": row["size"],
+                "entry_ts": row["entry_bar"],
+                "settle_ts": row["settle_bar"],
+                "settled_at": row["settle_bar"],
+                "created_at": row["created_at"],
+                "details": row["details"],
+            }
+        )
+    return records
+
+
+def _dashboard_today_decision_events(day, source="live"):
+    if not DB_PATH.exists():
+        return []
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        conn.row_factory = sqlite3.Row
+        rows = conn.execute(
+            """SELECT kline_n, action, dir5, dir4, regime, filt_passed, reason, created_at, details
+               FROM events
+               WHERE source=? AND substr(created_at, 1, 10)=?
+               ORDER BY created_at ASC, kline_n ASC""",
+            (source, day.isoformat()),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    events = []
+    for row in rows:
+        passed = row["filt_passed"]
+        events.append(
+            {
+                "type": "decision",
+                "n": row["kline_n"],
+                "action": row["action"],
+                "dir5": row["dir5"],
+                "dir4": row["dir4"],
+                "regime": row["regime"],
+                "filt_passed": passed,
+                "filt": True if passed == 1 else False if passed == 0 else None,
+                "executable": True if passed == 1 else False if passed == 0 else None,
+                "reason": row["reason"],
+                "_t": row["created_at"],
+                "details": row["details"],
+            }
+        )
+    return events
+
+
 def _source_events_for_day(source, day, limit=1000):
     return [
         event for event in _tail_source_events(source, limit=limit)
@@ -773,6 +858,8 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
         record for record in trades
         if _is_settled_record(record) and _is_today_record(record, today)
     ]
+    if not todays_settled:
+        todays_settled = _dashboard_today_trade_records(today)
     wins = sum(1 for record in todays_settled if _record_won(record) is True)
     losses = sum(1 for record in todays_settled if _record_won(record) is False)
     daily_pnl = round(sum(_record_pnl(record) for record in todays_settled), 8)
@@ -781,6 +868,8 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
         event for event in _tail_jsonl(_events_checkpoint_path(), limit=1000)
         if isinstance(event, dict) and _is_decision_event(event) and _is_today_event(event, today)
     ]
+    if not events:
+        events = _dashboard_today_decision_events(today)
     passed = sum(1 for event in events if _decision_passed(event))
     blocked = max(0, len(events) - passed)
     action_counts = _signal_action_counts(events)
@@ -800,6 +889,9 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
     metrics = risk_summary.get("metrics") or {}
     limits = risk_summary.get("limits") or {}
     max_daily_loss = abs(float(limits.get("max_daily_loss_usdc", 0) or 0))
+    daily_trades_metric = metrics.get("daily_trades")
+    if not daily_trades_metric and todays_settled:
+        daily_trades_metric = len(todays_settled)
     dryrun_today = dryrun_summary.get("today") or _live_dryrun_today_summary()
     latest_signal_at, latest_signal_age_seconds = _latest_timestamp_summary(
         [_parse_dt(event.get("_t") or event.get("ts") or event.get("created_at")) for event in events],
@@ -841,7 +933,7 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
         },
         "risk_usage": {
             "daily_loss": _usage(max(0.0, -float(metrics.get("daily_pnl_usdc", daily_pnl) or 0)), max_daily_loss),
-            "daily_trades": _usage(metrics.get("daily_trades", len(todays_settled)), limits.get("max_daily_trades")),
+            "daily_trades": _usage(daily_trades_metric, limits.get("max_daily_trades")),
             "loss_streak": _usage(metrics.get("consecutive_losses", 0), limits.get("max_consecutive_losses")),
             "open_or_pending": _usage(metrics.get("open_or_pending_orders", len(open_orders) + len(pending)), limits.get("max_open_or_pending_orders")),
         },
