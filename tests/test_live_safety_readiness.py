@@ -1221,6 +1221,15 @@ def test_live_page_surfaces_funding_shortfalls():
     assert "Allowance Gap" in source
 
 
+def test_live_page_formats_funding_amounts_with_money():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert 'label={`Balance ${fundingBalance == null ? "-" : money(fundingBalance)}`}' in source
+    assert 'label={`Allowance ${fundingAllowance == null ? "-" : money(fundingAllowance)}`}' in source
+    assert 'HealthTile label="Balance" value={fundingBalance == null ? "-" : money(fundingBalance)}' in source
+    assert 'HealthTile label="Allowance" value={fundingAllowance == null ? "-" : money(fundingAllowance)}' in source
+
+
 def test_live_page_mounts_today_cockpit():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

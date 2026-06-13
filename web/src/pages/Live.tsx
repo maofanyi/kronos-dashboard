@@ -602,6 +602,8 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
   const fundingBlockers = readiness?.funding_blockers ?? 0;
   const riskBlockers = readiness?.risk_blockers ?? 0;
   const topBlockers = readiness?.top_blockers ?? [];
+  const fundingBalance = safety?.funding?.balance;
+  const fundingAllowance = safety?.funding?.min_allowance;
   const fundingGap = Math.max(
     safety?.funding?.balance_shortfall_usdc ?? 0,
     safety?.funding?.allowance_shortfall_usdc ?? 0,
@@ -633,8 +635,8 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={criticalBlockers === 0} label={`Critical blockers ${criticalBlockers}`} />
           <StatusPill ok={fundingBlockers === 0} label={`Funding blockers ${fundingBlockers}`} />
           <StatusPill ok={riskBlockers === 0} label={`Risk blockers ${riskBlockers}`} />
-          <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${safety?.funding?.balance ?? "-"}`} />
-          <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${safety?.funding?.min_allowance ?? "-"}`} />
+          <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${fundingBalance == null ? "-" : money(fundingBalance)}`} />
+          <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${fundingAllowance == null ? "-" : money(fundingAllowance)}`} />
           <StatusPill ok={fundingReady} label={`Balance Gap ${money(safety?.funding?.balance_shortfall_usdc ?? 0)}`} />
           <StatusPill ok={fundingReady} label={`Allowance Gap ${money(safety?.funding?.allowance_shortfall_usdc ?? 0)}`} />
           <StatusPill ok={dryrunClean} label={`Dry-run submitted ${safety?.dryrun?.submitted_count ?? 0}`} />
@@ -1157,11 +1159,13 @@ function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveS
   const metrics = liveRisk?.metrics;
   const limits = liveRisk?.limits;
   const fundingReady = safety?.funding?.funding_ready === true;
+  const fundingBalance = safety?.funding?.balance;
+  const fundingAllowance = safety?.funding?.min_allowance;
   return (
     <Panel title="Risk & Funding" sub="limits, exposure, readiness">
       <div className="grid grid-cols-2 gap-2 p-4">
-        <HealthTile label="Balance" value={String(safety?.funding?.balance ?? "-")} ok={safety?.funding?.balance_ok} />
-        <HealthTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
+        <HealthTile label="Balance" value={fundingBalance == null ? "-" : money(fundingBalance)} ok={safety?.funding?.balance_ok} />
+        <HealthTile label="Allowance" value={fundingAllowance == null ? "-" : money(fundingAllowance)} ok={safety?.funding?.allowance_ok} />
         <HealthTile label="Balance Gap" value={money(safety?.funding?.balance_shortfall_usdc ?? 0)} ok={fundingReady || (safety?.funding?.balance_shortfall_usdc ?? 0) === 0} />
         <HealthTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc ?? 0)} ok={fundingReady || (safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
         <HealthTile
