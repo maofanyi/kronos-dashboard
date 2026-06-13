@@ -1479,6 +1479,18 @@ def test_status_bar_surfaces_market_data_status():
     assert "safety?.market_data?.source" in source
 
 
+def test_status_bar_surfaces_operator_next_action():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "operator_summary?: {" in source
+    assert "const operator = safety?.operator_summary" in source
+    assert "const operatorNextAction = operator?.next_action" in source
+    assert "const operatorStage = operator?.current_stage_label" in source
+    assert "Next ${operatorStage}" in source
+    assert 'DetailTile label="Operator Stage"' in source
+    assert 'DetailTile label="Next Action"' in source
+
+
 def test_status_bar_surfaces_funding_shortfalls():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 

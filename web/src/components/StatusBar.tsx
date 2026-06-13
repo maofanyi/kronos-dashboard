@@ -110,6 +110,15 @@ interface SafetyData {
     }>;
     by_severity?: Record<string, number>;
   };
+  operator_summary?: {
+    ready?: boolean;
+    status?: string;
+    current_stage_key?: string;
+    current_stage_label?: string;
+    next_action?: string;
+    primary_blocker_key?: string | null;
+    primary_blocker?: string | null;
+  };
   risk?: {
     ok: boolean;
     metrics: {
@@ -380,6 +389,11 @@ export default function StatusBar() {
   );
   const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
   const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
+  const operator = safety?.operator_summary;
+  const operatorStage = operator?.current_stage_label ?? "Live safety";
+  const operatorNextAction = operator?.next_action ?? "Review readiness";
+  const operatorBlocked = operator?.status === "blocked";
+  const operatorReady = operator?.ready === true;
 
   return (
     <div className="border-b border-zinc-800 bg-[#090a0f] text-xs">
@@ -399,6 +413,7 @@ export default function StatusBar() {
           <StatusChip ok={healthOk} label={healthOk ? "Health OK" : "Review"} icon="shield" />
           <StatusChip ok={checksOk} label={`Checks ${readinessPassed}/${readinessTotal}`} />
           <StatusChip ok={criticalBlockers === 0} label={`Critical ${criticalBlockers}`} />
+          <StatusChip ok={operatorBlocked ? false : operatorReady ? true : undefined} label={`Next ${operatorStage}`} />
           <StatusChip ok={fundingBlockers === 0} label={`Funding ${fundingBlockers}`} />
           <StatusChip ok={riskBlockers === 0} label={`Risk ${riskBlockers}`} />
           <StatusChip
@@ -456,6 +471,8 @@ export default function StatusBar() {
               <DetailTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
               <DetailTile label="Balance Gap" value={money(safety?.funding?.balance_shortfall_usdc)} ok={(safety?.funding?.balance_shortfall_usdc ?? 0) === 0} />
               <DetailTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc)} ok={(safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
+              <DetailTile label="Operator Stage" value={operatorStage} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
+              <DetailTile label="Next Action" value={operatorNextAction} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
               <DetailTile label="Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
               <DetailTile label="Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
               <DetailTile label="Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
