@@ -1275,6 +1275,21 @@ def test_live_page_uses_risk_limit_for_top_pending_kpi():
     assert "tone={openPendingTone}" in source
 
 
+def test_live_page_uses_runtime_freshness_for_top_health_kpi():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const checkpointAge = health?.checkpoint_age_seconds" in source
+    assert "const latestEventAge = health?.latest_event_age_seconds" in source
+    assert "const checkpointFresh = (checkpointAge ?? 9999) < 600" in source
+    assert "const latestEventFresh = (latestEventAge ?? 9999) < 600" in source
+    assert "const runtimeFresh = checkpointFresh && latestEventFresh" in source
+    assert 'const healthValue = isHealthy && runtimeFresh ? "OK" : "Review"' in source
+    assert "const healthSub = `ckpt ${ageLabel(checkpointAge)} / event ${ageLabel(latestEventAge)}`" in source
+    assert "const healthTone = healthValue === \"OK\" ? \"text-emerald-300\" : \"text-amber-300\"" in source
+    assert 'StatCard label="Health" value={healthValue} sub={healthSub}' in source
+    assert "tone={healthTone}" in source
+
+
 def test_live_page_surfaces_today_signal_distribution():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

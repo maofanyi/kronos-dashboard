@@ -1305,6 +1305,14 @@ export default function Live() {
   const openPendingValue = openPendingLimit == null ? `${todayOpen}/${todayPending}` : `${openPendingUsed}/${openPendingLimit}`;
   const openPendingSub = openPendingLimit == null ? (todayOpen || todayPending ? "open / pending" : "queue clear") : "risk open/pending";
   const openPendingTone = openPendingLimit == null ? "text-zinc-100" : openPendingUsed < openPendingLimit ? "text-emerald-300" : "text-rose-300";
+  const checkpointAge = health?.checkpoint_age_seconds;
+  const latestEventAge = health?.latest_event_age_seconds;
+  const checkpointFresh = (checkpointAge ?? 9999) < 600;
+  const latestEventFresh = (latestEventAge ?? 9999) < 600;
+  const runtimeFresh = checkpointFresh && latestEventFresh;
+  const healthValue = isHealthy && runtimeFresh ? "OK" : "Review";
+  const healthSub = `ckpt ${ageLabel(checkpointAge)} / event ${ageLabel(latestEventAge)}`;
+  const healthTone = healthValue === "OK" ? "text-emerald-300" : "text-amber-300";
 
   return (
     <div className="space-y-5">
@@ -1318,7 +1326,7 @@ export default function Live() {
         <StatCard label="Pending" value={openPendingValue} sub={openPendingSub} icon={Clock3} tone={openPendingTone} />
         <StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={`${percent(todaySignalPassRate)} today pass rate`} icon={CheckCircle2} />
         <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
-        <StatCard label="Health" value={isHealthy ? "OK" : "Review"} sub={health?.run_source ?? safety?.run_source ?? "-"} icon={ShieldCheck} tone={isHealthy ? "text-emerald-300" : "text-amber-300"} />
+        <StatCard label="Health" value={healthValue} sub={healthSub} icon={ShieldCheck} tone={healthTone} />
       </div>
 
       <BTCMarketChart />
