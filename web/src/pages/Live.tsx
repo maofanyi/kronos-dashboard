@@ -1298,6 +1298,13 @@ export default function Live() {
         ? `Allowance gap ${money(fundingAllowanceGap)}`
         : `Today ${signedMoney(todayPnl)}`;
   const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? "text-emerald-300" : fundingLargestGap > 0 ? "text-rose-300" : "text-zinc-100";
+  const riskMetrics = safety?.risk?.metrics;
+  const riskLimits = safety?.risk?.limits;
+  const openPendingUsed = riskMetrics?.open_or_pending_orders ?? todayOpen + todayPending;
+  const openPendingLimit = riskLimits?.max_open_or_pending_orders;
+  const openPendingValue = openPendingLimit == null ? `${todayOpen}/${todayPending}` : `${openPendingUsed}/${openPendingLimit}`;
+  const openPendingSub = openPendingLimit == null ? (todayOpen || todayPending ? "open / pending" : "queue clear") : "risk open/pending";
+  const openPendingTone = openPendingLimit == null ? "text-zinc-100" : openPendingUsed < openPendingLimit ? "text-emerald-300" : "text-rose-300";
 
   return (
     <div className="space-y-5">
@@ -1308,7 +1315,7 @@ export default function Live() {
         <StatCard label="Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
         <StatCard label="Settled" value={`${todaySettled}`} sub="today trades" icon={ListChecks} />
-        <StatCard label="Pending" value={`${todayOpen}/${todayPending}`} sub={todayOpen || todayPending ? "open / pending" : "queue clear"} icon={Clock3} />
+        <StatCard label="Pending" value={openPendingValue} sub={openPendingSub} icon={Clock3} tone={openPendingTone} />
         <StatCard label="Signals" value={`${todaySignalPassed}/${todaySignalTotal}`} sub={`${percent(todaySignalPassRate)} today pass rate`} icon={CheckCircle2} />
         <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
         <StatCard label="Health" value={isHealthy ? "OK" : "Review"} sub={health?.run_source ?? safety?.run_source ?? "-"} icon={ShieldCheck} tone={isHealthy ? "text-emerald-300" : "text-amber-300"} />
