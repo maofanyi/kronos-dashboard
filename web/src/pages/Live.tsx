@@ -1401,7 +1401,14 @@ export default function Live() {
       </div>
 
       <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.48fr)]">
-        <BTCMarketChart />
+        <div className="min-w-0 space-y-5">
+          <BTCMarketChart />
+          <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
+            <div className="h-[260px] p-4">
+              <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
+            </div>
+          </Panel>
+        </div>
         <TradingStatusPanel safety={safety} health={health} />
       </div>
 
@@ -1536,27 +1543,20 @@ export default function Live() {
             <MakerPanel intel={intel} />
           </div>
 
-          <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(380px,0.78fr)]">
-            <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
-              <div className="h-[280px] p-4">
-                <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
-              </div>
-            </Panel>
-            <Panel title="Recent Signals" sub="aligned-prod decisions" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
-              <div className="max-h-[280px] overflow-auto">
-                {(events?.length ?? 0) === 0 ? (
-                  <div className="px-4 py-8 text-center">
-                    <div className="text-sm text-zinc-400">No recent signals</div>
-                    <div className="mt-1 text-xs text-zinc-600">Waiting for aligned-prod decisions</div>
-                  </div>
-                ) : (
-                  (events ?? []).slice(0, 14).map((event) => (
-                    <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
-                  ))
-                )}
-              </div>
-            </Panel>
-          </div>
+          <Panel title="Recent Signals" sub="aligned-prod decisions" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
+            <div className="max-h-[280px] overflow-auto">
+              {(events?.length ?? 0) === 0 ? (
+                <div className="px-4 py-8 text-center">
+                  <div className="text-sm text-zinc-400">No recent signals</div>
+                  <div className="mt-1 text-xs text-zinc-600">Waiting for aligned-prod decisions</div>
+                </div>
+              ) : (
+                (events ?? []).slice(0, 14).map((event) => (
+                  <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
+                ))
+              )}
+            </div>
+          </Panel>
 
           <Panel title="System Health" sub="runner, checkpoint, events, logs" right={<StatusPill ok={isHealthy} label={isHealthy ? "OK" : "Review"} />}>
             <div className="space-y-3 p-4">

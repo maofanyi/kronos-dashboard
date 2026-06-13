@@ -1386,6 +1386,18 @@ def test_live_page_moves_audit_panels_into_diagnostics_section():
     assert "<MakerPanel intel={intel} />" in source
 
 
+def test_live_page_groups_equity_curve_with_btc_market_chart_on_main_console():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    btc_idx = source.index("<BTCMarketChart />")
+    equity_idx = source.index('Panel title="Equity Curve"')
+    status_idx = source.index("<TradingStatusPanel")
+    diagnostics_idx = source.index('title="Live Diagnostics"')
+
+    assert btc_idx < equity_idx < status_idx < diagnostics_idx
+    assert '<div className="min-w-0 space-y-5">' in source
+
+
 def test_live_page_uses_signal_freshness_for_top_signals_kpi():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
