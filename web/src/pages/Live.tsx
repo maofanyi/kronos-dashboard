@@ -866,6 +866,9 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
   const makerTarget = today?.maker.target_price ?? 0.49;
   const observedTarget = today?.maker.observed_avg_target_price;
   const makerClean = (today?.maker.blocks ?? 0) === 0 && (today?.maker.api_errors ?? 0) === 0;
+  const dryrunRecords = today?.dryrun.records ?? 0;
+  const dryrunWouldPlaceRate = dryrunRecords === 0 ? null : (today?.dryrun.would_place ?? 0) / dryrunRecords;
+  const dryrunBlockedRate = dryrunRecords === 0 ? null : (today?.dryrun.blocked ?? 0) / dryrunRecords;
 
   return (
     <Panel
@@ -904,7 +907,9 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
           <HealthTile label="Maker Blocks" value={`${today?.maker.blocks ?? 0} / ${today?.maker.api_errors ?? 0} err`} ok={makerClean} />
           <HealthTile label="Dry-run Today" value={`${today?.dryrun.records ?? 0}`} />
           <HealthTile label="Dry Would Place" value={`${today?.dryrun.would_place ?? 0}`} />
+          <HealthTile label="Dry Place Rate" value={percent(dryrunWouldPlaceRate)} />
           <HealthTile label="Dry Blocked" value={`${today?.dryrun.blocked ?? 0}`} ok={(today?.dryrun.blocked ?? 0) === 0 ? undefined : false} />
+          <HealthTile label="Dry Block Rate" value={percent(dryrunBlockedRate)} ok={dryrunBlockedRate == null ? undefined : dryrunBlockedRate === 0} />
           <HealthTile label="Dry Submitted" value={`${today?.dryrun.submitted ?? 0}`} ok={(today?.dryrun.submitted ?? 0) === 0} />
           <HealthTile label="Dry Latest" value={today?.dryrun.latest_action || today?.dryrun.latest_status || "-"} />
           <HealthTile label="Last Block" value={today?.dryrun.latest_block_reason || "-"} ok={today?.dryrun.latest_block_reason ? false : undefined} />

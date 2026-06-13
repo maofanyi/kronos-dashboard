@@ -1341,6 +1341,11 @@ def test_live_page_surfaces_today_dryrun_summary():
     assert "today?.dryrun.would_place" in source
     assert "today?.dryrun.blocked" in source
     assert "today?.dryrun.submitted" in source
+    assert "const dryrunRecords = today?.dryrun.records ?? 0" in source
+    assert "const dryrunWouldPlaceRate = dryrunRecords === 0 ? null : (today?.dryrun.would_place ?? 0) / dryrunRecords" in source
+    assert "const dryrunBlockedRate = dryrunRecords === 0 ? null : (today?.dryrun.blocked ?? 0) / dryrunRecords" in source
+    assert "Dry Place Rate" in source
+    assert "Dry Block Rate" in source
     assert "today?.dryrun.latest_block_reason" in source
     assert "Dry-run Today" in source
     assert "Dry Submitted" in source
