@@ -1317,6 +1317,11 @@ def test_live_page_surfaces_first_order_rail():
     assert "function FirstOrderRail" in source
     assert "<FirstOrderRail rail={safety?.first_order_rail}" in source
     assert "First Order Path" in source
+    assert "const currentAction = currentStage?.action ?? \"Review readiness\"" in source
+    assert "const primaryBlocker = currentStage?.blockers?.[0] ?? \"-\"" in source
+    assert 'HealthTile label="Current Stage"' in source
+    assert 'HealthTile label="Next Action"' in source
+    assert 'HealthTile label="Primary Blocker"' in source
     assert "Manual confirmation" in source
     assert "requires_confirmation" in source
 

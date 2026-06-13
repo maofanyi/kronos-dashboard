@@ -935,6 +935,8 @@ function FirstOrderRail({ rail }: { rail?: LiveSafety["first_order_rail"] | null
   const currentStage = stages.find((stage) => stage.key === rail?.current_key);
   const ready = rail?.ready_for_manual_confirmation === true;
   const statusLabel = ready ? "Manual confirmation" : currentStage?.label ?? "Waiting";
+  const currentAction = currentStage?.action ?? "Review readiness";
+  const primaryBlocker = currentStage?.blockers?.[0] ?? "-";
 
   const statusTone = (status: string, active: boolean) => {
     if (status === "complete") return "border-emerald-500/25 bg-emerald-500/5 text-emerald-300";
@@ -949,29 +951,36 @@ function FirstOrderRail({ rail }: { rail?: LiveSafety["first_order_rail"] | null
       sub="dry-run to guarded smoke"
       right={<StatusPill ok={ready} label={statusLabel} />}
     >
-      <div className="grid gap-2 p-4 md:grid-cols-3 xl:grid-cols-6">
-        {stages.map((stage, index) => {
-          const active = stage.key === rail?.current_key;
-          const Icon = stage.status === "complete" ? CheckCircle2 : stage.status === "manual" ? Lock : stage.status === "blocked" ? AlertTriangle : Clock3;
-          return (
-            <div
-              key={stage.key}
-              className={`min-w-0 rounded-md border px-3 py-2.5 ${statusTone(stage.status, active)}`}
-            >
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-mono text-[11px] uppercase tracking-[0.14em] opacity-70">{String(index + 1).padStart(2, "0")}</span>
-                <Icon className="h-3.5 w-3.5 shrink-0" />
+      <div className="grid gap-3 p-4">
+        <div className="grid gap-2 md:grid-cols-3">
+          <HealthTile label="Current Stage" value={statusLabel} ok={ready ? true : currentStage?.status !== "blocked"} />
+          <HealthTile label="Next Action" value={currentAction} ok={ready} />
+          <HealthTile label="Primary Blocker" value={primaryBlocker} ok={primaryBlocker === "-"} />
+        </div>
+        <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-6">
+          {stages.map((stage, index) => {
+            const active = stage.key === rail?.current_key;
+            const Icon = stage.status === "complete" ? CheckCircle2 : stage.status === "manual" ? Lock : stage.status === "blocked" ? AlertTriangle : Clock3;
+            return (
+              <div
+                key={stage.key}
+                className={`min-w-0 rounded-md border px-3 py-2.5 ${statusTone(stage.status, active)}`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-mono text-[11px] uppercase tracking-[0.14em] opacity-70">{String(index + 1).padStart(2, "0")}</span>
+                  <Icon className="h-3.5 w-3.5 shrink-0" />
+                </div>
+                <div className="mt-2 truncate text-sm font-medium text-zinc-100">{stage.label}</div>
+                <div className="mt-1 truncate font-mono text-[11px] uppercase">{stage.status}</div>
+                {stage.requires_confirmation && <div className="mt-2 truncate text-xs text-sky-300">Manual confirmation</div>}
+                <div className="mt-2 min-h-8 text-xs text-zinc-500">{stage.action}</div>
+                {(stage.blockers?.length ?? 0) > 0 && (
+                  <div className="mt-2 truncate text-[11px] text-amber-300">{stage.blockers?.slice(0, 2).join(" / ")}</div>
+                )}
               </div>
-              <div className="mt-2 truncate text-sm font-medium text-zinc-100">{stage.label}</div>
-              <div className="mt-1 truncate font-mono text-[11px] uppercase">{stage.status}</div>
-              {stage.requires_confirmation && <div className="mt-2 truncate text-xs text-sky-300">Manual confirmation</div>}
-              <div className="mt-2 min-h-8 text-xs text-zinc-500">{stage.action}</div>
-              {(stage.blockers?.length ?? 0) > 0 && (
-                <div className="mt-2 truncate text-[11px] text-amber-300">{stage.blockers?.slice(0, 2).join(" / ")}</div>
-              )}
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
     </Panel>
   );
