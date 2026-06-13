@@ -1400,11 +1400,11 @@ export default function Live() {
         <StatCard label="Mode" value={(safety?.mode ?? "paper").toUpperCase()} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={safety?.real_orders_enabled ? "text-amber-300" : "text-zinc-100"} />
       </div>
 
-      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(360px,0.48fr)]">
-        <div className="min-w-0 space-y-5">
+      <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]">
+        <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.75fr)]">
           <BTCMarketChart />
           <Panel title="Equity Curve" sub="settled trades" right={<span className={`font-mono text-sm ${totalPnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(totalPnl)}</span>}>
-            <div className="h-[260px] p-4">
+            <div className="h-[340px] p-4">
               <Chart data={equity} color={totalPnl >= 0 ? "#34d399" : "#fb7185"} formatValue={(value) => money(value, 0)} />
             </div>
           </Panel>

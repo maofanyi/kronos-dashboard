@@ -1395,7 +1395,9 @@ def test_live_page_groups_equity_curve_with_btc_market_chart_on_main_console():
     diagnostics_idx = source.index('title="Live Diagnostics"')
 
     assert btc_idx < equity_idx < status_idx < diagnostics_idx
-    assert '<div className="min-w-0 space-y-5">' in source
+    assert '2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]' in source
+    assert 'xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.75fr)]' in source
+    assert '<div className="min-w-0 space-y-5">' not in source
 
 
 def test_live_page_uses_signal_freshness_for_top_signals_kpi():
