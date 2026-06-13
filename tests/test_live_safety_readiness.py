@@ -1359,8 +1359,8 @@ def test_live_page_defaults_to_trading_console_layout():
 
     assert "Trading Console" in source
     assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
-    assert 'StatCard label="Balance"' in source
-    assert 'StatCard label="Allowance"' in source
+    assert 'StatCard label="CLOB Balance"' in source
+    assert 'StatCard label="CLOB Allowance"' in source
     assert 'StatCard label="Open/Pending"' in source
     assert 'StatCard label="Today PnL"' in source
     assert 'StatCard label="W/L"' in source
@@ -1441,15 +1441,15 @@ def test_live_page_uses_clob_funding_for_top_balance_kpi():
     assert "tone={fundingBalanceTone}" in source
 
 
-def test_live_page_uses_risk_limit_for_top_pending_kpi():
+def test_live_page_uses_trade_queue_for_top_pending_kpi():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
-    assert "const riskMetrics = safety?.risk?.metrics" in source
     assert "const riskLimits = safety?.risk?.limits" in source
-    assert "const openPendingUsed = riskMetrics?.open_or_pending_orders ?? todayOpen + todayPending" in source
+    assert "const pendingCount = pending.length" in source
+    assert "const openPendingUsed = todayOpen + pendingCount" in source
     assert "const openPendingLimit = riskLimits?.max_open_or_pending_orders" in source
-    assert "const openPendingValue = openPendingLimit == null ? `${todayOpen}/${todayPending}` : `${openPendingUsed}/${openPendingLimit}`" in source
-    assert "const openPendingSub = openPendingLimit == null ? (todayOpen || todayPending ? \"open / pending\" : \"queue clear\") : \"risk open/pending\"" in source
+    assert "const openPendingValue = `${todayOpen}/${pendingCount}`" in source
+    assert "const openPendingSub = openPendingLimit == null ? \"open / pending\" : `open / pending | risk limit ${openPendingLimit}`" in source
     assert "const openPendingTone = openPendingLimit == null ? \"text-zinc-100\" : openPendingUsed < openPendingLimit ? \"text-emerald-300\" : \"text-rose-300\"" in source
     assert 'StatCard label="Open/Pending" value={openPendingValue} sub={openPendingSub}' in source
     assert "tone={openPendingTone}" in source

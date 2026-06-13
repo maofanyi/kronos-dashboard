@@ -1320,7 +1320,6 @@ export default function Live() {
   const todayLosses = todayStats?.trades.losses ?? 0;
   const todayWinRate = todayStats?.trades.win_rate ?? 0;
   const todayOpen = todayStats?.trades.open ?? 0;
-  const todayPending = todayStats?.trades.pending ?? 0;
   const todaySignalPassed = todayStats?.signals.passed ?? 0;
   const todaySignalTotal = todayStats?.signals.total ?? 0;
   const latestSignalKpiAge = todayStats?.activity?.latest_signal_age_seconds;
@@ -1354,12 +1353,12 @@ export default function Live() {
         ? `Allowance gap ${money(fundingAllowanceGap)}`
         : `Today ${signedMoney(todayPnl)}`;
   const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? "text-emerald-300" : fundingLargestGap > 0 ? "text-rose-300" : "text-zinc-100";
-  const riskMetrics = safety?.risk?.metrics;
   const riskLimits = safety?.risk?.limits;
-  const openPendingUsed = riskMetrics?.open_or_pending_orders ?? todayOpen + todayPending;
+  const pendingCount = pending.length;
+  const openPendingUsed = todayOpen + pendingCount;
   const openPendingLimit = riskLimits?.max_open_or_pending_orders;
-  const openPendingValue = openPendingLimit == null ? `${todayOpen}/${todayPending}` : `${openPendingUsed}/${openPendingLimit}`;
-  const openPendingSub = openPendingLimit == null ? (todayOpen || todayPending ? "open / pending" : "queue clear") : "risk open/pending";
+  const openPendingValue = `${todayOpen}/${pendingCount}`;
+  const openPendingSub = openPendingLimit == null ? "open / pending" : `open / pending | risk limit ${openPendingLimit}`;
   const openPendingTone = openPendingLimit == null ? "text-zinc-100" : openPendingUsed < openPendingLimit ? "text-emerald-300" : "text-rose-300";
   const checkpointAge = health?.checkpoint_age_seconds;
   const latestEventAge = health?.latest_event_age_seconds;
@@ -1384,8 +1383,8 @@ export default function Live() {
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">
-        <StatCard label="Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
-        <StatCard label="Allowance" value={allowanceValue} sub={allowanceSub} icon={CircleDollarSign} tone={allowanceTone} />
+        <StatCard label="CLOB Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
+        <StatCard label="CLOB Allowance" value={allowanceValue} sub={allowanceSub} icon={CircleDollarSign} tone={allowanceTone} />
         <StatCard label="Open/Pending" value={openPendingValue} sub={openPendingSub} icon={Clock3} tone={openPendingTone} />
         <StatCard label="Today PnL" value={signedMoney(todayPnl)} sub={`${todaySettled} settled today`} icon={CircleDollarSign} tone={todayPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
         <StatCard label="W/L" value={`${todayWins}/${todayLosses}`} sub="wins / losses today" icon={ListChecks} tone={todaySettled === 0 ? "text-zinc-100" : todayWins >= todayLosses ? "text-emerald-300" : "text-amber-300"} />
