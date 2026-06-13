@@ -285,6 +285,21 @@ def _latest_json_report(pattern: str):
     return path, _read_json(path) or {}
 
 
+def _live_alert_summary():
+    path = KRONOS_REPORT_DIR / "live_alerts_latest.json"
+    report = _read_json(path) or {}
+    active = report.get("active") if isinstance(report.get("active"), list) else []
+    return {
+        "available": path.exists(),
+        "report": str(path),
+        "active_count": int(report.get("active_count", len(active)) or 0),
+        "selected_count": int(report.get("selected_count", 0) or 0),
+        "critical_count": sum(1 for item in active if item.get("severity") == "critical"),
+        "warning_count": sum(1 for item in active if item.get("severity") == "warning"),
+        "active": active[-12:],
+    }
+
+
 def _live_dryrun_ledger_summary():
     source = _paper_run_source()
     candidates = [
@@ -1049,6 +1064,7 @@ def _readiness_action(key):
         "live_preflight_chain_ok": "Clear preflight blockers",
         "live_preflight_fresh": "Refresh live preflight chain",
         "live_preflight_no_submission": "Use preview-only preflight",
+        "no_critical_alerts": "Review live alert report",
         "risk_daily_loss": "Reset or lower daily loss exposure",
         "risk_daily_trades": "Wait for daily trade limit reset",
         "risk_consecutive_losses": "Pause after loss streak",
@@ -1290,6 +1306,7 @@ def _safety_report_summary():
     risk_summary = _live_risk_summary(checkpoint)
     today_summary = _live_today_summary(checkpoint, risk_summary, dryrun_summary)
     market_data_summary = _btc_live_market_data_summary()
+    alert_summary = _live_alert_summary()
 
     checklist = [
         {
@@ -1297,6 +1314,13 @@ def _safety_report_summary():
             "label": "Real orders locked",
             "ok": not real_orders_enabled,
             "value": "locked" if not real_orders_enabled else "enabled",
+            "severity": "critical",
+        },
+        {
+            "key": "no_critical_alerts",
+            "label": "No critical alerts",
+            "ok": alert_summary["critical_count"] == 0,
+            "value": alert_summary["critical_count"],
             "severity": "critical",
         },
         {
@@ -1591,6 +1615,7 @@ def _safety_report_summary():
         "live_gate": live_gate_summary,
         "preflight_chain": preflight_summary,
         "market_data": market_data_summary,
+        "alerts": alert_summary,
         "checklist": checklist,
         "readiness_summary": readiness_summary,
         "operator_summary": operator_summary,

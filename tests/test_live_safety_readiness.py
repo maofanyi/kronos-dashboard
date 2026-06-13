@@ -54,6 +54,25 @@ def test_status_legacy_live_query_reads_paper_source_and_labels(tmp_path, monkey
     assert payload["balance"] == 501.0
 
 
+def test_live_safety_includes_local_alert_report(monkeypatch, tmp_path):
+    report = tmp_path / "live_alerts_latest.json"
+    report.write_text(
+        json.dumps({
+            "active_count": 1,
+            "selected_count": 1,
+            "active": [{"key": "manual_cancel_required", "severity": "critical"}],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", tmp_path)
+
+    payload = server._safety_report_summary()
+
+    assert payload["alerts"]["available"] is True
+    assert payload["alerts"]["active_count"] == 1
+    assert payload["alerts"]["critical_count"] == 1
+
+
 def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -1340,6 +1359,16 @@ def test_status_bar_uses_source_label_and_configured_status_source():
     assert "source_label?: string" in source
     assert "const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? \"aligned-prod\"" in source
     assert "source=live" not in source
+
+
+def test_status_bar_surfaces_live_alert_counts():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "alerts?: {" in source
+    assert "const alertCritical = safety?.alerts?.critical_count ?? 0" in source
+    assert "const alertActive = safety?.alerts?.active_count ?? 0" in source
+    assert "alertCritical > 0" in source
+    assert "label={`Alerts ${alertCritical}/${alertActive}`}" in source
 
 
 def test_live_page_surfaces_preflight_chain_status():

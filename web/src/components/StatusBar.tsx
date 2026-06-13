@@ -92,6 +92,14 @@ interface SafetyData {
     next_action?: string;
     error?: string | null;
   };
+  alerts?: {
+    available?: boolean;
+    active_count?: number;
+    selected_count?: number;
+    critical_count?: number;
+    warning_count?: number;
+    active?: Array<{ key?: string; severity?: string; title?: string; body?: string }>;
+  };
   checklist?: ChecklistItem[];
   readiness_summary?: {
     ready: boolean;
@@ -393,12 +401,14 @@ export default function StatusBar() {
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
   const marketDataReady = safety?.market_data?.ready === true;
   const marketDataAge = ageLabel(safety?.market_data?.price_age_seconds);
+  const alertCritical = safety?.alerts?.critical_count ?? 0;
+  const alertActive = safety?.alerts?.active_count ?? 0;
   const fundingReady = safety?.funding?.funding_ready === true;
   const fundingGap = Math.max(
     safety?.funding?.balance_shortfall_usdc ?? 0,
     safety?.funding?.allowance_shortfall_usdc ?? 0,
   );
-  const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
+  const needsReview = Boolean(error) || cooling || liveEnabled || alertCritical > 0 || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
   const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? "aligned-prod";
   const operator = safety?.operator_summary;
   const operatorStage = operator?.current_stage_label ?? "Live safety";
@@ -424,6 +434,7 @@ export default function StatusBar() {
           <StatusChip ok={healthOk} label={healthOk ? "Health OK" : "Review"} icon="shield" />
           <StatusChip ok={checksOk} label={`Checks ${readinessPassed}/${readinessTotal}`} />
           <StatusChip ok={criticalBlockers === 0} label={`Critical ${criticalBlockers}`} />
+          <StatusChip ok={alertCritical === 0} label={`Alerts ${alertCritical}/${alertActive}`} />
           <StatusChip ok={operatorBlocked ? false : operatorReady ? true : undefined} label={`Next ${operatorStage}`} />
           <StatusChip ok={fundingBlockers === 0} label={`Funding ${fundingBlockers}`} />
           <StatusChip ok={riskBlockers === 0} label={`Risk ${riskBlockers}`} />
@@ -485,6 +496,7 @@ export default function StatusBar() {
               <DetailTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc)} ok={(safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
               <DetailTile label="Operator Stage" value={operatorStage} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
               <DetailTile label="Next Action" value={operatorNextAction} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
+              <DetailTile label="Alerts" value={`${alertCritical}/${alertActive}`} ok={alertCritical === 0} />
               <DetailTile label="Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
               <DetailTile label="Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
               <DetailTile label="Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
