@@ -446,6 +446,9 @@ const ageLabel = (seconds?: number | null) => {
   return `${Math.round(seconds / 60)}m`;
 };
 
+const ageBudgetLabel = (age?: number | null, max?: number | null) =>
+  `${ageLabel(age)} / ${ageLabel(max)}`;
+
 const sortValue = (value?: number | string) => {
   if (value == null) return 0;
   if (typeof value === "number") return value;
@@ -1137,6 +1140,8 @@ function MarketDataPanel({ data }: { data?: LiveSafety["market_data"] | null }) 
         <HealthTile label="BTC Price" value={data?.price == null ? "-" : money(data.price)} ok={data?.ready === true} />
         <HealthTile label="Price Age" value={ageLabel(data?.price_age_seconds)} ok={(data?.price_age_seconds ?? 9999) <= (data?.max_price_age_seconds ?? 0)} />
         <HealthTile label="Received Age" value={ageLabel(data?.received_age_seconds)} ok={(data?.received_age_seconds ?? 9999) <= (data?.max_received_age_seconds ?? 0)} />
+        <HealthTile label="Price SLA" value={ageBudgetLabel(data?.price_age_seconds, data?.max_price_age_seconds)} ok={(data?.price_age_seconds ?? 9999) <= (data?.max_price_age_seconds ?? 0)} />
+        <HealthTile label="Received SLA" value={ageBudgetLabel(data?.received_age_seconds, data?.max_received_age_seconds)} ok={(data?.received_age_seconds ?? 9999) <= (data?.max_received_age_seconds ?? 0)} />
         <HealthTile label="Next Action" value={data?.next_action || "-"} ok={data?.ready === true} />
         {data?.error && <HealthTile label="Error" value={data.error} ok={false} />}
       </div>

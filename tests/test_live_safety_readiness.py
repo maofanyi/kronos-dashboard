@@ -1425,6 +1425,11 @@ def test_live_page_surfaces_market_data_panel():
     assert "Market Data" in source
     assert "data?.price_age_seconds" in source
     assert "data?.received_age_seconds" in source
+    assert "const ageBudgetLabel = (age?: number | null, max?: number | null)" in source
+    assert "ageBudgetLabel(data?.price_age_seconds, data?.max_price_age_seconds)" in source
+    assert "ageBudgetLabel(data?.received_age_seconds, data?.max_received_age_seconds)" in source
+    assert 'HealthTile label="Price SLA"' in source
+    assert 'HealthTile label="Received SLA"' in source
     assert "data?.next_action" in source
     assert "data?.source" in source
 
