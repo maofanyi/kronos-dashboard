@@ -1583,6 +1583,23 @@ def test_live_page_surfaces_operator_summary_card():
     assert "Primary Blocker" in source
 
 
+def test_trading_status_panel_avoids_duplicate_top_kpi_values():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    panel_source = source[
+        source.index("function TradingStatusPanel"):
+        source.index("function FirstOrderRail")
+    ]
+
+    assert 'HealthTile label="Current Stage"' in panel_source
+    assert 'HealthTile label="Stage Status"' in panel_source
+    assert 'HealthTile label="Manual Confirmation"' in panel_source
+    assert 'HealthTile label="Primary Blocker"' in panel_source
+    assert 'HealthTile label="Balance"' not in panel_source
+    assert 'HealthTile label="Allowance"' not in panel_source
+    assert 'HealthTile label="Open/Pending"' not in panel_source
+    assert 'HealthTile label="Mode"' not in panel_source
+
+
 def test_live_page_surfaces_today_dryrun_summary():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

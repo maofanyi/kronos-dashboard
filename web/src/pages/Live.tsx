@@ -939,44 +939,33 @@ function TradingStatusPanel({ safety, health }: { safety?: LiveSafety | null; he
   const rail = safety?.first_order_rail;
   const currentStage = rail?.stages?.find((stage) => stage.key === rail?.current_key);
   const fundingReady = funding?.funding_ready === true;
-  const allowanceReady = funding?.allowance_ok === true || funding?.funding_ready === true;
-  const balanceReady = funding?.balance_ok === true || funding?.funding_ready === true;
-  const riskMetrics = safety?.risk?.metrics;
-  const riskLimits = safety?.risk?.limits;
-  const openPending = riskMetrics?.open_or_pending_orders ?? (safety?.today?.trades.open ?? 0) + (safety?.today?.trades.pending ?? 0);
-  const openPendingLimit = riskLimits?.max_open_or_pending_orders;
+  const manualReady = rail?.ready_for_manual_confirmation === true;
+  const stageLabel = currentStage?.label || operator?.current_stage_label || "Live safety";
+  const stageStatus = currentStage?.status || operator?.status || "review";
   const primaryBlocker = operator?.primary_blocker || currentStage?.blockers?.[0] || "none";
   const nextAction = operator?.next_action || currentStage?.action || "Review trading readiness";
-  const modeLabel = safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : `${(safety?.mode ?? "paper").toUpperCase()} / locked`;
+  const dryrunClean = (safety?.dryrun?.submitted_count ?? 0) === 0;
 
   return (
     <Panel
       title="Trading Status"
-      sub="account, orders, and next action"
-      right={<StatusPill ok={!safety?.real_orders_enabled && fundingReady && openPending === 0} label={fundingReady ? "Ready checks" : "Funding needed"} />}
+      sub="stage, blockers, and next action"
+      right={<StatusPill ok={manualReady} label={manualReady ? "Manual ready" : "Review"} />}
     >
       <div className="grid gap-3 p-4">
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-          <HealthTile label="Balance" value={funding?.balance == null ? "-" : money(funding.balance)} ok={balanceReady} />
-          <HealthTile label="Allowance" value={funding?.min_allowance == null ? "-" : money(funding.min_allowance)} ok={allowanceReady} />
-          <HealthTile label="Open/Pending" value={openPendingLimit == null ? `${openPending}` : `${openPending}/${openPendingLimit}`} ok={openPendingLimit == null ? openPending === 0 : openPending < openPendingLimit} />
-          <HealthTile label="Mode" value={modeLabel} ok={!safety?.real_orders_enabled} />
+          <HealthTile label="Current Stage" value={stageLabel} ok={manualReady || stageStatus !== "blocked"} />
+          <HealthTile label="Stage Status" value={stageStatus.replace(/_/g, " ")} ok={manualReady || stageStatus === "complete"} />
+          <HealthTile label="Manual Confirmation" value={manualReady ? "ready" : "locked"} ok={manualReady} />
+          <HealthTile label="Primary Blocker" value={primaryBlocker} ok={primaryBlocker === "none"} />
         </div>
         <div className="rounded-md border border-zinc-900 bg-black/20 p-3">
-          <div className="grid gap-3 md:grid-cols-[minmax(0,0.65fr)_minmax(0,1fr)]">
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Next Action</div>
-              <div className="mt-1 text-sm font-medium text-zinc-100">{nextAction}</div>
-            </div>
-            <div>
-              <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Primary Blocker</div>
-              <div className={primaryBlocker === "none" ? "mt-1 text-sm text-emerald-300" : "mt-1 text-sm text-amber-300"}>{primaryBlocker}</div>
-            </div>
-          </div>
+          <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Next Action</div>
+          <div className="mt-1 text-sm font-medium text-zinc-100">{nextAction}</div>
           <div className="mt-3 flex flex-wrap gap-2">
             <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Runtime OK" : "Runtime review"} />
-            <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : `Funding gap ${money(Math.max(funding?.balance_shortfall_usdc ?? 0, funding?.allowance_shortfall_usdc ?? 0))}`} />
-            <StatusPill ok={(safety?.dryrun?.submitted_count ?? 0) === 0} label={`Dry-run submitted ${safety?.dryrun?.submitted_count ?? 0}`} />
+            <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : "Funding needed"} />
+            <StatusPill ok={dryrunClean} label={dryrunClean ? "Dry-run clean" : "Dry-run review"} />
           </div>
         </div>
       </div>
