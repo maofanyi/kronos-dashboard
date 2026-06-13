@@ -151,6 +151,12 @@ interface SafetyData {
       pending: number;
       open: number;
     };
+    activity?: {
+      latest_signal_age_seconds?: number | null;
+      latest_dryrun_age_seconds?: number | null;
+      latest_trade_age_seconds?: number | null;
+      latest_order_age_seconds?: number | null;
+    };
   };
 }
 
@@ -334,6 +340,10 @@ export default function StatusBar() {
   const todaySignalsPassed = today?.signals.passed ?? 0;
   const todaySignalsTotal = today?.signals.total ?? 0;
   const todaySignalsOk = todaySignalsTotal === 0 || todaySignalsPassed > 0;
+  const latestSignalAge = ageLabel(today?.activity?.latest_signal_age_seconds);
+  const latestDryrunAge = ageLabel(today?.activity?.latest_dryrun_age_seconds);
+  const todayActivityFresh = (today?.activity?.latest_signal_age_seconds ?? 9999) < 600;
+  const latestDryrunFresh = (today?.activity?.latest_dryrun_age_seconds ?? 9999) < 600;
   const healthOk = !error && health?.state !== "warning";
   const locked = !liveEnabled && safety?.kill_switch?.state !== "armed";
   const checklist = useMemo(() => {
@@ -427,6 +437,7 @@ export default function StatusBar() {
           <StatusChip ok={todayPnl >= 0} label={`Today ${signedMoney(todayPnl)}`} />
           <StatusChip ok={todaySignalsOk} label={`Signal ${todaySignalsPassed}/${todaySignalsTotal}`} />
           <StatusChip ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} label={`W/L ${todayWins}/${todayLosses}`} />
+          <StatusChip ok={todayActivityFresh} label={`Activity ${latestSignalAge}`} />
           <StatusChip
             ok={dryrunOk}
             label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
@@ -476,6 +487,8 @@ export default function StatusBar() {
               <DetailTile label="Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
               <DetailTile label="Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
               <DetailTile label="Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
+              <DetailTile label="Latest Signal" value={latestSignalAge} ok={todayActivityFresh} />
+              <DetailTile label="Latest Dry-run" value={latestDryrunAge} ok={latestDryrunFresh} />
               <DetailTile
                 label="Daily Trades"
                 value={metrics && limits ? `${metrics.daily_trades}/${limits.max_daily_trades}` : "-"}

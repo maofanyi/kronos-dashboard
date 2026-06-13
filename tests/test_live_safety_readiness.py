@@ -1513,6 +1513,20 @@ def test_status_bar_surfaces_today_summary():
     assert "Today Signals" in source
 
 
+def test_status_bar_surfaces_today_activity_freshness():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "activity?: {" in source
+    assert "latest_signal_age_seconds?: number | null" in source
+    assert "latest_dryrun_age_seconds?: number | null" in source
+    assert "const latestSignalAge = ageLabel(today?.activity?.latest_signal_age_seconds)" in source
+    assert "const latestDryrunAge = ageLabel(today?.activity?.latest_dryrun_age_seconds)" in source
+    assert "const todayActivityFresh = (today?.activity?.latest_signal_age_seconds ?? 9999) < 600" in source
+    assert "Activity ${latestSignalAge}" in source
+    assert 'DetailTile label="Latest Signal"' in source
+    assert 'DetailTile label="Latest Dry-run"' in source
+
+
 def test_status_bar_merges_runtime_checks_into_readiness_summary():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
