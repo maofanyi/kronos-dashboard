@@ -1285,6 +1285,11 @@ export default function Live() {
   const readinessBlockers = readinessSummary?.blockers ?? 0;
   const readinessReady = readinessSummary?.ready === true;
   const readinessTone = readinessReady ? "text-emerald-300" : readinessCritical > 0 ? "text-rose-300" : "text-amber-300";
+  const dryrun = safety?.dryrun;
+  const dryrunSubmitted = dryrun?.submitted_count ?? 0;
+  const dryrunValue = `${dryrun?.would_place_count ?? 0}/${dryrun?.ledger_count ?? 0}`;
+  const dryrunSub = `${dryrunSubmitted} submitted / ${dryrun?.blocked_count ?? 0} blocked`;
+  const dryrunTone = dryrunSubmitted === 0 ? "text-emerald-300" : "text-rose-300";
   const marketData = safety?.market_data;
   const marketReady = marketData?.ready === true;
   const marketAgeBudget = ageBudgetLabel(marketData?.price_age_seconds, marketData?.max_price_age_seconds);
@@ -1320,9 +1325,10 @@ export default function Live() {
 
   return (
     <div className="space-y-5">
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-10">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-4 xl:grid-cols-11">
         <StatCard label="Next" value={operatorValue} sub={operatorSub} icon={operatorIcon} tone={operatorTone} />
         <StatCard label="Readiness" value={`${readinessPassed}/${readinessTotal}`} sub={`Critical ${readinessCritical} / Blockers ${readinessBlockers}`} icon={Gauge} tone={readinessTone} />
+        <StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub} icon={ListChecks} tone={dryrunTone} />
         <StatCard label="Market" value={marketValue} sub={marketAgeBudget} icon={RadioTower} tone={marketTone} />
         <StatCard label="Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
         <StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`} icon={Target} tone={todaySettled === 0 ? "text-zinc-100" : todayWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />

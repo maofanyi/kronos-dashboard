@@ -1255,6 +1255,19 @@ def test_live_page_uses_signal_freshness_for_top_signals_kpi():
     assert "tone={signalKpiTone}" in source
 
 
+def test_live_page_surfaces_dryrun_safety_in_top_kpis():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const dryrun = safety?.dryrun" in source
+    assert "const dryrunSubmitted = dryrun?.submitted_count ?? 0" in source
+    assert "const dryrunValue = `${dryrun?.would_place_count ?? 0}/${dryrun?.ledger_count ?? 0}`" in source
+    assert "const dryrunSub = `${dryrunSubmitted} submitted / ${dryrun?.blocked_count ?? 0} blocked`" in source
+    assert "const dryrunTone = dryrunSubmitted === 0 ? \"text-emerald-300\" : \"text-rose-300\"" in source
+    assert 'StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub}' in source
+    assert "tone={dryrunTone}" in source
+    assert "xl:grid-cols-11" in source
+
+
 def test_live_page_uses_clob_funding_for_top_balance_kpi():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -1325,7 +1338,7 @@ def test_live_page_surfaces_readiness_summary_in_top_kpis():
     assert 'label="Readiness"' in source
     assert 'value={`${readinessPassed}/${readinessTotal}`}' in source
     assert "Critical ${readinessCritical}" in source
-    assert "xl:grid-cols-10" in source
+    assert "xl:grid-cols-11" in source
 
 
 def test_live_page_surfaces_market_data_in_top_kpis():
@@ -1404,7 +1417,7 @@ def test_live_page_surfaces_operator_summary_card():
     assert "operator?.next_action" in source
     assert "operator?.primary_blocker" in source
     assert 'label="Next"' in source
-    assert "xl:grid-cols-10" in source
+    assert "xl:grid-cols-11" in source
 
 
 def test_live_page_surfaces_today_dryrun_summary():
