@@ -132,6 +132,7 @@ interface LiveIntel {
 interface LiveSafety {
   mode: string;
   run_source: string;
+  source_label?: string;
   real_orders_enabled: boolean;
   kill_switch: { state: string };
   clob: {
@@ -598,7 +599,7 @@ function StatusPill({ ok, label }: { ok: boolean; label: string }) {
 
 function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null }) {
   const liveEnabled = safety?.real_orders_enabled === true;
-  const source = safety?.run_source ?? health?.run_source ?? "-";
+  const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? "-";
   const dryrunClean = (safety?.dryrun?.submitted_count ?? 0) === 0;
   const gateReady = safety?.live_gate?.ready_for_live_smoke === true;
   const preflightOk = safety?.preflight_chain?.ok === true;
@@ -1296,9 +1297,9 @@ function ResultPill({ won }: { won: number }) {
 export default function Live() {
   const [expandedSignal, setExpandedSignal] = useState<number | null>(null);
   const [expandedTrade, setExpandedTrade] = useState<number | null>(null);
-  const { data: status } = usePolling<StatusData>("/api/status?source=live", 5000);
-  const { data: events } = usePolling<EventItem[]>("/api/events?source=live&limit=80", 5000);
-  const { data: trades } = usePolling<TradeItem[]>("/api/trades?source=live&limit=200", 5000);
+  const { data: status } = usePolling<StatusData>("/api/status", 5000);
+  const { data: events } = usePolling<EventItem[]>("/api/events?limit=80", 5000);
+  const { data: trades } = usePolling<TradeItem[]>("/api/trades?limit=200", 5000);
   const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=260", 5000);
   const { data: safety } = usePolling<LiveSafety>("/api/live-safety", 5000);
 
@@ -1378,6 +1379,7 @@ export default function Live() {
   const allowanceValue = funding?.min_allowance == null ? "-" : money(funding.min_allowance);
   const allowanceSub = fundingAllowanceGap > 0 ? `Allowance gap ${money(fundingAllowanceGap)}` : funding?.allowance_ok ? "approved" : "allowance review";
   const allowanceTone = funding?.funding_ready === true || funding?.allowance_ok === true ? "text-emerald-300" : fundingAllowanceGap > 0 ? "text-rose-300" : "text-zinc-100";
+  const sourceLabel = safety?.source_label ?? safety?.run_source ?? "Source";
   const recentSettled = settledDesc.slice(0, 10);
 
   return (
@@ -1387,7 +1389,10 @@ export default function Live() {
           <h1 className="text-lg font-semibold text-zinc-100">Trading Console</h1>
           <p className="mt-1 text-xs text-zinc-500">balances, orders, fills, and the current 5m market</p>
         </div>
-        <StatusPill ok={!safety?.real_orders_enabled} label={safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />
+        <div className="flex flex-wrap items-center justify-end gap-2">
+          <span className="rounded border border-zinc-800 px-2 py-1 text-xs text-zinc-400">{sourceLabel}</span>
+          <StatusPill ok={!safety?.real_orders_enabled} label={safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />
+        </div>
       </div>
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">
@@ -1583,7 +1588,7 @@ export default function Live() {
                   <RadioTower className="h-3.5 w-3.5 text-zinc-500" /> Runtime
                 </div>
                 <div className="space-y-1 text-xs text-zinc-500">
-                  <div>source <span className="font-mono text-zinc-300">{health?.run_source ?? "-"}</span></div>
+                  <div>source <span className="font-mono text-zinc-300">{safety?.source_label ?? health?.run_source ?? "-"}</span></div>
                   <div className="truncate">stdout <span className="font-mono text-zinc-400">{intel?.logs.out_log?.split("\\").pop() ?? "-"}</span></div>
                   <div className="truncate">stderr <span className="font-mono text-zinc-400">{intel?.logs.err_log?.split("\\").pop() ?? "-"}</span></div>
                 </div>

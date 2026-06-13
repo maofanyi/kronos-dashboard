@@ -14,6 +14,46 @@ def _write_json(path: Path, payload) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_live_safety_labels_paper_source_without_calling_it_real_live(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+    payload = server._safety_report_summary()
+
+    assert payload["run_source"] == "paper_aligned_prod_shift1"
+    assert payload["mode"] == "paper"
+    assert payload["source_label"] == "Paper"
+    assert payload["real_orders_enabled"] is False
+
+
+def test_status_legacy_live_query_reads_paper_source_and_labels(tmp_path, monkeypatch):
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setattr(server, "DB_PATH", db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE snapshots (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            balance REAL,
+            trades_count INTEGER,
+            wr REAL,
+            cooldown_left INTEGER,
+            created_at TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO snapshots (source, balance, trades_count, wr, cooldown_left, created_at)
+           VALUES ('paper', 501.0, 7, 0.57, 0, '2026-06-14T00:00:00Z')"""
+    )
+    conn.commit()
+    conn.close()
+
+    with server.app.test_client() as client:
+        payload = client.get("/api/status?source=live").get_json()
+
+    assert payload["source"] == "paper"
+    assert payload["source_label"] == "Paper"
+    assert payload["balance"] == 501.0
+
+
 def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -1280,6 +1320,26 @@ def test_live_page_mounts_safety_panels():
 
     assert "<SafetyStrip safety={safety} health={health} />" in source
     assert "<ReadinessChecklist safety={safety} health={health} intel={intel} />" in source
+
+
+def test_live_page_uses_configured_source_and_label():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert 'usePolling<StatusData>("/api/status", 5000)' in source
+    assert 'usePolling<EventItem[]>("/api/events?limit=80", 5000)' in source
+    assert 'usePolling<TradeItem[]>("/api/trades?limit=200", 5000)' in source
+    assert "source_label?: string" in source
+    assert "const sourceLabel = safety?.source_label ?? safety?.run_source ?? \"Source\"" in source
+    assert "source=live" not in source
+
+
+def test_status_bar_uses_source_label_and_configured_status_source():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert 'usePolling<StatusData>("/api/status", 5000)' in source
+    assert "source_label?: string" in source
+    assert "const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? \"aligned-prod\"" in source
+    assert "source=live" not in source
 
 
 def test_live_page_surfaces_preflight_chain_status():

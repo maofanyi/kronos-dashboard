@@ -21,6 +21,7 @@ interface StatusData {
 interface SafetyData {
   mode?: string;
   run_source?: string;
+  source_label?: string;
   real_orders_enabled?: boolean;
   kill_switch?: { state?: string };
   clob?: {
@@ -323,7 +324,7 @@ function readinessAction(key: string) {
 
 export default function StatusBar() {
   const [open, setOpen] = useState(false);
-  const { data, error } = usePolling<StatusData>("/api/status?source=live", 5000);
+  const { data, error } = usePolling<StatusData>("/api/status", 5000);
   const { data: safety } = usePolling<SafetyData>("/api/live-safety", 5000);
   const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=80", 5000);
   const now = new Date();
@@ -398,7 +399,7 @@ export default function StatusBar() {
     safety?.funding?.allowance_shortfall_usdc ?? 0,
   );
   const needsReview = Boolean(error) || cooling || liveEnabled || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
-  const source = safety?.run_source ?? health?.run_source ?? "aligned-prod";
+  const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? "aligned-prod";
   const operator = safety?.operator_summary;
   const operatorStage = operator?.current_stage_label ?? "Live safety";
   const operatorNextAction = operator?.next_action ?? "Review readiness";

@@ -64,6 +64,42 @@ def _paper_run_source():
     return "paper_live"
 
 
+def _source_label(source: str) -> str:
+    value = str(source or "").strip()
+    if value == "live_real":
+        return "Live Real"
+    if "dryrun" in value:
+        return "Dry-run"
+    if value == "shadow_live":
+        return "Shadow"
+    if value == "paper" or value.startswith("paper"):
+        return "Paper"
+    if value == "history":
+        return "History"
+    return value or "Unknown"
+
+
+def _dashboard_db_source():
+    value = (os.environ.get("DASHBOARD_DB_SOURCE") or "").strip()
+    allowed = {"paper", "dryrun_aligned_prod_shift1", "shadow_live", "live_real", "history"}
+    if value in allowed:
+        return value
+    return "paper"
+
+
+def _normalize_dashboard_source(source: str | None):
+    value = str(source or "").strip()
+    if not value:
+        return _dashboard_db_source()
+    if value == "live":
+        return "paper"
+    return value
+
+
+def _request_dashboard_source():
+    return _normalize_dashboard_source(request.args.get("source"))
+
+
 def _paper_checkpoint_path():
     return KRONOS_CHECKPOINT_DIR / f"{_paper_run_source()}.json"
 
@@ -1235,6 +1271,7 @@ def _safety_report_summary():
 
     real_orders_env = os.environ.get("KRONOS_ENABLE_REAL_ORDERS", "")
     run_source = _paper_run_source()
+    source_label = _source_label(run_source)
     mode = "dry-run" if "dryrun" in run_source else "live" if run_source.startswith("live_") else "paper"
     open_orders_count = int(
         gate_account.get("open_orders_count", len(checkpoint.get("open_orders", []) or [])) or 0
@@ -1514,6 +1551,7 @@ def _safety_report_summary():
     return {
         "mode": mode,
         "run_source": run_source,
+        "source_label": source_label,
         "real_orders_enabled": real_orders_enabled,
         "kill_switch": {
             "state": "armed" if real_orders_enabled else "locked",
@@ -2113,19 +2151,28 @@ def _maker_quality_report(recent_events, recent_audit_events, limit=20, shadow_e
 
 @app.route("/api/status")
 def api_status():
-    source = request.args.get("source", "live")
+    source = _request_dashboard_source()
     db = get_db()
     row = db.execute(
         "SELECT * FROM snapshots WHERE source=? ORDER BY id DESC LIMIT 1", (source,)
     ).fetchone()
     if row is None:
-        return jsonify({"balance": 500, "trades_count": 0, "wr": 0, "cooldown_left": 0})
-    return jsonify(dict(row))
+        return jsonify({
+            "source": source,
+            "source_label": _source_label(source),
+            "balance": 500,
+            "trades_count": 0,
+            "wr": 0,
+            "cooldown_left": 0,
+        })
+    payload = dict(row)
+    payload["source_label"] = _source_label(str(payload.get("source") or source))
+    return jsonify(payload)
 
 
 @app.route("/api/signal-stats")
 def api_signal_stats():
-    source = request.args.get("source", "live")
+    source = _request_dashboard_source()
     db = get_db()
     row = db.execute(
         """SELECT
@@ -2141,6 +2188,7 @@ def api_signal_stats():
     return jsonify(
         {
             "source": source,
+            "source_label": _source_label(source),
             "total": total,
             "passed": passed,
             "blocked": max(total - passed, 0),
@@ -2156,7 +2204,7 @@ def api_signal_stats():
 
 @app.route("/api/events")
 def api_events():
-    source = request.args.get("source", "live")
+    source = _request_dashboard_source()
     limit = int(request.args.get("limit", 100))
     since = request.args.get("since", "")  # Optional: filter by min created_at
     db = get_db()
@@ -2171,7 +2219,12 @@ def api_events():
             "SELECT * FROM events WHERE source=? AND created_at >= datetime('now', '-12 hours') ORDER BY created_at DESC LIMIT ?",
             (source, limit),
         ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    payload = []
+    for row in rows:
+        item = dict(row)
+        item["source_label"] = _source_label(str(item.get("source") or source))
+        payload.append(item)
+    return jsonify(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -2263,7 +2316,7 @@ def api_backtest_feature_summary():
 
 @app.route("/api/trades")
 def api_trades():
-    source = request.args.get("source", "live")
+    source = _request_dashboard_source()
     limit = int(request.args.get("limit", 100))
     db = get_db()
     rows = db.execute(
@@ -2276,7 +2329,12 @@ def api_trades():
            LIMIT ?""",
         (source, limit),
     ).fetchall()
-    return jsonify([dict(r) for r in rows])
+    payload = []
+    for row in rows:
+        item = dict(row)
+        item["source_label"] = _source_label(str(item.get("source") or source))
+        payload.append(item)
+    return jsonify(payload)
 
 
 @app.route("/api/live-intel")
