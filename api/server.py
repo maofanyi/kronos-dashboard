@@ -1,9 +1,11 @@
 """Flask API server for Kronos Dashboard."""
+import asyncio
 import hashlib
 import hmac
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -39,8 +41,21 @@ RISK_LIMITS = {
     "max_consecutive_losses": int(os.environ.get("MAX_CONSECUTIVE_LOSSES", "3")),
     "max_open_or_pending_orders": int(os.environ.get("MAX_OPEN_OR_PENDING_ORDERS", "1")),
 }
+DASHBOARD_INITIAL_BALANCE = float(os.environ.get("DASHBOARD_INITIAL_BALANCE", "500"))
 LIVE_PREFLIGHT_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_LIVE_PREFLIGHT_MAX_AGE_SECONDS", "180"))
 CLOB_READONLY_MAX_AGE_SECONDS = int(os.environ.get("DASHBOARD_CLOB_READONLY_MAX_AGE_SECONDS", "300"))
+CLOB_ACCOUNT_REFRESH_SECONDS = int(os.environ.get("DASHBOARD_CLOB_ACCOUNT_REFRESH_SECONDS", "30"))
+CLOB_ACCOUNT_READ_TIMEOUT_SECONDS = float(os.environ.get("DASHBOARD_CLOB_ACCOUNT_READ_TIMEOUT_SECONDS", "8"))
+CLOB_ACCOUNT_CACHE = {"snapshot": None, "ts": 0.0, "root": ""}
+CLOB_ENV_KEYS = {
+    "CLOB_API_KEY",
+    "CLOB_API_SECRET",
+    "CLOB_API_PASSPHRASE",
+    "CLOB_FUNDER_ADDRESS",
+    "CLOB_SIGNATURE_TYPE",
+    "CLOB_PRIVATE_KEY",
+    "PK",
+}
 BTC_LIVE_MAX_PRICE_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_PRICE_AGE_SECONDS", "15"))
 BTC_LIVE_MAX_RECEIVED_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_RECEIVED_AGE_SECONDS", "30"))
 
@@ -54,11 +69,14 @@ def _paper_run_source():
     if configured:
         return configured
     if KRONOS_CHECKPOINT_DIR.exists():
-        files = sorted(
-            KRONOS_CHECKPOINT_DIR.glob("paper_live*.json"),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
+        files = []
+        for pattern in ("paper_aligned*.json", "paper_live*.json", "paper.json"):
+            files.extend(KRONOS_CHECKPOINT_DIR.glob(pattern))
+        files = [
+            path for path in files
+            if not any(marker in path.stem for marker in ("_ledger", "_orders", "_events", ".bad_resume", ".before_"))
+        ]
+        files = sorted(files, key=lambda p: p.stat().st_mtime, reverse=True)
         if files:
             return files[0].stem
     return "paper_live"
@@ -256,6 +274,83 @@ def _tail_jsonl(path: Path, limit: int = 500):
         except json.JSONDecodeError:
             continue
     return result
+
+
+def _live_prediction_artifact_history_path():
+    return KRONOS_CHECKPOINT_DIR / "aligned_prod_shift1_predictions.jsonl"
+
+
+def _artifact_created_at(record: dict):
+    for key in ("artifact_created_at", "created_at", "ts", "decision_bar_ts", "entry_ts"):
+        value = record.get(key)
+        if _parse_dt(value) is not None:
+            return value
+    return record.get("decision_bar_ts") or record.get("ts") or record.get("created_at")
+
+
+def _prob_direction(value):
+    try:
+        probability = float(value)
+    except (TypeError, ValueError):
+        return ""
+    if probability > 0.5:
+        return "UP"
+    if probability < 0.5:
+        return "DOWN"
+    return "FLAT"
+
+
+def _live_prediction_artifact_passed(record: dict):
+    if record.get("passed") is True or record.get("filt") is True or record.get("filt_passed") in (1, True):
+        return True
+    action = str(record.get("action") or "").upper()
+    return record.get("executable") is True and action != "HOLD"
+
+
+def _prediction_artifact_event(record: dict, sequence: int):
+    action = str(record.get("action") or "HOLD").upper()
+    created_at = _artifact_created_at(record)
+    reason = record.get("reason") or record.get("reason_code") or record.get("status_reason") or ""
+    details = dict(record)
+    details.setdefault("type", "decision")
+    details.setdefault("ts", record.get("decision_bar_ts") or created_at)
+    return {
+        "id": sequence,
+        "source": "live_real",
+        "source_label": _source_label("live_real"),
+        "type": "decision",
+        "kline_n": sequence,
+        "action": action,
+        "dir5": _prob_direction(record.get("p5_up")),
+        "dir4": _prob_direction(record.get("p4_up")),
+        "regime": record.get("reason_code") or record.get("strategy") or "",
+        "filt_passed": 1 if _live_prediction_artifact_passed(record) else 0,
+        "reason": reason,
+        "created_at": created_at,
+        "details": json.dumps(details, ensure_ascii=False),
+    }
+
+
+def _live_prediction_artifact_events(limit=100, since=""):
+    records = [
+        record
+        for record in _tail_jsonl(_live_prediction_artifact_history_path(), limit=max(limit, 1))
+        if isinstance(record, dict)
+    ]
+    events = [_prediction_artifact_event(record, index + 1) for index, record in enumerate(records)]
+    if since:
+        since_ts = _parse_dt(since)
+        if since_ts is not None:
+            events = [
+                event
+                for event in events
+                if (_parse_dt(event.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc)) >= since_ts
+            ]
+    events.sort(
+        key=lambda event: _parse_dt(event.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return events[:limit]
 
 
 def _events_checkpoint_path():
@@ -510,6 +605,326 @@ def _path_age(path):
     return mtime.isoformat(), max(0, int((datetime.now(timezone.utc) - mtime).total_seconds()))
 
 
+def _kronos_root():
+    configured = (os.environ.get("KRONOS_ROOT") or "").strip()
+    if configured:
+        return Path(configured)
+    return KRONOS_CHECKPOINT_DIR.parent.parent
+
+
+def _load_env_file(path, override_keys=None):
+    override_keys = set(override_keys or [])
+    if not path.exists():
+        return
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return
+    for raw_line in lines:
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        key = key.strip()
+        if key:
+            cleaned = value.strip().strip('"').strip("'")
+            if key in override_keys:
+                os.environ[key] = cleaned
+            else:
+                os.environ.setdefault(key, cleaned)
+
+
+def _funding_shortfall(required, observed):
+    required_value = _num(required)
+    observed_value = _num(observed)
+    if required_value is None or observed_value is None:
+        return None
+    return round(max(0.0, required_value - observed_value), 6)
+
+
+def _payload_dict(raw):
+    if isinstance(raw, dict):
+        return raw
+    if hasattr(raw, "__dict__"):
+        return vars(raw)
+    return {}
+
+
+def _payload_first(payload, *keys, default=None):
+    for key in keys:
+        if isinstance(payload, dict) and key in payload and payload.get(key) not in (None, ""):
+            value = payload.get(key)
+            return getattr(value, "value", value)
+    return default
+
+
+def _clob_open_order_summary(raw):
+    payload = _payload_dict(raw)
+    order_id = str(_payload_first(payload, "order_id", "orderId", "id", "hash", default="") or "")
+    market = str(_payload_first(payload, "market", "market_id", "marketId", default="") or "")
+    token_id = str(_payload_first(payload, "asset_id", "assetId", "token_id", "tokenId", default="") or "")
+    original_size = _num(_payload_first(payload, "original_size", "originalSize", "size"))
+    matched_size = _num(
+        _payload_first(
+            payload,
+            "size_matched",
+            "sizeMatched",
+            "matched_size",
+            "matchedSize",
+            "filled_size",
+            "filledSize",
+        )
+    )
+    if matched_size is None:
+        matched_size = 0.0
+    remaining_size = None
+    if original_size is not None:
+        remaining_size = round(max(0.0, original_size - matched_size), 12)
+    return {
+        "order_id": order_id,
+        "market": market,
+        "asset_id": token_id,
+        "token_id": token_id,
+        "side": str(_payload_first(payload, "side", default="") or "").upper(),
+        "outcome": str(_payload_first(payload, "outcome", default="") or ""),
+        "price": _num(_payload_first(payload, "price")),
+        "original_size": original_size,
+        "matched_size": matched_size,
+        "remaining_size": remaining_size,
+        "status": str(_payload_first(payload, "status", "raw_status", "rawStatus", default="") or ""),
+        "created_at": str(_payload_first(payload, "created_at", "createdAt", "created", default="") or ""),
+        "expiration": str(_payload_first(payload, "expiration", "expiration_time", "expirationTime", default="") or ""),
+    }
+
+
+def _clob_open_order_summaries(raw_orders, limit=20):
+    if not isinstance(raw_orders, list):
+        return []
+    return [_clob_open_order_summary(order) for order in raw_orders[:limit]]
+
+
+async def _read_live_clob_account(root):
+    from py_clob_client_v2.clob_types import AssetType, BalanceAllowanceParams
+    from kronos_poly.execution.clob import PolymarketClobClient, collateral_units_to_usdc
+
+    client = PolymarketClobClient()
+    await client.connect()
+    try:
+        authenticated = bool(getattr(client, "_authenticated", False))
+        open_orders = []
+        orders_read_ok = False
+        orders_error = ""
+        balance_read_ok = False
+        allowance_read_ok = False
+        balance_error = ""
+        allowance_error = ""
+        open_orders_result_type = ""
+        balance_allowance_result_type = ""
+        balance = 0.0
+        parsed_allowances = {}
+        min_allowance = 0.0
+        min_allowance_spender = ""
+
+        if authenticated:
+            try:
+                open_orders = await asyncio.to_thread(client._inner.get_open_orders, params=None) or []  # noqa: SLF001
+                open_orders_result_type = type(open_orders).__name__
+                orders_read_ok = True
+            except Exception as exc:
+                orders_error = f"{type(exc).__name__}: {exc}"
+
+            try:
+                raw_balance_allowance = await asyncio.to_thread(
+                    client._inner.get_balance_allowance,  # noqa: SLF001
+                    params=BalanceAllowanceParams(asset_type=AssetType.COLLATERAL),
+                )
+                balance_allowance_result_type = type(raw_balance_allowance).__name__
+                if isinstance(raw_balance_allowance, dict):
+                    balance = collateral_units_to_usdc(raw_balance_allowance.get("balance", 0.0))
+                    allowances = raw_balance_allowance.get("allowances", {})
+                    if isinstance(allowances, dict):
+                        parsed_allowances = {
+                            str(spender): collateral_units_to_usdc(value)
+                            for spender, value in allowances.items()
+                            if value is not None
+                        }
+                    allowance_values = list(parsed_allowances.values())
+                    min_allowance = min(allowance_values) if allowance_values else 0.0
+                    if parsed_allowances:
+                        min_allowance_spender = min(parsed_allowances, key=parsed_allowances.get)
+                    balance_read_ok = True
+                    allowance_read_ok = bool(allowance_values)
+            except Exception as exc:
+                balance_error = f"{type(exc).__name__}: {exc}"
+                allowance_error = balance_error
+    finally:
+        if hasattr(client, "_connected"):
+            client._connected = False  # noqa: SLF001
+
+    account = {
+        "authenticated": authenticated,
+        "orders_read_ok": orders_read_ok,
+        "orders_error": orders_error,
+        "orders_result_type": open_orders_result_type,
+        "balance_read_ok": balance_read_ok,
+        "balance_error": balance_error,
+        "balance_allowance_result_type": balance_allowance_result_type,
+        "allowance_read_ok": allowance_read_ok,
+        "allowance_error": allowance_error,
+        "open_orders_count": len(open_orders),
+        "open_orders": _clob_open_order_summaries(open_orders),
+        "usdc_balance": balance,
+        "min_allowance": min_allowance,
+        "allowances": parsed_allowances,
+        "allowance_count": len(parsed_allowances),
+        "min_allowance_spender": min_allowance_spender,
+    }
+    return {
+        "ok": bool(authenticated and (orders_read_ok or balance_read_ok or allowance_read_ok)),
+        "source": "live_clob_account_refresh",
+        "root": str(root),
+        "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "account": account,
+    }
+
+
+def _live_clob_account_snapshot():
+    root = _kronos_root().resolve()
+    now = time.time()
+    cached = CLOB_ACCOUNT_CACHE.get("snapshot")
+    if (
+        isinstance(cached, dict)
+        and CLOB_ACCOUNT_CACHE.get("root") == str(root)
+        and now - float(CLOB_ACCOUNT_CACHE.get("ts") or 0.0) <= CLOB_ACCOUNT_REFRESH_SECONDS
+    ):
+        return cached
+
+    client_module = root / "src" / "kronos_poly" / "execution" / "clob.py"
+    if not client_module.exists():
+        return {
+            "ok": False,
+            "source": "live_clob_account_refresh",
+            "root": str(root),
+            "error": "kronos clob client not found",
+            "account": {},
+        }
+
+    _load_env_file(root / ".env.clob.local", override_keys=CLOB_ENV_KEYS)
+    _load_env_file(root / ".env")
+    for candidate in (root, root / "src"):
+        value = str(candidate)
+        if value not in sys.path:
+            sys.path.insert(0, value)
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = False
+    else:
+        running_loop = True
+    if running_loop:
+        return {
+            "ok": False,
+            "source": "live_clob_account_refresh",
+            "root": str(root),
+            "error": "cannot refresh CLOB account from a running event loop",
+            "account": {},
+        }
+
+    try:
+        snapshot = asyncio.run(
+            asyncio.wait_for(
+                _read_live_clob_account(root),
+                timeout=CLOB_ACCOUNT_READ_TIMEOUT_SECONDS,
+            )
+        )
+    except Exception as exc:
+        snapshot = {
+            "ok": False,
+            "source": "live_clob_account_refresh",
+            "root": str(root),
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "error": f"{type(exc).__name__}: {exc}",
+            "account": {},
+        }
+
+    if snapshot.get("ok"):
+        CLOB_ACCOUNT_CACHE.update({"snapshot": snapshot, "ts": now, "root": str(root)})
+    return snapshot
+
+
+def _process_summary(patterns):
+    patterns = [str(pattern) for pattern in patterns if str(pattern or "").strip()]
+    if not patterns:
+        return {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": []}
+    if os.name != "nt":
+        return {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns}
+    patterns_json = json.dumps(patterns)
+    command = f"""
+$patterns = ConvertFrom-Json @'
+{patterns_json}
+'@
+Get-CimInstance Win32_Process |
+  Where-Object {{
+    $cmd = [string]$_.CommandLine
+    ($_.Name -match '^(python|python\\.exe|py|py\\.exe)$') -and
+    (($patterns | Where-Object {{ $cmd -like "*$_*" }} | Select-Object -First 1) -ne $null)
+  }} |
+  Select-Object ProcessId,Name,
+    @{{n='StartedAt';e={{$_.CreationDate.ToUniversalTime().ToString('o')}}}},
+    @{{n='CommandLine';e={{$_.CommandLine}}}} |
+  ConvertTo-Json -Depth 4
+"""
+    try:
+        completed = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", command],
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    except Exception as exc:
+        return {
+            "running": False,
+            "matches": [],
+            "started_at": None,
+            "uptime_seconds": None,
+            "patterns": patterns,
+            "error": str(exc),
+        }
+    if completed.returncode != 0 or not completed.stdout.strip():
+        return {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns}
+    try:
+        parsed = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        return {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns}
+    rows = parsed if isinstance(parsed, list) else [parsed]
+    matches = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        started_at = row.get("StartedAt")
+        command_line = str(row.get("CommandLine") or "")
+        matches.append(
+            {
+                "pid": row.get("ProcessId"),
+                "name": row.get("Name"),
+                "started_at": started_at,
+                "command": command_line[:260],
+            }
+        )
+    started_values = [_parse_dt(item.get("started_at")) for item in matches]
+    started_values = [value for value in started_values if value is not None]
+    started = min(started_values) if started_values else None
+    return {
+        "running": bool(matches),
+        "matches": matches,
+        "started_at": _iso_utc(started),
+        "uptime_seconds": _timestamp_age_seconds(started),
+        "patterns": patterns,
+    }
+
+
 def _report_refresh_item(
     *,
     key,
@@ -624,6 +1039,62 @@ def _is_settled_record(record: dict):
     return any(key in record for key in ("pnl", "realized_pnl", "pnl_usdc"))
 
 
+def _settled_stats_summary(records):
+    settled = [record for record in (records or []) if isinstance(record, dict) and _is_settled_record(record)]
+    wins = sum(1 for record in settled if _record_won(record) is True)
+    losses = sum(1 for record in settled if _record_won(record) is False)
+    return {
+        "settled": len(settled),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / len(settled), 4) if settled else 0.0,
+    }
+
+
+def _is_equity_settled_record(record: dict):
+    status = str(record.get("status", "")).upper()
+    if status in {"CANCELLED", "CANCELED", "REJECTED", "OPEN", "PENDING", "SUBMITTED", "PARTIAL", "LIVE"}:
+        return False
+    return _is_settled_record(record)
+
+
+def _equity_summary_from_records(records, *, current_balance=None, prefer_balance_after=False, source=""):
+    settled = sorted(
+        [record for record in (records or []) if isinstance(record, dict) and _is_equity_settled_record(record)],
+        key=lambda item: _record_ts(item) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    total_pnl = sum(_record_pnl(record) for record in settled)
+    current = _num(current_balance)
+    if prefer_balance_after and settled:
+        first_balance_after = _num(settled[0].get("balance_after"))
+        if first_balance_after is not None:
+            start = first_balance_after - _record_pnl(settled[0])
+        elif current is not None:
+            start = current - total_pnl
+        else:
+            start = DASHBOARD_INITIAL_BALANCE
+    elif current is not None:
+        start = current - total_pnl
+    else:
+        start = DASHBOARD_INITIAL_BALANCE
+
+    points = [round(float(start), 8)]
+    for record in settled:
+        balance_after = _num(record.get("balance_after")) if prefer_balance_after else None
+        if balance_after is None:
+            balance_after = points[-1] + _record_pnl(record)
+        points.append(round(float(balance_after), 8))
+
+    return {
+        "points": points,
+        "start": points[0],
+        "current": points[-1],
+        "pnl_usdc": round(total_pnl, 8),
+        "settled": len(settled),
+        "source": source,
+    }
+
+
 def _risk_records_from_payload(payload):
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -648,10 +1119,8 @@ def _consecutive_losses(records):
     return streak
 
 
-def _live_risk_summary(checkpoint=None):
-    checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
-    ledger = _read_json(_paper_ledger_path())
-    records = _risk_records_from_payload(checkpoint) + _risk_records_from_payload(ledger)
+def _risk_summary_from_records(records, inputs=None, limits_override=None):
+    records = [record for record in (records or []) if isinstance(record, dict)]
     today = datetime.now(timezone.utc).date()
     todays = []
     open_or_pending = 0
@@ -667,8 +1136,19 @@ def _live_risk_summary(checkpoint=None):
     settled = [record for record in todays if _is_settled_record(record)]
     daily_pnl = sum(_record_pnl(record) for record in settled)
     daily_trades = len(settled)
+    wins = sum(1 for record in settled if _record_won(record) is True)
+    losses = sum(1 for record in settled if _record_won(record) is False)
     consecutive_losses = _consecutive_losses(settled)
     limits = dict(RISK_LIMITS)
+    if isinstance(limits_override, dict):
+        for key, default_value in RISK_LIMITS.items():
+            override_value = _num(limits_override.get(key))
+            if override_value is None:
+                continue
+            if isinstance(default_value, int) and not isinstance(default_value, bool):
+                limits[key] = int(override_value)
+            else:
+                limits[key] = float(override_value)
     checks = [
         {
             "key": "risk_daily_loss",
@@ -710,15 +1190,174 @@ def _live_risk_summary(checkpoint=None):
             "day_utc": today.isoformat(),
             "daily_pnl_usdc": round(daily_pnl, 8),
             "daily_trades": daily_trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": round(wins / daily_trades, 4) if daily_trades else 0.0,
             "consecutive_losses": consecutive_losses,
             "open_or_pending_orders": open_or_pending,
         },
         "limits": limits,
-        "inputs": {
+        "inputs": inputs or {"record_count": len(records)},
+    }
+
+
+def _live_risk_summary(checkpoint=None):
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
+    ledger = _read_json(_paper_ledger_path())
+    records = _risk_records_from_payload(checkpoint) + _risk_records_from_payload(ledger)
+    return _risk_summary_from_records(
+        records,
+        inputs={
             "checkpoint": str(_paper_checkpoint_path()),
             "ledger": str(_paper_ledger_path()),
             "record_count": len(records),
         },
+    )
+
+
+def _rows_from_ledger_payload(payload):
+    if isinstance(payload, list):
+        return [item for item in payload if isinstance(item, dict)]
+    if not isinstance(payload, dict):
+        return []
+    if isinstance(payload.get("value"), list):
+        return [item for item in payload.get("value") if isinstance(item, dict)]
+    for key in ("orders", "trades", "records"):
+        if isinstance(payload.get(key), list):
+            return [item for item in payload.get(key) if isinstance(item, dict)]
+    return []
+
+
+def _order_status_summary(records):
+    status_counts = {}
+    open_or_pending = 0
+    settled = 0
+    cancelled = 0
+    filled = 0.0
+    for record in records:
+        status = str(record.get("status") or "").upper()
+        status_counts[status or "UNKNOWN"] = status_counts.get(status or "UNKNOWN", 0) + 1
+        if status in {"OPEN", "PENDING", "SUBMITTED", "PARTIAL", "MATCHED", "LIVE"}:
+            open_or_pending += 1
+        if status in {"SETTLED", "FILLED", "WON", "LOST", "CLOSED"} or _is_settled_record(record):
+            settled += 1
+        if status in {"CANCELLED", "CANCELED"}:
+            cancelled += 1
+        try:
+            filled += float(record.get("filled_size") or record.get("fill_size") or 0.0)
+        except (TypeError, ValueError):
+            pass
+    return {
+        "total": len(records),
+        "open_or_pending": open_or_pending,
+        "settled": settled,
+        "cancelled": cancelled,
+        "filled_size": round(filled, 8),
+        "status_counts": status_counts,
+    }
+
+
+def _latest_record(records):
+    ordered = sorted(
+        [record for record in records if isinstance(record, dict)],
+        key=lambda item: _record_ts(item) or datetime.min.replace(tzinfo=timezone.utc),
+    )
+    return ordered[-1] if ordered else None
+
+
+def _live_soak_summary():
+    path = KRONOS_REPORT_DIR / "prediction_bound_live_soak_latest.json"
+    report = _read_json(path) or {}
+    latest_report = report.get("latest_report") if isinstance(report.get("latest_report"), dict) else {}
+    prediction = latest_report.get("prediction") if isinstance(latest_report.get("prediction"), dict) else {}
+    report_mtime, report_age_seconds = _path_age(path if path.exists() else None)
+    return {
+        "available": path.exists(),
+        "report": str(path),
+        "report_mtime": report_mtime,
+        "report_age_seconds": report_age_seconds,
+        "ok": bool(report.get("ok")),
+        "submit_enabled": bool(report.get("submit_enabled")),
+        "terminal_reason": str(report.get("terminal_reason") or ""),
+        "attempts": int(report.get("attempts", 0) or 0),
+        "submitted_count": int(report.get("submitted_count", 0) or 0),
+        "started_at": report.get("started_at"),
+        "elapsed_seconds": report.get("elapsed_seconds"),
+        "latest_action": prediction.get("action"),
+        "latest_reason": prediction.get("reason_code") or prediction.get("reason") or latest_report.get("reason"),
+        "latest_decision_id": prediction.get("decision_id") or prediction.get("prediction_artifact_decision_id"),
+        "blockers": latest_report.get("blockers", []) if isinstance(latest_report.get("blockers"), list) else [],
+    }
+
+
+def _live_real_summary(limits_override=None, current_balance=None):
+    ledger_path = KRONOS_CHECKPOINT_DIR / "live_real_orders.json"
+    records = _rows_from_ledger_payload(_read_json(ledger_path))
+    risk = _risk_summary_from_records(
+        records,
+        inputs={"ledger": str(ledger_path), "record_count": len(records)},
+        limits_override=limits_override,
+    )
+    runtime = _process_summary(["run_prediction_bound_live_soak.py"])
+    soak = _live_soak_summary()
+    if not runtime.get("started_at") and soak.get("started_at"):
+        started = _parse_dt(soak.get("started_at"))
+        runtime = {
+            **runtime,
+            "started_at": _iso_utc(started),
+            "uptime_seconds": _timestamp_age_seconds(started),
+        }
+    return {
+        "ledger": str(ledger_path),
+        "ledger_exists": ledger_path.exists(),
+        "runtime": runtime,
+        "soak": soak,
+        "orders": _order_status_summary(records),
+        "stats": _settled_stats_summary(records),
+        "risk": risk,
+        "equity": _equity_summary_from_records(
+            records,
+            current_balance=current_balance,
+            source="live_real_orders",
+        ),
+        "latest_order": _latest_record(records),
+    }
+
+
+def _paper_monitor_summary(checkpoint=None, risk_summary=None, today_summary=None):
+    checkpoint_path = _paper_checkpoint_path()
+    ledger_path = _paper_ledger_path()
+    checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(checkpoint_path) or {})
+    checkpoint_mtime, checkpoint_age_seconds = _path_age(checkpoint_path if checkpoint_path.exists() else None)
+    open_orders = checkpoint.get("open_orders") if isinstance(checkpoint.get("open_orders"), list) else []
+    pending_orders = checkpoint.get("pending_orders") if isinstance(checkpoint.get("pending_orders"), list) else []
+    trades = checkpoint.get("trades") if isinstance(checkpoint.get("trades"), list) else []
+    return {
+        "run_source": _paper_run_source(),
+        "source_label": _source_label(_paper_run_source()),
+        "checkpoint": str(checkpoint_path),
+        "ledger": str(ledger_path),
+        "checkpoint_exists": checkpoint_path.exists(),
+        "checkpoint_mtime": checkpoint_mtime,
+        "checkpoint_age_seconds": checkpoint_age_seconds,
+        "runtime": _process_summary(["run_paper_aligned_prod.py"]),
+        "balance": checkpoint.get("balance"),
+        "orders": {
+            "open": len(open_orders),
+            "pending": len(pending_orders),
+            "settled": len([record for record in trades if isinstance(record, dict) and _is_settled_record(record)]),
+            "total_trades": len(trades),
+        },
+        "stats": _settled_stats_summary(trades),
+        "signals": _paper_signal_stats_summary(),
+        "equity": _equity_summary_from_records(
+            trades,
+            current_balance=checkpoint.get("balance"),
+            prefer_balance_after=True,
+            source=_paper_run_source(),
+        ),
+        "risk": risk_summary if isinstance(risk_summary, dict) else _live_risk_summary(checkpoint),
+        "today": today_summary if isinstance(today_summary, dict) else _live_today_summary(checkpoint),
     }
 
 
@@ -766,6 +1405,29 @@ def _decision_passed(event):
         return True
     action = str(event.get("action") or "").upper()
     return event.get("executable") is True and action != "HOLD"
+
+
+def _signal_stats_summary(events):
+    decisions = [event for event in (events or []) if isinstance(event, dict) and _is_decision_event(event)]
+    passed = sum(1 for event in decisions if _decision_passed(event))
+    total = len(decisions)
+    return {
+        "total": total,
+        "passed": passed,
+        "blocked": max(total - passed, 0),
+        "pass_rate": round(passed / total, 4) if total else 0.0,
+    }
+
+
+def _paper_signal_stats_summary(limit=5000):
+    events = _tail_jsonl(_events_checkpoint_path(), limit=limit)
+    decisions = [event for event in events if isinstance(event, dict) and _is_decision_event(event)]
+    if not decisions:
+        decisions = [
+            event for event in _tail_source_events(_paper_run_source(), limit=limit)
+            if isinstance(event, dict) and _is_decision_event(event)
+        ]
+    return _signal_stats_summary(decisions)
 
 
 def _signal_action_counts(events):
@@ -1258,25 +1920,66 @@ def _safety_report_summary():
     gate_path, gate_report = _latest_json_report("live_trade_gate*.json")
     preflight_path, preflight_report = _latest_json_report("live_preflight_chain*.json")
     dryrun_summary = _live_dryrun_ledger_summary()
-    live_gate_summary = _live_gate_report_summary(gate_path, gate_report)
     preflight_summary = _live_preflight_chain_summary(preflight_path, preflight_report)
-    gate_account = gate_report.get("account") if isinstance(gate_report.get("account"), dict) else {}
-    gate_funding = (
-        gate_report.get("funding_requirements")
-        if isinstance(gate_report.get("funding_requirements"), dict)
+    preflight_components = preflight_report.get("components") if isinstance(preflight_report.get("components"), dict) else {}
+    preflight_risk_component = (
+        preflight_components.get("risk")
+        if isinstance(preflight_components.get("risk"), dict)
         else {}
     )
+    preflight_risk_metrics = (
+        preflight_risk_component.get("metrics")
+        if isinstance(preflight_risk_component.get("metrics"), dict)
+        else {}
+    )
+    preflight_risk_limits = (
+        preflight_risk_metrics.get("limits")
+        if isinstance(preflight_risk_metrics.get("limits"), dict)
+        else None
+    )
+    preflight_gate_report = (
+        preflight_components.get("gate")
+        if isinstance(preflight_components.get("gate"), dict)
+        else {}
+    )
+    gate_mtime = gate_path.stat().st_mtime if gate_path else -1
+    preflight_mtime = preflight_path.stat().st_mtime if preflight_path else -1
+    use_preflight_gate = bool(preflight_gate_report) and preflight_mtime >= gate_mtime
+    effective_gate_path = preflight_path if use_preflight_gate else gate_path
+    effective_gate_report = preflight_gate_report if use_preflight_gate else gate_report
+    live_gate_summary = _live_gate_report_summary(effective_gate_path, effective_gate_report)
+    gate_account = effective_gate_report.get("account") if isinstance(effective_gate_report.get("account"), dict) else {}
+    gate_funding = (
+        effective_gate_report.get("funding_requirements")
+        if isinstance(effective_gate_report.get("funding_requirements"), dict)
+        else {}
+    )
+    _, effective_gate_age_seconds = _path_age(effective_gate_path)
+    account_refresh = {}
+    refreshed_account = {}
+    account_source = "live_gate_report"
+    if (
+        effective_gate_path
+        and effective_gate_age_seconds is not None
+        and effective_gate_age_seconds > CLOB_READONLY_MAX_AGE_SECONDS
+    ):
+        account_refresh = _live_clob_account_snapshot()
+        candidate_account = account_refresh.get("account") if isinstance(account_refresh, dict) else {}
+        if account_refresh.get("ok") and isinstance(candidate_account, dict):
+            refreshed_account = candidate_account
+            gate_account = {**gate_account, **refreshed_account}
+            account_source = str(account_refresh.get("source") or "live_clob_account_refresh")
     execution_path, execution_report = _latest_json_report("live_dryrun_execution_summary_latest.json")
     checkpoint = _read_json(_paper_checkpoint_path()) or {}
 
-    balance_check = _check_status(gate_report, "balance_meets_minimum") or _check_status(allowance_report, "minimum_balance")
-    allowance_check = _check_status(gate_report, "allowance_meets_minimum") or _check_status(allowance_report, "minimum_allowance")
-    auth_check = _check_status(allowance_report, "readonly_authenticated_client") or _check_status(gate_report, "clob_account_authenticated")
+    balance_check = _check_status(effective_gate_report, "balance_meets_minimum") or _check_status(allowance_report, "minimum_balance")
+    allowance_check = _check_status(effective_gate_report, "allowance_meets_minimum") or _check_status(allowance_report, "minimum_allowance")
+    auth_check = _check_status(allowance_report, "readonly_authenticated_client") or _check_status(effective_gate_report, "clob_account_authenticated")
     if auth_check is None:
         auth_check = _check_status(allowance_report, "clob_private_key_present")
-    balance_read = _check_status(allowance_report, "readonly_get_balance") or _check_status(gate_report, "account_balance_read_ok")
-    allowance_read = _check_status(allowance_report, "readonly_get_balance_allowance") or _check_status(gate_report, "account_allowance_read_ok")
-    open_orders_read = _check_status(gate_report, "account_open_orders_read_ok")
+    balance_read = _check_status(allowance_report, "readonly_get_balance") or _check_status(effective_gate_report, "account_balance_read_ok")
+    allowance_read = _check_status(allowance_report, "readonly_get_balance_allowance") or _check_status(effective_gate_report, "account_allowance_read_ok")
+    open_orders_read = _check_status(effective_gate_report, "account_open_orders_read_ok")
 
     network_calls = (allowance_report.get("network") or {}).get("calls") or []
     balance_allowance_call = next(
@@ -1289,22 +1992,56 @@ def _safety_report_summary():
     run_source = _paper_run_source()
     source_label = _source_label(run_source)
     mode = "dry-run" if "dryrun" in run_source else "live" if run_source.startswith("live_") else "paper"
-    open_orders_count = int(
-        gate_account.get("open_orders_count", len(checkpoint.get("open_orders", []) or [])) or 0
+    clob_open_orders = _clob_open_order_summaries(
+        gate_account.get("open_orders")
+        if isinstance(gate_account.get("open_orders"), list)
+        else checkpoint.get("open_orders", []) or []
     )
-    balance_value = balance_allowance_call.get("balance", gate_account.get("usdc_balance"))
-    min_allowance_value = balance_allowance_call.get("min_allowance", gate_account.get("min_allowance"))
-    allowance_count = balance_allowance_call.get("allowance_count", gate_account.get("allowance_count"))
-    min_allowance_spender = gate_account.get("min_allowance_spender", "")
+    open_orders_count = int(gate_account.get("open_orders_count", len(clob_open_orders)) or 0)
+    if clob_open_orders:
+        open_orders_count = len(clob_open_orders)
+    balance_value = gate_account.get("usdc_balance", balance_allowance_call.get("balance"))
+    min_allowance_value = gate_account.get("min_allowance", balance_allowance_call.get("min_allowance"))
+    allowance_count = gate_account.get("allowance_count", balance_allowance_call.get("allowance_count"))
+    min_allowance_spender = gate_account.get("min_allowance_spender", balance_allowance_call.get("min_allowance_spender", ""))
+    if refreshed_account:
+        balance_shortfall = _funding_shortfall(gate_funding.get("required_min_balance_usdc"), balance_value)
+        smoke_notional_shortfall = _funding_shortfall(gate_funding.get("required_smoke_notional_usdc"), balance_value)
+        allowance_shortfall = _funding_shortfall(gate_funding.get("required_min_allowance_usdc"), min_allowance_value)
+        gate_funding = {
+            **gate_funding,
+            "balance_shortfall_usdc": balance_shortfall,
+            "smoke_notional_shortfall_usdc": smoke_notional_shortfall,
+            "allowance_shortfall_usdc": allowance_shortfall,
+            "funding_ready": (
+                balance_shortfall == 0.0
+                and smoke_notional_shortfall == 0.0
+                and allowance_shortfall == 0.0
+            ),
+        }
 
     clob_authenticated = bool(auth_check and auth_check.get("ok"))
     account_read_ok = bool(balance_read and balance_read.get("ok"))
     allowance_read_ok = bool(allowance_read and allowance_read.get("ok"))
     balance_ok = bool(balance_check and balance_check.get("ok"))
     allowance_ok = bool(allowance_check and allowance_check.get("ok"))
+    open_orders_read_ok = bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok"))
+    if refreshed_account:
+        clob_authenticated = bool(refreshed_account.get("authenticated"))
+        account_read_ok = bool(refreshed_account.get("balance_read_ok"))
+        allowance_read_ok = bool(refreshed_account.get("allowance_read_ok"))
+        open_orders_read_ok = bool(refreshed_account.get("orders_read_ok"))
+        balance_ok = gate_funding.get("balance_shortfall_usdc") == 0.0
+        allowance_ok = gate_funding.get("allowance_shortfall_usdc") == 0.0
     real_orders_enabled = real_orders_env == "YES"
-    risk_summary = _live_risk_summary(checkpoint)
-    today_summary = _live_today_summary(checkpoint, risk_summary, dryrun_summary)
+    paper_risk_summary = _live_risk_summary(checkpoint)
+    today_summary = _live_today_summary(checkpoint, paper_risk_summary, dryrun_summary)
+    live_real_summary = _live_real_summary(
+        limits_override=preflight_risk_limits,
+        current_balance=balance_value,
+    )
+    live_real_risk_summary = live_real_summary["risk"]
+    paper_monitor_summary = _paper_monitor_summary(checkpoint, paper_risk_summary, today_summary)
     market_data_summary = _btc_live_market_data_summary()
     alert_summary = _live_alert_summary()
 
@@ -1427,21 +2164,24 @@ def _safety_report_summary():
             "value": "submitted" if preflight_summary["submitted"] else "none",
             "severity": "critical",
         },
-    ] + risk_summary["checks"]
+    ] + live_real_risk_summary["checks"]
 
     readiness_summary = _readiness_summary(checklist)
     first_order_rail = _first_order_rail(checklist)
     operator_summary = _operator_summary(readiness_summary, first_order_rail)
-    open_orders_read_ok = bool(orders_call.get("ok")) or bool(open_orders_read and open_orders_read.get("ok"))
     market_probe_count = int(live_gate_summary.get("market_probe_count", 0) or 0)
     quote_executable_count = int(live_gate_summary.get("quote_executable_count", 0) or 0)
-    gate_market_probes = gate_report.get("market_probes") if isinstance(gate_report.get("market_probes"), list) else []
+    gate_market_probes = (
+        effective_gate_report.get("market_probes")
+        if isinstance(effective_gate_report.get("market_probes"), list)
+        else []
+    )
     quote_probes = [
         _clob_quote_probe_summary(probe)
         for probe in gate_market_probes
         if isinstance(probe, dict)
     ]
-    clob_report_path = gate_path or allowance_path
+    clob_report_path = effective_gate_path or allowance_path
     clob_report_mtime = None
     clob_report_age_seconds = None
     if clob_report_path:
@@ -1497,10 +2237,27 @@ def _safety_report_summary():
         "allowance_read_ok": allowance_read_ok,
         "open_orders_read_ok": open_orders_read_ok,
         "open_orders_count": open_orders_count,
+        "open_orders": clob_open_orders,
         "balance": balance_value,
         "min_allowance": min_allowance_value,
         "allowance_count": allowance_count,
         "min_allowance_spender": min_allowance_spender,
+        "account_source": account_source,
+        "account_refresh": {
+            "ok": account_refresh.get("ok"),
+            "source": account_refresh.get("source"),
+            "created_at": account_refresh.get("created_at"),
+            "error": account_refresh.get("error"),
+            "authenticated": (account_refresh.get("account") or {}).get("authenticated"),
+            "orders_read_ok": (account_refresh.get("account") or {}).get("orders_read_ok"),
+            "orders_error": (account_refresh.get("account") or {}).get("orders_error"),
+            "orders_result_type": (account_refresh.get("account") or {}).get("orders_result_type"),
+            "balance_read_ok": (account_refresh.get("account") or {}).get("balance_read_ok"),
+            "balance_error": (account_refresh.get("account") or {}).get("balance_error"),
+            "balance_allowance_result_type": (account_refresh.get("account") or {}).get("balance_allowance_result_type"),
+            "allowance_read_ok": (account_refresh.get("account") or {}).get("allowance_read_ok"),
+            "allowance_error": (account_refresh.get("account") or {}).get("allowance_error"),
+        } if account_refresh else {},
         "market_probe_count": market_probe_count,
         "quote_executable_count": quote_executable_count,
         "quote_executable_rate": round(quote_executable_count / market_probe_count, 4) if market_probe_count else 0.0,
@@ -1510,7 +2267,7 @@ def _safety_report_summary():
         "allowance_shortfall_usdc": gate_funding.get("allowance_shortfall_usdc"),
         "blockers": clob_blockers,
     }
-    _, gate_report_age_seconds = _path_age(gate_path)
+    _, gate_report_age_seconds = _path_age(effective_gate_path)
     gate_report_fresh = (
         bool(gate_path)
         and gate_report_age_seconds is not None
@@ -1521,7 +2278,7 @@ def _safety_report_summary():
             _report_refresh_item(
                 key="live_gate",
                 label="Live Gate",
-                report=str(gate_path) if gate_path else "",
+                report=str(effective_gate_path) if effective_gate_path else "",
                 available=live_gate_summary["available"],
                 ok=live_gate_summary["ready_for_live_smoke"],
                 fresh=gate_report_fresh,
@@ -1592,6 +2349,7 @@ def _safety_report_summary():
             "balance_ok": balance_ok,
             "allowance_ok": allowance_ok,
             "balance": balance_value,
+            "account_source": account_source,
             "allowance_count": allowance_count,
             "min_allowance": min_allowance_value,
             "min_allowance_spender": min_allowance_spender,
@@ -1608,10 +2366,12 @@ def _safety_report_summary():
         "reports": {
             "allowance": str(allowance_path) if allowance_path else "",
             "execution": str(execution_path) if execution_path else "",
-            "live_gate": str(gate_path) if gate_path else "",
+            "live_gate": str(effective_gate_path) if effective_gate_path else "",
             "live_preflight": str(preflight_path) if preflight_path else "",
         },
         "dryrun": dryrun_summary,
+        "live_real": live_real_summary,
+        "paper_monitor": paper_monitor_summary,
         "live_gate": live_gate_summary,
         "preflight_chain": preflight_summary,
         "market_data": market_data_summary,
@@ -1622,7 +2382,7 @@ def _safety_report_summary():
         "clob_readonly": clob_readonly,
         "report_refresh": report_refresh,
         "first_order_rail": first_order_rail,
-        "risk": risk_summary,
+        "risk": live_real_risk_summary,
         "today": today_summary,
         "execution_summary": execution_report.get("summary") or execution_report,
     }
@@ -2198,6 +2958,19 @@ def api_status():
 @app.route("/api/signal-stats")
 def api_signal_stats():
     source = _request_dashboard_source()
+    if source == "live_real":
+        events = _live_prediction_artifact_events(limit=5000)
+        summary = _signal_stats_summary(events)
+        latest = events[0].get("created_at") if events else None
+        return jsonify(
+            {
+                "source": source,
+                "source_label": _source_label(source),
+                **summary,
+                "latest_created_at": latest,
+            }
+        )
+
     db = get_db()
     row = db.execute(
         """SELECT
@@ -2232,6 +3005,9 @@ def api_events():
     source = _request_dashboard_source()
     limit = int(request.args.get("limit", 100))
     since = request.args.get("since", "")  # Optional: filter by min created_at
+    if source == "live_real":
+        return jsonify(_live_prediction_artifact_events(limit=limit, since=since))
+
     db = get_db()
     if since:
         rows = db.execute(

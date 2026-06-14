@@ -73,6 +73,377 @@ def test_live_safety_includes_local_alert_report(monkeypatch, tmp_path):
     assert payload["alerts"]["critical_count"] == 1
 
 
+def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+    _write_json(
+        report_dir / "polymarket_clob_allowance_audit_20260611_182608.json",
+        {
+            "checks": [
+                {"name": "minimum_balance", "ok": False, "value": 0.0, "expected": ">= 5.0"},
+                {"name": "minimum_allowance", "ok": False, "value": 0.0, "expected": ">= 5.0"},
+                {"name": "readonly_get_balance", "ok": True},
+                {"name": "readonly_get_balance_allowance", "ok": True},
+                {"name": "readonly_authenticated_client", "ok": True},
+            ],
+            "network": {
+                "calls": [
+                    {"name": "get_balance_allowance", "balance": 0.0, "min_allowance": 0.0, "allowance_count": 3}
+                ]
+            },
+        },
+    )
+    now = datetime.now(timezone.utc).isoformat()
+    _write_json(
+        checkpoint_dir / "paper_aligned_prod_shift1.json",
+        {
+            "balance": 503.0,
+            "pending_orders": [{"status": "PENDING", "created_at": now}],
+            "open_orders": [{"status": "OPEN", "created_at": now}],
+            "trades": [],
+        },
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders.json",
+        [
+            {
+                "status": "SETTLED",
+                "created_at": now,
+                "settled_at": now,
+                "filled_size": 1,
+                "pnl": -0.5,
+                "direction": "DOWN",
+            }
+        ],
+    )
+
+    summary = server._safety_report_summary()
+
+    assert summary["paper_monitor"]["orders"]["open"] == 1
+    assert summary["paper_monitor"]["orders"]["pending"] == 1
+    assert summary["live_real"]["orders"]["open_or_pending"] == 0
+    assert summary["live_real"]["orders"]["settled"] == 1
+    assert summary["live_real"]["risk"]["metrics"]["daily_pnl_usdc"] == -0.5
+    assert summary["live_real"]["risk"]["metrics"]["wins"] == 0
+    assert summary["live_real"]["risk"]["metrics"]["losses"] == 1
+    assert summary["live_real"]["risk"]["metrics"]["win_rate"] == 0.0
+    assert summary["live_real"]["stats"]["losses"] == 1
+    assert summary["live_real"]["ledger"].endswith("live_real_orders.json")
+
+
+def test_paper_monitor_exposes_total_win_rate_from_checkpoint():
+    checkpoint = {
+        "balance": 502.0,
+        "open_orders": [],
+        "pending_orders": [],
+        "trades": [
+            {"status": "SETTLED", "pnl": 1.0, "created_at": "2026-06-14T01:00:00Z"},
+            {"status": "SETTLED", "pnl": -0.5, "created_at": "2026-06-14T01:05:00Z"},
+            {"status": "PENDING", "created_at": "2026-06-14T01:10:00Z"},
+        ],
+    }
+
+    summary = server._paper_monitor_summary(checkpoint=checkpoint, risk_summary={}, today_summary={})
+
+    assert summary["stats"]["settled"] == 2
+    assert summary["stats"]["wins"] == 1
+    assert summary["stats"]["losses"] == 1
+    assert summary["stats"]["win_rate"] == 0.5
+
+
+def test_paper_monitor_exposes_total_signal_pass_rate_from_checkpoint_events(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+    events_path = checkpoint_dir / "paper_aligned_prod_shift1_events.jsonl"
+    events_path.write_text(
+        "\n".join([
+            json.dumps({"type": "decision", "filt_passed": 1, "created_at": "2026-06-14T01:00:00Z"}),
+            json.dumps({"type": "decision", "filt_passed": 0, "created_at": "2026-06-14T01:05:00Z"}),
+            json.dumps({"type": "decision", "filt_passed": 1, "created_at": "2026-06-14T01:10:00Z"}),
+        ]),
+        encoding="utf-8",
+    )
+
+    summary = server._paper_monitor_summary(checkpoint={"balance": 500, "trades": []}, risk_summary={}, today_summary={})
+
+    assert summary["signals"]["total"] == 3
+    assert summary["signals"]["passed"] == 2
+    assert summary["signals"]["blocked"] == 1
+    assert summary["signals"]["pass_rate"] == 0.6667
+
+
+def test_live_real_risk_limits_follow_latest_preflight_profile(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+    _write_json(checkpoint_dir / "live_real_orders.json", [])
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {"gate_ready": True, "smoke_mode": "preview", "open_orders": 0, "settled": 0, "risk_ok": True},
+            "components": {
+                "risk": {
+                    "ok": True,
+                    "metrics": {
+                        "limits": {
+                            "max_daily_loss_usdc": 26.0,
+                            "max_daily_trades": 20,
+                            "max_consecutive_losses": 3,
+                            "max_open_or_pending_orders": 1,
+                        }
+                    },
+                }
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+    risk = summary["live_real"]["risk"]
+
+    assert risk["limits"]["max_daily_loss_usdc"] == 26.0
+    assert risk["limits"]["max_daily_trades"] == 20
+    assert risk["checks"][0]["expected"] == "> -26.0"
+
+
+def test_live_safety_summaries_include_source_scoped_equity_curves(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+    _write_json(
+        checkpoint_dir / "paper_aligned_prod_shift1.json",
+        {
+            "balance": 515.0,
+            "trades": [
+                {
+                    "id": "paper-1",
+                    "status": "settled",
+                    "created_at": "2026-06-14T00:00:00Z",
+                    "settled_at": "2026-06-14T00:05:00Z",
+                    "pnl": -10.0,
+                    "balance_after": 490.0,
+                },
+                {
+                    "id": "paper-2",
+                    "status": "settled",
+                    "created_at": "2026-06-14T00:05:00Z",
+                    "settled_at": "2026-06-14T00:10:00Z",
+                    "pnl": 25.0,
+                    "balance_after": 515.0,
+                },
+            ],
+        },
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders.json",
+        [
+            {
+                "order_id": "cancelled",
+                "status": "CANCELLED",
+                "created_at": "2026-06-14T00:00:00Z",
+                "pnl": 99.0,
+            },
+            {
+                "order_id": "settled",
+                "status": "SETTLED",
+                "created_at": "2026-06-14T00:05:00Z",
+                "settled_at": "2026-06-14T00:20:00Z",
+                "pnl": -0.5,
+                "filled_size": 1,
+            },
+        ],
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "components": {
+                "gate": {
+                    "account": {"usdc_balance": 48.5},
+                    "funding_requirements": {"funding_ready": True},
+                }
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+
+    assert summary["paper_monitor"]["equity"]["points"] == [500.0, 490.0, 515.0]
+    assert summary["paper_monitor"]["equity"]["pnl_usdc"] == 15.0
+    assert summary["paper_monitor"]["equity"]["settled"] == 2
+    assert summary["live_real"]["equity"]["points"] == [49.0, 48.5]
+    assert summary["live_real"]["equity"]["pnl_usdc"] == -0.5
+    assert summary["live_real"]["equity"]["settled"] == 1
+
+
+def test_live_safety_readiness_uses_live_real_risk_not_paper_risk(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+    _write_json(
+        checkpoint_dir / "paper_aligned_prod_shift1.json",
+        {
+            "trades": [
+                {
+                    "id": f"paper-{idx}",
+                    "status": "settled",
+                    "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "settled_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                    "pnl": 1.0,
+                }
+                for idx in range(24)
+            ]
+        },
+    )
+    _write_json(checkpoint_dir / "live_real_orders.json", [])
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "components": {
+                "gate": {"account": {"usdc_balance": 48.0}, "funding_requirements": {"funding_ready": True}},
+                "risk": {"ok": True, "metrics": {"limits": {"max_daily_loss_usdc": 26.0, "max_daily_trades": 20}}},
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+
+    top_risk = summary["risk"]
+    paper_risk = summary["paper_monitor"]["risk"]
+    readiness_keys = {item["key"]: item for item in summary["checklist"]}
+
+    assert top_risk["metrics"]["daily_trades"] == 0
+    assert readiness_keys["risk_daily_trades"]["value"] == 0
+    assert readiness_keys["risk_daily_trades"]["ok"] is True
+    assert paper_risk["metrics"]["daily_trades"] == 24
+    assert paper_risk["checks"][1]["ok"] is False
+
+
+def test_live_safety_includes_runtime_for_live_soak_and_paper_runner(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+
+    def fake_process_summary(patterns):
+        joined = " ".join(patterns)
+        if "run_prediction_bound_live_soak.py" in joined:
+            return {
+                "running": True,
+                "matches": [{"pid": 111, "started_at": "2026-06-14T08:00:00Z"}],
+                "started_at": "2026-06-14T08:00:00Z",
+                "uptime_seconds": 600,
+                "patterns": patterns,
+            }
+        return {
+            "running": True,
+            "matches": [{"pid": 222, "started_at": "2026-06-14T07:00:00Z"}],
+            "started_at": "2026-06-14T07:00:00Z",
+            "uptime_seconds": 4200,
+            "patterns": patterns,
+        }
+
+    monkeypatch.setattr(server, "_process_summary", fake_process_summary)
+    _write_json(checkpoint_dir / "paper_aligned_prod_shift1.json", {"balance": 500.0})
+    _write_json(
+        report_dir / "prediction_bound_live_soak_latest.json",
+        {
+            "source": "prediction_bound_live_soak",
+            "submit_enabled": True,
+            "terminal_reason": "running",
+            "attempts": 3,
+            "submitted_count": 1,
+            "started_at": "2026-06-14T08:00:00Z",
+            "elapsed_seconds": 600,
+            "latest_report": {
+                "prediction": {"action": "BUY_DOWN", "reason_code": "short_passed"},
+                "blockers": [],
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+
+    assert summary["live_real"]["runtime"]["running"] is True
+    assert summary["live_real"]["runtime"]["started_at"] == "2026-06-14T08:00:00Z"
+    assert summary["live_real"]["soak"]["submitted_count"] == 1
+    assert summary["live_real"]["soak"]["latest_action"] == "BUY_DOWN"
+    assert summary["paper_monitor"]["runtime"]["running"] is True
+    assert summary["paper_monitor"]["runtime"]["uptime_seconds"] == 4200
+    assert summary["paper_monitor"]["checkpoint_age_seconds"] is not None
+
+
+def test_paper_monitor_auto_detects_latest_aligned_prod_checkpoint(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.delenv("DASHBOARD_RUN_SOURCE", raising=False)
+    monkeypatch.delenv("RUN_SOURCE", raising=False)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+
+    old_path = checkpoint_dir / "paper_live_1h4h.json"
+    latest_path = checkpoint_dir / "paper_aligned_prod_shift1.json"
+    _write_json(old_path, {"balance": 500.0})
+    _write_json(latest_path, {"balance": 711.22})
+    os.utime(old_path, (1_000, 1_000))
+    os.utime(latest_path, (2_000, 2_000))
+
+    summary = server._paper_monitor_summary()
+
+    assert summary["run_source"] == "paper_aligned_prod_shift1"
+    assert summary["checkpoint"].endswith("paper_aligned_prod_shift1.json")
+    assert summary["balance"] == 711.22
+
+
 def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -156,6 +527,273 @@ def test_live_safety_includes_dryrun_ledger_and_gate_summary(tmp_path, monkeypat
     assert checks["minimum_allowance"]["value"] == 0.0
 
 
+def test_live_safety_funding_balance_uses_gate_usdc_balance(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+    _write_json(
+        report_dir / "polymarket_clob_allowance_audit_20260611_182608.json",
+        {
+            "checks": [
+                {"name": "minimum_balance", "ok": False, "value": 0.0, "expected": ">= 5.0"},
+                {"name": "minimum_allowance", "ok": False, "value": 0.0, "expected": ">= 5.0"},
+                {"name": "readonly_get_balance", "ok": True},
+                {"name": "readonly_get_balance_allowance", "ok": True},
+                {"name": "readonly_authenticated_client", "ok": True},
+            ],
+            "network": {
+                "calls": [
+                    {"name": "get_balance_allowance", "balance": 0.0, "min_allowance": 0.0, "allowance_count": 3}
+                ]
+            },
+        },
+    )
+
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 48.367711,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {"funding_ready": True},
+            "market_probes": [{"direction": "UP", "ok": True, "quote_executable": True}],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 48.367711, "expected": ">= 1.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 15.0, "expected": ">= 1.0"},
+            ],
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["funding"]["balance"] == 48.367711
+    assert summary["funding"]["min_allowance"] == 15.0
+    assert checks["minimum_balance"]["value"] == 48.367711
+    assert checks["minimum_allowance"]["value"] == 15.0
+
+
+def test_live_safety_funding_prefers_fresh_preflight_gate_account(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 48.867711,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {"funding_ready": True},
+            "market_probes": [{"direction": "UP", "ok": True, "quote_executable": True}],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 48.867711, "expected": ">= 1.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 15.0, "expected": ">= 1.0"},
+            ],
+        },
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {
+                "gate_ready": True,
+                "smoke_mode": "preview",
+                "open_orders": 0,
+                "settled": 0,
+                "risk_ok": True,
+            },
+            "components": {
+                "gate": {
+                    "ok": True,
+                    "ready_for_live_smoke": True,
+                    "blockers": [],
+                    "account": {
+                        "authenticated": True,
+                        "orders_read_ok": True,
+                        "balance_read_ok": True,
+                        "allowance_read_ok": True,
+                        "open_orders_count": 0,
+                        "usdc_balance": 48.367711,
+                        "min_allowance": 25.0,
+                        "allowance_count": 3,
+                    },
+                    "funding_requirements": {
+                        "funding_ready": True,
+                        "balance_shortfall_usdc": 0.0,
+                        "allowance_shortfall_usdc": 0.0,
+                    },
+                    "market_probes": [{"direction": "UP", "ok": True, "quote_executable": True}],
+                    "checks": [
+                        {"name": "clob_account_authenticated", "ok": True},
+                        {"name": "account_balance_read_ok", "ok": True},
+                        {"name": "account_allowance_read_ok", "ok": True},
+                        {"name": "account_open_orders_read_ok", "ok": True},
+                        {"name": "balance_meets_minimum", "ok": True, "value": 48.367711, "expected": ">= 1.0"},
+                        {"name": "allowance_meets_minimum", "ok": True, "value": 25.0, "expected": ">= 1.0"},
+                    ],
+                },
+                "guarded_smoke": {"submitted": False, "mode": "preview"},
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["funding"]["balance"] == 48.367711
+    assert summary["funding"]["min_allowance"] == 25.0
+    assert checks["minimum_balance"]["value"] == 48.367711
+    assert checks["minimum_allowance"]["value"] == 25.0
+
+
+def test_live_safety_funding_uses_latest_preflight_gate_account_even_when_stale(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
+
+    _write_json(
+        report_dir / "live_trade_gate_latest.json",
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 48.867711,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {"funding_ready": True},
+            "market_probes": [{"direction": "UP", "ok": True, "quote_executable": True}],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 48.867711, "expected": ">= 1.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 15.0, "expected": ">= 1.0"},
+            ],
+        },
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "blockers": [],
+            "summary": {
+                "gate_ready": True,
+                "smoke_mode": "preview",
+                "open_orders": 0,
+                "settled": 0,
+                "risk_ok": True,
+            },
+            "components": {
+                "gate": {
+                    "ok": True,
+                    "ready_for_live_smoke": True,
+                    "blockers": [],
+                    "account": {
+                        "authenticated": True,
+                        "orders_read_ok": True,
+                        "balance_read_ok": True,
+                        "allowance_read_ok": True,
+                        "open_orders_count": 0,
+                        "usdc_balance": 48.367711,
+                        "min_allowance": 25.0,
+                        "allowance_count": 3,
+                    },
+                    "funding_requirements": {
+                        "funding_ready": True,
+                        "balance_shortfall_usdc": 0.0,
+                        "allowance_shortfall_usdc": 0.0,
+                    },
+                    "market_probes": [{"direction": "UP", "ok": True, "quote_executable": True}],
+                    "checks": [
+                        {"name": "clob_account_authenticated", "ok": True},
+                        {"name": "account_balance_read_ok", "ok": True},
+                        {"name": "account_allowance_read_ok", "ok": True},
+                        {"name": "account_open_orders_read_ok", "ok": True},
+                        {"name": "balance_meets_minimum", "ok": True, "value": 48.367711, "expected": ">= 1.0"},
+                        {"name": "allowance_meets_minimum", "ok": True, "value": 25.0, "expected": ">= 1.0"},
+                    ],
+                },
+                "guarded_smoke": {"submitted": False, "mode": "preview"},
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+    checks = {item["key"]: item for item in summary["checklist"]}
+
+    assert summary["preflight_chain"]["fresh"] is False
+    assert summary["funding"]["balance"] == 48.367711
+    assert summary["funding"]["min_allowance"] == 25.0
+    assert checks["minimum_balance"]["value"] == 48.367711
+    assert checks["minimum_allowance"]["value"] == 25.0
+
+
 def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -180,6 +818,10 @@ def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "open_orders": [{"status": "OPEN", "created_at": datetime.now(timezone.utc).isoformat()}],
         },
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders.json",
+        [{"status": "OPEN", "created_at": datetime.now(timezone.utc).isoformat()}],
     )
 
     summary = server._safety_report_summary()
@@ -711,6 +1353,176 @@ def test_live_safety_prefers_live_gate_funding_over_older_allowance_audit(tmp_pa
     assert summary["funding"]["allowance_expected"] == ">= 10.0"
     assert checks["minimum_balance"]["expected"] == ">= 10.0"
     assert checks["minimum_allowance"]["expected"] == ">= 10.0"
+
+
+def test_live_safety_refreshes_stale_gate_account_balance(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "CLOB_READONLY_MAX_AGE_SECONDS", 300)
+
+    gate_path = report_dir / "live_trade_gate_latest.json"
+    _write_json(
+        gate_path,
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 48.867711,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {
+                "required_min_balance_usdc": 10.0,
+                "required_smoke_notional_usdc": 2.6,
+                "required_min_allowance_usdc": 10.0,
+                "balance_shortfall_usdc": 0.0,
+                "smoke_notional_shortfall_usdc": 0.0,
+                "allowance_shortfall_usdc": 0.0,
+                "funding_ready": True,
+            },
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 48.867711, "expected": ">= 10.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 15.0, "expected": ">= 10.0"},
+            ],
+        },
+    )
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=900)).timestamp()
+    os.utime(gate_path, (old_ts, old_ts))
+
+    def fake_snapshot():
+        return {
+            "ok": True,
+            "source": "live_clob_account_refresh",
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 40.698765,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+                "min_allowance_spender": "spender-a",
+            },
+        }
+
+    monkeypatch.setattr(server, "_live_clob_account_snapshot", fake_snapshot)
+
+    summary = server._safety_report_summary()
+
+    assert summary["funding"]["balance"] == 40.698765
+    assert summary["clob_readonly"]["balance"] == 40.698765
+    assert summary["clob_readonly"]["account_source"] == "live_clob_account_refresh"
+    assert summary["funding"]["balance_shortfall_usdc"] == 0.0
+
+
+def test_clob_local_env_overrides_stale_process_clob_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("CLOB_API_KEY", "stale-key")
+    env_path = tmp_path / ".env.clob.local"
+    env_path.write_text("CLOB_API_KEY=fresh-key\nDASHBOARD_ONLY=keep-process\n", encoding="utf-8")
+
+    server._load_env_file(env_path, override_keys=server.CLOB_ENV_KEYS)
+
+    assert os.environ["CLOB_API_KEY"] == "fresh-key"
+    assert os.environ["DASHBOARD_ONLY"] == "keep-process"
+
+
+def test_live_safety_surfaces_current_clob_open_orders(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "CLOB_READONLY_MAX_AGE_SECONDS", 300)
+
+    gate_path = report_dir / "live_trade_gate_latest.json"
+    _write_json(
+        gate_path,
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 40.0,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+            "funding_requirements": {"funding_ready": True},
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True, "value": 40.0, "expected": ">= 10.0"},
+                {"name": "allowance_meets_minimum", "ok": True, "value": 15.0, "expected": ">= 10.0"},
+            ],
+        },
+    )
+    old_ts = (datetime.now(timezone.utc) - timedelta(seconds=900)).timestamp()
+    os.utime(gate_path, (old_ts, old_ts))
+
+    def fake_snapshot():
+        return {
+            "ok": True,
+            "source": "live_clob_account_refresh",
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 1,
+                "open_orders": [
+                    {
+                        "id": "0xabc",
+                        "market": "btc-updown-5m-1781466600",
+                        "asset_id": "token-down",
+                        "side": "BUY",
+                        "outcome": "Down",
+                        "price": "0.46",
+                        "original_size": "5",
+                        "size_matched": "1",
+                        "status": "LIVE",
+                        "created_at": "2026-06-14T19:50:00Z",
+                        "expiration": "2026-06-14T19:55:00Z",
+                    }
+                ],
+                "usdc_balance": 40.698765,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+        }
+
+    monkeypatch.setattr(server, "_live_clob_account_snapshot", fake_snapshot)
+
+    audit = server._safety_report_summary()["clob_readonly"]
+
+    assert audit["open_orders_count"] == 1
+    assert audit["open_orders"][0]["order_id"] == "0xabc"
+    assert audit["open_orders"][0]["market"] == "btc-updown-5m-1781466600"
+    assert audit["open_orders"][0]["price"] == 0.46
+    assert audit["open_orders"][0]["original_size"] == 5.0
+    assert audit["open_orders"][0]["matched_size"] == 1.0
+    assert audit["open_orders"][0]["remaining_size"] == 4.0
 
 
 def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
@@ -1345,11 +2157,90 @@ def test_live_page_uses_configured_source_and_label():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert 'usePolling<StatusData>("/api/status", 5000)' in source
-    assert 'usePolling<EventItem[]>("/api/events?limit=80", 5000)' in source
+    assert 'usePolling<EventItem[]>(`/api/events?source=${eventSource}&limit=80`, 5000)' in source
+    assert 'const eventSource = isLiveRealTab ? "live_real" : "paper"' in source
     assert 'usePolling<TradeItem[]>("/api/trades?limit=200", 5000)' in source
     assert "source_label?: string" in source
     assert "const sourceLabel = safety?.source_label ?? safety?.run_source ?? \"Source\"" in source
     assert "source=live" not in source
+
+
+def test_api_events_live_real_reads_prediction_artifact_history(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "DB_PATH", db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE events (
+            source TEXT,
+            kline_n INTEGER,
+            action TEXT,
+            dir5 TEXT,
+            dir4 TEXT,
+            regime TEXT,
+            filt_passed INTEGER,
+            reason TEXT,
+            created_at TEXT,
+            details TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+    records = [
+        {
+            "decision_id": "2026-06-14T18:25:00Z:HOLD",
+            "decision_bar_ts": "2026-06-14T18:25:00Z",
+            "artifact_created_at": "2026-06-14T18:25:09Z",
+            "action": "HOLD",
+            "passed": False,
+            "p5_up": 0.51,
+            "p1_up": 0.49,
+            "p4_up": 0.50,
+            "reason_code": "long_score_low",
+            "reason": "blocked",
+            "failure_codes": ["long_score_low"],
+        },
+        {
+            "decision_id": "2026-06-14T18:30:00Z:BUY_UP",
+            "decision_bar_ts": "2026-06-14T18:30:00Z",
+            "artifact_created_at": "2026-06-14T18:30:09Z",
+            "entry_ts": "2026-06-14T18:35:00Z",
+            "settle_ts": "2026-06-14T18:40:00Z",
+            "action": "BUY_UP",
+            "passed": True,
+            "p5_up": 0.8,
+            "p1_up": 0.7333,
+            "p4_up": 0.6167,
+            "long_score": 0.71,
+            "short_score": 0.18,
+            "reason_code": "long_passed",
+            "reason": "LONG passed",
+            "failure_codes": [],
+        },
+    ]
+    (checkpoint_dir / "aligned_prod_shift1_predictions.jsonl").write_text(
+        "\n".join(json.dumps(record) for record in records),
+        encoding="utf-8",
+    )
+
+    with server.app.test_client() as client:
+        events = client.get("/api/events?source=live_real&limit=10").get_json()
+        stats = client.get("/api/signal-stats?source=live_real").get_json()
+
+    assert [event["action"] for event in events] == ["BUY_UP", "HOLD"]
+    assert events[0]["source"] == "live_real"
+    assert events[0]["source_label"] == "Live Real"
+    assert events[0]["filt_passed"] == 1
+    assert events[0]["reason"] == "LONG passed"
+    assert json.loads(events[0]["details"])["p5_up"] == 0.8
+    assert json.loads(events[0]["details"])["reason_code"] == "long_passed"
+    assert stats["source"] == "live_real"
+    assert stats["total"] == 2
+    assert stats["passed"] == 1
 
 
 def test_status_bar_uses_source_label_and_configured_status_source():
@@ -1416,16 +2307,37 @@ def test_live_page_formats_funding_amounts_with_money():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert 'label={`Balance ${fundingBalance == null ? "-" : money(fundingBalance)}`}' in source
-    assert 'label={`Allowance ${fundingAllowance == null ? "-" : money(fundingAllowance)}`}' in source
+    assert "const compactAllowance" in source
+    assert 'return "Approved"' in source
+    assert "const fundingAllowanceLabel = compactAllowance(fundingAllowance, safety?.funding?.allowance_ok === true || fundingReady)" in source
+    assert 'label={`Allowance ${fundingAllowanceLabel}`}' in source
     assert 'HealthTile label="Balance" value={fundingBalance == null ? "-" : money(fundingBalance)}' in source
-    assert 'HealthTile label="Allowance" value={fundingAllowance == null ? "-" : money(fundingAllowance)}' in source
+    assert 'HealthTile label="Allowance" value={fundingAllowanceLabel}' in source
+
+
+def test_live_page_compacts_live_real_allowance_and_guards_card_overflow():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "compactAllowance(funding?.min_allowance" in source
+    assert 'StatCard label="CLOB Allowance"' not in source
+    assert 'className="rounded-md border border-zinc-800 bg-zinc-950/70 p-4 min-w-0"' in source
+    assert "mt-3 truncate font-mono text-2xl font-semibold" in source
+
+
+def test_live_readiness_checklist_compacts_allowance_values():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "const displayChecklistValue" in source
+    assert 'key.includes("allowance")' in source
+    assert "{displayChecklistValue(item)}" in source
+    assert "{String(item.value ?? \"-\")}" not in source
 
 
 def test_live_page_mounts_today_cockpit():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert "function TodayCockpit" in source
-    assert "<TodayCockpit today={safety?.today}" in source
+    assert "<TodayCockpit today={todayStats}" in source
     assert "safety?.today" in source
     assert "Maker Target" in source
     assert "0.49" in source
@@ -1438,26 +2350,43 @@ def test_live_page_uses_today_summary_for_top_kpis():
     assert "const todayPnl = todayStats?.trades.pnl_usdc" in source
     assert "const todaySettled = todayStats?.trades.settled" in source
     assert "const todayWinRate = todayStats?.trades.win_rate" in source
+    assert "const todayPassRate = todayStats?.signals.pass_rate" in source
+    assert "const paperTotalWinRate = paperMonitor?.stats.win_rate" in source
+    assert "const paperTotalPassRate = paperMonitor?.signals.pass_rate" in source
+    assert 'StatCard label="Total Win Rate" value={percent(paperTotalWinRate)}' in source
+    assert 'StatCard label="Today Win Rate" value={percent(todayWinRate)}' in source
+    assert 'StatCard label="Total Pass Rate" value={percent(paperTotalPassRate)}' in source
+    assert 'StatCard label="Today Pass Rate" value={percent(todayPassRate)}' in source
     assert 'StatCard label="Today PnL" value={signedMoney(todayPnl)} sub={`${todaySettled} settled today`}' in source
-    assert 'StatCard label="W/L" value={`${todayWins}/${todayLosses}`} sub="wins / losses today"' in source
-    assert 'StatCard label="Win Rate" value={percent(todayWinRate)} sub={`${todayWins}W / ${todayLosses}L today`}' in source
 
 
 def test_live_page_defaults_to_trading_console_layout():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
-    assert "Trading Console" in source
+    assert "Trading Console" not in source
     assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
     assert 'StatCard label="CLOB Balance"' in source
-    assert 'StatCard label="CLOB Allowance"' in source
     assert 'StatCard label="Open/Pending"' in source
     assert 'StatCard label="Today PnL"' in source
-    assert 'StatCard label="W/L"' in source
-    assert 'StatCard label="Win Rate"' in source
-    assert 'StatCard label="Dry-run"' in source
+    assert 'StatCard label="Total Win Rate"' in source
+    assert 'StatCard label="Today Win Rate"' in source
+    assert 'StatCard label="Total Pass Rate"' in source
+    assert 'StatCard label="Today Pass Rate"' in source
+    assert 'StatCard label="Real Win Rate"' in source
     assert 'StatCard label="Mode"' in source
     assert 'StatCard label="Readiness"' not in source
     assert 'StatCard label="Health"' not in source
+
+
+def test_live_page_scopes_real_order_lock_badge_to_live_real_mode():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert 'const modeLabel = isPaperMonitorTab ? "Paper Monitor" : "Live Real";' in source
+    assert 'const modeStatus = isPaperMonitorTab ? "Simulation only" : safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked";' in source
+    assert "const modeStatusOk = isPaperMonitorTab ? true : !safety?.real_orders_enabled;" in source
+    assert '<span className="rounded border border-zinc-800 px-2 py-1 text-xs text-zinc-400">{modeLabel}</span>' in source
+    assert "<StatusPill ok={modeStatusOk} label={modeStatus} />" in source
+    assert '<StatusPill ok={!safety?.real_orders_enabled} label={safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />' not in source
 
 
 def test_live_page_moves_audit_panels_into_diagnostics_section():
@@ -1478,15 +2407,30 @@ def test_live_page_moves_audit_panels_into_diagnostics_section():
 def test_live_page_groups_equity_curve_with_btc_market_chart_on_main_console():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
-    btc_idx = source.index("<BTCMarketChart />")
-    equity_idx = source.index('Panel title="Equity Curve"')
-    status_idx = source.index("<TradingStatusPanel")
-    diagnostics_idx = source.index('title="Live Diagnostics"')
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+    paper_section = source[source.index('activeTradingTab === "paper-monitor"'):]
 
-    assert btc_idx < equity_idx < status_idx < diagnostics_idx
+    assert "<BTCMarketChart />" in live_section
+    assert 'EquityPanel title="Equity Curve" sub="real settled ledger"' in live_section
+    assert "data={liveEquityPoints}" in live_section
+    assert "<BTCMarketChart />" in paper_section
+    assert 'EquityPanel title="Equity Curve" sub="paper checkpoint trades"' in paper_section
+    assert "data={paperEquityPoints}" in paper_section
+    assert "<PaperRuntimePanel paperMonitor={paperMonitor}" in paper_section
     assert '2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]' in source
     assert 'xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.75fr)]' in source
     assert '<div className="min-w-0 space-y-5">' not in source
+
+
+def test_live_page_uses_source_scoped_equity_summaries():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "equity: EquitySummary" in source
+    assert "const liveEquity = liveReal?.equity" in source
+    assert "const paperEquity = paperMonitor?.equity" in source
+    assert "const liveEquityPoints = liveEquity?.points?.length ? liveEquity.points : [fundingBalance]" in source
+    assert "const paperEquityPoints = paperEquity?.points?.length ? paperEquity.points : [paperMonitor?.balance ?? INITIAL_BALANCE]" in source
+    assert "const equity = useMemo" not in source
 
 
 def test_live_page_uses_signal_freshness_for_top_signals_kpi():
@@ -1500,7 +2444,7 @@ def test_live_page_uses_signal_freshness_for_top_signals_kpi():
     assert 'StatCard label="Signals"' not in source
 
 
-def test_live_page_surfaces_dryrun_safety_in_top_kpis():
+def test_live_page_surfaces_dryrun_safety_in_diagnostics():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert "const dryrun = safety?.dryrun" in source
@@ -1508,8 +2452,8 @@ def test_live_page_surfaces_dryrun_safety_in_top_kpis():
     assert "const dryrunValue = `${dryrun?.would_place_count ?? 0}/${dryrun?.ledger_count ?? 0}`" in source
     assert "const dryrunSub = `${dryrunSubmitted} submitted / ${dryrun?.blocked_count ?? 0} blocked`" in source
     assert "const dryrunTone = dryrunSubmitted === 0 ? \"text-emerald-300\" : \"text-rose-300\"" in source
-    assert 'StatCard label="Dry-run" value={dryrunValue} sub={dryrunSub}' in source
-    assert "tone={dryrunTone}" in source
+    assert '<span className="text-zinc-500">Dry-run</span>' in source
+    assert '<span className={`font-mono ${dryrunTone}`}>{dryrunValue}</span>' in source
     assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
 
 
@@ -1528,6 +2472,14 @@ def test_live_page_uses_clob_funding_for_top_balance_kpi():
     assert "value={money(fundingBalance)}" in source
     assert "sub={fundingBalanceSub}" in source
     assert "tone={fundingBalanceTone}" in source
+
+
+def test_live_page_live_real_balance_subtitle_does_not_use_paper_today_pnl():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "`Today ${signedMoney(todayPnl)}`" not in source
+    assert "const fundingBalanceSub" in source
+    assert '"CLOB account"' in source
 
 
 def test_live_page_uses_trade_queue_for_top_pending_kpi():
@@ -1774,6 +2726,72 @@ def test_live_page_surfaces_clob_readonly_panel():
     assert "probe.best_ask" in source
 
 
+def test_live_page_surfaces_current_clob_orders_panel():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+
+    assert "CurrentClobOrdersPanel" in source
+    assert "<CurrentClobOrdersPanel audit={safety?.clob_readonly}" in live_section
+    assert "Current CLOB Orders" in source
+    assert "audit?.open_orders" in source
+    assert "order.remaining_size" in source
+    assert "No current CLOB open orders" in source
+
+
+def test_live_page_separates_live_real_and_paper_monitor_tabs():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    app_source = Path("web/src/App.tsx").read_text(encoding="utf-8")
+
+    assert "live_real?:" in source
+    assert "paper_monitor?:" in source
+    assert 'type TradingTab = "live-real" | "paper-monitor";' in source
+    assert "activeTradingTab: TradingTab" in source
+    assert "const setActiveTradingTab = (next: TradingTab) => setTab(next)" in app_source
+    assert '"live-real"' in source
+    assert '"paper-monitor"' in source
+    assert "Live Real" in app_source
+    assert "Paper Monitor" in app_source
+    assert "<Live activeTradingTab={activeTradingTab}" in app_source
+    assert "const liveReal = safety?.live_real" in source
+    assert "const paperMonitor = safety?.paper_monitor" in source
+    assert "<LiveSoakPanel liveReal={liveReal}" in source
+    assert "<PaperRuntimePanel paperMonitor={paperMonitor}" in source
+
+
+def test_app_replaces_live_monitor_nav_with_live_real_and_paper_monitor():
+    source = Path("web/src/App.tsx").read_text(encoding="utf-8")
+
+    assert 'import Live, { type TradingTab } from "./pages/Live";' in source
+    assert 'type Tab = TradingTab | "backtest" | "compare";' in source
+    assert '["live-real", "Live Real", Activity]' in source
+    assert '["paper-monitor", "Paper Monitor", Activity]' in source
+    assert 'const activeTradingTab = tab === "paper-monitor" ? "paper-monitor" : "live-real";' in source
+    assert "setActiveTradingTab" in source
+    assert "<Live activeTradingTab={activeTradingTab}" in source
+
+
+def test_live_page_keeps_paper_trade_tables_out_of_live_real_tab():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+    paper_section = source[source.index('activeTradingTab === "paper-monitor"'):]
+
+    assert "<LiveRealOrdersPanel liveReal={liveReal}" in live_section
+    assert "Completed Trades" not in live_section
+    assert "Pending Queue" not in live_section
+    assert "Completed Trades" in paper_section
+    assert "Pending Queue" in paper_section
+
+
+def test_live_page_shows_live_real_recent_prediction_signals():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+
+    assert 'Panel title="Recent Signals" sub="formal live prediction artifacts"' in live_section
+    assert "Waiting for formal live decisions" in live_section
+    assert "(events ?? []).slice(0, 14).map((event)" in live_section
+
+
 def test_live_page_surfaces_report_freshness_panel():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -1902,16 +2920,28 @@ def test_status_bar_surfaces_funding_shortfalls():
     assert "Allowance Gap" in source
 
 
+def test_status_bar_compacts_unbounded_allowance():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "const compactAllowance" in source
+    assert 'return "Approved"' in source
+    assert "const fundingAllowanceLabel = compactAllowance(safety?.funding?.min_allowance, safety?.funding?.allowance_ok === true || fundingReady)" in source
+    assert 'DetailTile label="Allowance" value={fundingAllowanceLabel}' in source
+    assert "displayChecklistValue(item)" in source
+    assert 'value={String(safety?.funding?.min_allowance ?? "-")}' not in source
+
+
 def test_status_bar_surfaces_today_summary():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
     assert "today?: {" in source
     assert "const today = safety?.today" in source
-    assert "Today ${signedMoney(todayPnl)}" in source
+    assert "Paper Today ${signedMoney(todayPnl)}" in source
     assert "Signal ${todaySignalsPassed}/${todaySignalsTotal}" in source
     assert "W/L ${todayWins}/${todayLosses}" in source
-    assert "Today PnL" in source
-    assert "Today Signals" in source
+    assert "Paper Today PnL" in source
+    assert "Paper Today Signals" in source
+    assert "Paper Today W/L" in source
 
 
 def test_status_bar_surfaces_today_activity_freshness():

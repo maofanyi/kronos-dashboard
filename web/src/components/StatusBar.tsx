@@ -203,6 +203,21 @@ const money = (value?: number | null) =>
         maximumFractionDigits: 2,
       })}`;
 
+const compactAllowance = (value?: number | null, approved = false) => {
+  if (value == null) return "-";
+  if (approved && value >= 1_000_000) return "Approved";
+  if (value >= 1_000_000) return "> $1M";
+  return money(value);
+};
+
+const displayChecklistValue = (item: ChecklistItem) => {
+  const key = item.key.toLowerCase();
+  if (key.includes("allowance") && typeof item.value === "number") {
+    return compactAllowance(item.value, item.ok);
+  }
+  return String(item.value ?? "-");
+};
+
 const signedMoney = (value?: number | null) => {
   if (value == null) return "-";
   return `${value >= 0 ? "+" : ""}${money(value)}`;
@@ -408,6 +423,7 @@ export default function StatusBar() {
     safety?.funding?.balance_shortfall_usdc ?? 0,
     safety?.funding?.allowance_shortfall_usdc ?? 0,
   );
+  const fundingAllowanceLabel = compactAllowance(safety?.funding?.min_allowance, safety?.funding?.allowance_ok === true || fundingReady);
   const needsReview = Boolean(error) || cooling || liveEnabled || alertCritical > 0 || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
   const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? "aligned-prod";
   const operator = safety?.operator_summary;
@@ -446,7 +462,7 @@ export default function StatusBar() {
                 : "Risk -"
             }
           />
-          <StatusChip ok={todayPnl >= 0} label={`Today ${signedMoney(todayPnl)}`} />
+          <StatusChip ok={todayPnl >= 0} label={`Paper Today ${signedMoney(todayPnl)}`} />
           <StatusChip ok={todaySignalsOk} label={`Signal ${todaySignalsPassed}/${todaySignalsTotal}`} />
           <StatusChip ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} label={`W/L ${todayWins}/${todayLosses}`} />
           <StatusChip ok={todayActivityFresh} label={`Activity ${latestSignalAge}`} />
@@ -491,15 +507,15 @@ export default function StatusBar() {
               <DetailTile label="Mode" value={`${safety?.mode?.toUpperCase() ?? "PAPER"} / ${safety?.kill_switch?.state ?? "locked"}`} ok={locked} />
               <DetailTile label="CLOB Auth" value={safety?.clob?.authenticated ? "OK" : "-"} ok={safety?.clob?.authenticated} />
               <DetailTile label="Balance" value={money(safety?.funding?.balance)} ok={safety?.funding?.balance_ok} />
-              <DetailTile label="Allowance" value={String(safety?.funding?.min_allowance ?? "-")} ok={safety?.funding?.allowance_ok} />
+              <DetailTile label="Allowance" value={fundingAllowanceLabel} ok={safety?.funding?.allowance_ok} />
               <DetailTile label="Balance Gap" value={money(safety?.funding?.balance_shortfall_usdc)} ok={(safety?.funding?.balance_shortfall_usdc ?? 0) === 0} />
               <DetailTile label="Allowance Gap" value={money(safety?.funding?.allowance_shortfall_usdc)} ok={(safety?.funding?.allowance_shortfall_usdc ?? 0) === 0} />
               <DetailTile label="Operator Stage" value={operatorStage} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
               <DetailTile label="Next Action" value={operatorNextAction} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
               <DetailTile label="Alerts" value={`${alertCritical}/${alertActive}`} ok={alertCritical === 0} />
-              <DetailTile label="Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
-              <DetailTile label="Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
-              <DetailTile label="Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
+              <DetailTile label="Paper Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
+              <DetailTile label="Paper Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
+              <DetailTile label="Paper Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
               <DetailTile label="Latest Signal" value={latestSignalAge} ok={todayActivityFresh} />
               <DetailTile label="Latest Dry-run" value={latestDryrunAge} ok={latestDryrunFresh} />
               <DetailTile
@@ -577,7 +593,7 @@ export default function StatusBar() {
                         {item.ok ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0 text-emerald-300" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-300" />}
                         <span className="truncate text-zinc-200">{item.label}</span>
                       </div>
-                      <span className={`shrink-0 font-mono ${item.ok ? "text-emerald-300" : "text-amber-300"}`}>{String(item.value ?? "-")}</span>
+                      <span className={`shrink-0 font-mono ${item.ok ? "text-emerald-300" : "text-amber-300"}`}>{displayChecklistValue(item)}</span>
                     </div>
                     {item.expected && <div className="mt-1 truncate text-[11px] text-zinc-600">expected {item.expected}</div>}
                   </div>

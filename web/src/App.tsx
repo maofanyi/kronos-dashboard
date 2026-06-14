@@ -4,18 +4,21 @@ import BTCPriceBar from "./components/BTCPriceBar";
 import StatusBar from "./components/StatusBar";
 import Backtest from "./pages/Backtest";
 import Compare from "./pages/Compare";
-import Live from "./pages/Live";
+import Live, { type TradingTab } from "./pages/Live";
 
-type Tab = "live" | "backtest" | "compare";
+type Tab = TradingTab | "backtest" | "compare";
 
 const tabs: Array<[Tab, string, typeof Activity]> = [
-  ["live", "实时监控", Activity],
-  ["backtest", "回测", BarChart3],
-  ["compare", "对比", GitCompare],
+  ["live-real", "Live Real", Activity],
+  ["paper-monitor", "Paper Monitor", Activity],
+  ["backtest", "Backtest", BarChart3],
+  ["compare", "Compare", GitCompare],
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("live");
+  const [tab, setTab] = useState<Tab>("live-real");
+  const activeTradingTab = tab === "paper-monitor" ? "paper-monitor" : "live-real";
+  const setActiveTradingTab = (next: TradingTab) => setTab(next);
 
   return (
     <div className="min-h-screen bg-[#090a0f] text-zinc-100">
@@ -26,7 +29,13 @@ export default function App() {
         {tabs.map(([key, label, Icon]) => (
           <button
             key={key}
-            onClick={() => setTab(key)}
+            onClick={() => {
+              if (key === "live-real" || key === "paper-monitor") {
+                setActiveTradingTab(key);
+              } else {
+                setTab(key);
+              }
+            }}
             className={`flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-medium transition-colors ${
               tab === key
                 ? "border-emerald-400 text-emerald-300"
@@ -40,7 +49,7 @@ export default function App() {
       </div>
 
       <div className="p-4 lg:p-5">
-        {tab === "live" && <Live />}
+        {(tab === "live-real" || tab === "paper-monitor") && <Live activeTradingTab={activeTradingTab} />}
         {tab === "backtest" && <Backtest />}
         {tab === "compare" && <Compare />}
       </div>
