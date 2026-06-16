@@ -126,6 +126,14 @@ def _paper_ledger_path():
     return KRONOS_CHECKPOINT_DIR / f"{_paper_run_source()}_ledger.json"
 
 
+def _live_real_ledger_path():
+    configured = (os.environ.get("DASHBOARD_LIVE_REAL_LEDGER") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_CHECKPOINT_DIR / path
+    return KRONOS_CHECKPOINT_DIR / "live_real_orders_current_next.json"
+
+
 def _safe_feature_path(rel_path: str):
     root = KRONOS_FEATURE_DIR.resolve()
     candidate = (root / rel_path).resolve()
@@ -1291,7 +1299,7 @@ def _live_soak_summary():
 
 
 def _live_real_summary(limits_override=None, current_balance=None):
-    ledger_path = KRONOS_CHECKPOINT_DIR / "live_real_orders.json"
+    ledger_path = _live_real_ledger_path()
     records = _rows_from_ledger_payload(_read_json(ledger_path))
     risk = _risk_summary_from_records(
         records,

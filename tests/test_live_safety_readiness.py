@@ -114,7 +114,7 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
         },
     )
     _write_json(
-        checkpoint_dir / "live_real_orders.json",
+        checkpoint_dir / "live_real_orders_current_next.json",
         [
             {
                 "status": "SETTLED",
@@ -138,7 +138,7 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
     assert summary["live_real"]["risk"]["metrics"]["losses"] == 1
     assert summary["live_real"]["risk"]["metrics"]["win_rate"] == 0.0
     assert summary["live_real"]["stats"]["losses"] == 1
-    assert summary["live_real"]["ledger"].endswith("live_real_orders.json")
+    assert summary["live_real"]["ledger"].endswith("live_real_orders_current_next.json")
 
 
 def test_paper_monitor_exposes_total_win_rate_from_checkpoint():
@@ -196,7 +196,7 @@ def test_live_real_risk_limits_follow_latest_preflight_profile(monkeypatch, tmp_
         "_process_summary",
         lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
     )
-    _write_json(checkpoint_dir / "live_real_orders.json", [])
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
     _write_json(
         report_dir / "live_preflight_chain_latest.json",
         {
@@ -267,7 +267,7 @@ def test_live_safety_summaries_include_source_scoped_equity_curves(monkeypatch, 
         },
     )
     _write_json(
-        checkpoint_dir / "live_real_orders.json",
+        checkpoint_dir / "live_real_orders_current_next.json",
         [
             {
                 "order_id": "cancelled",
@@ -338,7 +338,7 @@ def test_live_safety_readiness_uses_live_real_risk_not_paper_risk(monkeypatch, t
             ]
         },
     )
-    _write_json(checkpoint_dir / "live_real_orders.json", [])
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
     _write_json(
         report_dir / "live_preflight_chain_latest.json",
         {
@@ -820,7 +820,7 @@ def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
         },
     )
     _write_json(
-        checkpoint_dir / "live_real_orders.json",
+        checkpoint_dir / "live_real_orders_current_next.json",
         [{"status": "OPEN", "created_at": datetime.now(timezone.utc).isoformat()}],
     )
 

@@ -1514,7 +1514,7 @@ function LiveRealOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"] 
   return (
     <Panel
       title="Live Real Orders"
-      sub="canonical live_real_orders ledger"
+      sub="current-next live ledger"
       right={<span className="font-mono text-xs text-zinc-500">{liveReal?.orders.total ?? 0} records</span>}
     >
       <div className="grid gap-4 p-4 lg:grid-cols-[minmax(0,1fr)_minmax(280px,0.55fr)]">
