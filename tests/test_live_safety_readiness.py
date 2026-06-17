@@ -117,6 +117,20 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
         checkpoint_dir / "live_real_orders_current_next.json",
         [
             {
+                "status": "NO_FILL",
+                "created_at": now,
+                "updated_at": now,
+                "filled_size": 0,
+                "price": 0.50,
+                "direction": "UP",
+                "execution_result": "no_fill",
+                "actual_up_chainlink": True,
+                "signal_would_have_won": True,
+                "market_result_recorded_at": now,
+            },
+            {
+                "order_id": "0xsettled",
+                "market_slug": "btc-updown-5m-test",
                 "status": "SETTLED",
                 "created_at": now,
                 "settled_at": now,
@@ -133,12 +147,20 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
     assert summary["paper_monitor"]["orders"]["pending"] == 1
     assert summary["live_real"]["orders"]["open_or_pending"] == 0
     assert summary["live_real"]["orders"]["settled"] == 1
+    assert summary["live_real"]["orders"]["cancelled"] == 0
+    assert summary["live_real"]["orders"]["no_fill_cancelled"] == 1
+    assert summary["live_real"]["market_results"]["resolved"] == 1
+    assert summary["live_real"]["market_results"]["wins"] == 1
+    assert summary["live_real"]["market_results"]["win_rate"] == 1.0
     assert summary["live_real"]["risk"]["metrics"]["daily_pnl_usdc"] == -0.5
     assert summary["live_real"]["risk"]["metrics"]["wins"] == 0
     assert summary["live_real"]["risk"]["metrics"]["losses"] == 1
     assert summary["live_real"]["risk"]["metrics"]["win_rate"] == 0.0
     assert summary["live_real"]["stats"]["losses"] == 1
     assert summary["live_real"]["ledger"].endswith("live_real_orders_current_next.json")
+    settled_record = next(record for record in summary["live_real"]["order_records"] if record["order_id"] == "0xsettled")
+    assert settled_record["market_slug"] == "btc-updown-5m-test"
+    assert settled_record["pnl"] == -0.5
 
 
 def test_paper_monitor_exposes_total_win_rate_from_checkpoint():
@@ -159,6 +181,27 @@ def test_paper_monitor_exposes_total_win_rate_from_checkpoint():
     assert summary["stats"]["wins"] == 1
     assert summary["stats"]["losses"] == 1
     assert summary["stats"]["win_rate"] == 0.5
+
+
+def test_live_order_records_sort_by_market_settle_time_not_reconcile_time():
+    records = server._live_order_records(
+        [
+            {
+                "order_id": "older-market",
+                "status": "SETTLED",
+                "settle_ts": "2026-06-16T16:05:00Z",
+                "settled_at": "2026-06-17T07:53:00Z",
+            },
+            {
+                "order_id": "newer-market",
+                "status": "SETTLED",
+                "settle_ts": "2026-06-16T16:10:00Z",
+                "settled_at": "2026-06-17T07:53:00Z",
+            },
+        ]
+    )
+
+    assert [record["order_id"] for record in records] == ["newer-market", "older-market"]
 
 
 def test_paper_monitor_exposes_total_signal_pass_rate_from_checkpoint_events(monkeypatch, tmp_path):
@@ -227,6 +270,116 @@ def test_live_real_risk_limits_follow_latest_preflight_profile(monkeypatch, tmp_
     assert risk["limits"]["max_daily_loss_usdc"] == 26.0
     assert risk["limits"]["max_daily_trades"] == 20
     assert risk["checks"][0]["expected"] == "> -26.0"
+
+
+def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    config_dir = tmp_path / "data" / "config"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {
+            "running": "run_prediction_bound_live_formal_supervisor.ps1" in patterns
+            or "run_prediction_bound_live_order.py" in patterns,
+            "matches": [{"pid": 900, "started_at": "2026-06-16T15:50:00Z"}]
+            if "run_prediction_bound_live_formal_supervisor.ps1" in patterns
+            else [{"pid": 111, "started_at": "2026-06-16T16:00:00Z"}]
+            if "run_prediction_bound_live_order.py" in patterns
+            else [],
+            "started_at": "2026-06-16T15:50:00Z"
+            if "run_prediction_bound_live_formal_supervisor.ps1" in patterns
+            else "2026-06-16T16:00:00Z"
+            if "run_prediction_bound_live_order.py" in patterns
+            else None,
+            "uptime_seconds": 660
+            if "run_prediction_bound_live_formal_supervisor.ps1" in patterns
+            else 60
+            if "run_prediction_bound_live_order.py" in patterns
+            else None,
+            "patterns": patterns,
+        },
+    )
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": "2026-06-14T22:42:28Z",
+            "components": {
+                "risk": {
+                    "metrics": {
+                        "limits": {
+                            "max_daily_loss_usdc": 26.0,
+                            "max_daily_trades": 20,
+                            "max_consecutive_losses": 3,
+                            "max_open_or_pending_orders": 1,
+                        }
+                    }
+                }
+            },
+        },
+    )
+    _write_json(
+        config_dir / "aligned_prod_current_next_chainlink_30d30d_m049_shares5_live_params.json",
+        {
+            "live_restart_contract": {
+                "max_daily_loss_usdc": 30.0,
+                "max_open_or_pending_orders": 1,
+            }
+        },
+    )
+    (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
+        "\n".join(
+            [
+                "2026-06-16T23:50:58+08:00 formal_live_supervisor started max_daily_loss=30 max_daily_trades=100 max_consecutive_losses=10 max_open_or_pending=1",
+                "2026-06-16T23:50:58+08:00 run_start stamp=20260616T155058Z",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": "2026-06-16T16:05:21Z",
+            "ok": False,
+            "submitted": False,
+            "reason": "latest prediction did not produce a would_place_order intent",
+            "attempts": 3,
+            "prediction": {
+                "action": "HOLD",
+                "reason_code": "no_side_passed",
+                "decision_id": "formal:20260616T160000Z",
+                "decision_bar_ts": "2026-06-16T16:00:00Z",
+                "entry_ts": "2026-06-16T16:10:00Z",
+                "settle_ts": "2026-06-16T16:15:00Z",
+                "execution_market_shift": "next_period",
+            },
+        },
+    )
+
+    summary = server._safety_report_summary()
+    live_real = summary["live_real"]
+
+    assert live_real["risk"]["limits"]["max_daily_loss_usdc"] == 30.0
+    assert live_real["risk"]["limits"]["max_daily_trades"] == 100
+    assert live_real["risk"]["limits"]["max_consecutive_losses"] == 10
+    assert live_real["runtime"]["running"] is True
+    assert live_real["runtime"]["role"] == "formal_supervisor"
+    assert live_real["runtime"]["started_at"] == "2026-06-16T15:50:00Z"
+    assert "run_prediction_bound_live_formal_supervisor.ps1" in live_real["runtime"]["patterns"]
+    assert live_real["runtime"]["child_runtime"]["started_at"] == "2026-06-16T16:00:00Z"
+    assert live_real["formal"]["available"] is True
+    assert live_real["formal"]["latest_action"] == "HOLD"
+    assert live_real["formal"]["latest_reason"] == "no_side_passed"
 
 
 def test_live_safety_summaries_include_source_scoped_equity_curves(monkeypatch, tmp_path):
@@ -1619,9 +1772,10 @@ def test_live_safety_includes_report_refresh_summary(tmp_path, monkeypatch):
     items = {item["key"]: item for item in refresh["items"]}
 
     assert refresh["ready"] is False
-    assert refresh["total"] == 3
+    assert refresh["total"] == 4
     assert refresh["stale_count"] == 1
     assert refresh["blocked_count"] >= 1
+    assert items["formal_live"]["status"] == "missing"
     assert items["live_gate"]["report"].endswith("live_trade_gate_latest.json")
     assert items["live_gate"]["available"] is True
     assert items["live_gate"]["fresh"] is True
@@ -2167,9 +2321,15 @@ def test_live_page_uses_configured_source_and_label():
 
 def test_api_events_live_real_reads_prediction_artifact_history(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
     checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
     db_path = tmp_path / "dashboard.db"
     monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
     monkeypatch.setattr(server, "DB_PATH", db_path)
 
     conn = sqlite3.connect(db_path)
@@ -2241,6 +2401,202 @@ def test_api_events_live_real_reads_prediction_artifact_history(tmp_path, monkey
     assert stats["source"] == "live_real"
     assert stats["total"] == 2
     assert stats["passed"] == 1
+
+
+def test_api_events_live_real_prefers_current_formal_prediction(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(server, "DB_PATH", db_path)
+
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE events (
+            source TEXT,
+            kline_n INTEGER,
+            action TEXT,
+            dir5 TEXT,
+            dir4 TEXT,
+            regime TEXT,
+            filt_passed INTEGER,
+            reason TEXT,
+            created_at TEXT,
+            details TEXT
+        )"""
+    )
+    conn.commit()
+    conn.close()
+
+    (checkpoint_dir / "aligned_prod_shift1_predictions.jsonl").write_text(
+        json.dumps(
+            {
+                "decision_id": "old:20260615T104500Z",
+                "decision_bar_ts": "2026-06-15T10:45:00Z",
+                "artifact_created_at": "2026-06-15T10:50:11Z",
+                "action": "HOLD",
+                "passed": False,
+                "reason_code": "no_side_passed",
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": "2026-06-16T16:07:37Z",
+            "source": "prediction_bound_live_order",
+            "ok": False,
+            "submitted": False,
+            "prediction": {
+                "decision_id": "formal:20260616T160000Z",
+                "created_at": "2026-06-16T16:05:11Z",
+                "decision_bar_ts": "2026-06-16T16:00:00Z",
+                "entry_ts": "2026-06-16T16:10:00Z",
+                "settle_ts": "2026-06-16T16:15:00Z",
+                "execution_market_shift": "next_period",
+                "action": "BUY_DOWN",
+                "passed": True,
+                "p5_up": 0.2,
+                "p4_up": 0.3,
+                "reason_code": "short_passed",
+                "reason": "SHORT passed",
+            },
+        },
+    )
+    (report_dir / "prediction_bound_live_formal_predictions.jsonl").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-06-16T16:00:17.733537Z",
+                "decision_bar_ts": "2026-06-16T15:55:00Z",
+                "entry_ts": "2026-06-16T16:05:00Z",
+                "settle_ts": "2026-06-16T16:10:00Z",
+                "execution_market_shift": "next_period",
+                "action": "HOLD",
+                "passed": False,
+                "p5_up": 0.52,
+                "p1_up": 0.48,
+                "p4_up": 0.51,
+                "reason_code": "no_side_passed",
+                "reason": "full historical prediction details",
+            }
+        ),
+        encoding="utf-8",
+    )
+    (log_dir / "prediction_bound_live_formal_latest.out.log").write_text(
+        "\n".join(
+            [
+                "2026-06-16T16:00:17.733537Z status=hold ts=2026-06-16 15:55:00+00:00 entry=2026-06-16T16:05:00Z settle=2026-06-16T16:10:00Z action=HOLD reason_code=no_side_passed block=None ledger=0",
+                "2026-06-16T16:05:11.827115Z status=order_intent ts=2026-06-16 16:00:00+00:00 entry=2026-06-16T16:10:00Z settle=2026-06-16T16:15:00Z action=BUY_DOWN reason_code=short_passed block=None ledger=0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    with server.app.test_client() as client:
+        events = client.get("/api/events?source=live_real&limit=10").get_json()
+        stats = client.get("/api/signal-stats?source=live_real").get_json()
+
+    assert events[0]["action"] == "BUY_DOWN"
+    assert events[0]["created_at"] == "2026-06-16T16:05:11Z"
+    assert json.loads(events[0]["details"])["execution_market_shift"] == "next_period"
+    assert events[1]["action"] == "HOLD"
+    assert events[1]["created_at"] == "2026-06-16T16:00:17.733537Z"
+    assert events[1]["reason"] == "full historical prediction details"
+    assert json.loads(events[1]["details"])["p5_up"] == 0.52
+    assert all(not event["created_at"].startswith("2026-06-15") for event in events)
+    assert stats["total"] == 2
+    assert stats["passed"] == 1
+    assert stats["latest_created_at"] == "2026-06-16T16:05:11Z"
+
+
+def test_api_events_live_real_reads_utf16_formal_log(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+
+    (log_dir / "prediction_bound_live_formal_latest.out.log").write_text(
+        "\n".join(
+            [
+                "2026-06-16T16:00:17.733537Z status=hold ts=2026-06-16 15:55:00+00:00 entry=2026-06-16T16:05:00Z settle=2026-06-16T16:10:00Z action=HOLD reason_code=no_side_passed block=None ledger=0",
+                "2026-06-16T16:05:11.827115Z status=order_intent ts=2026-06-16 16:00:00+00:00 entry=2026-06-16T16:10:00Z settle=2026-06-16T16:15:00Z action=BUY_DOWN reason_code=short_passed block=None ledger=0",
+            ]
+        ),
+        encoding="utf-16",
+    )
+
+    with server.app.test_client() as client:
+        events = client.get("/api/events?source=live_real&limit=10").get_json()
+        stats = client.get("/api/signal-stats?source=live_real").get_json()
+
+    assert [event["action"] for event in events] == ["BUY_DOWN", "HOLD"]
+    assert stats["total"] == 2
+    assert stats["passed"] == 1
+
+
+def test_api_events_live_real_enriches_formal_log_signal_from_ledger(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+
+    (log_dir / "prediction_bound_live_formal_latest.out.log").write_text(
+        "2026-06-16T16:50:19.584814Z status=would_place_order ts=2026-06-16 16:45:00+00:00 entry=2026-06-16T16:55:00Z settle=2026-06-16T17:00:00Z action=BUY_UP reason_code=long_passed block=None ledger=1\n",
+        encoding="utf-16",
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "order_id": "0xabc",
+                "status": "OPEN",
+                "order_key": "aligned_prod_current_next:20260616T165500Z:LONG",
+                "action": "BUY_UP",
+                "direction": "UP",
+                "side": "LONG",
+                "market_slug": "btc-updown-5m-1781628900",
+                "decision_bar_ts": "2026-06-16T16:45:00Z",
+                "entry_ts": "2026-06-16T16:55:00Z",
+                "settle_ts": "2026-06-16T17:00:00Z",
+                "price": 0.50,
+                "size": 5,
+                "filled_size": 0,
+                "p5_up": 0.8,
+                "p1_up": 0.6333333333,
+                "p4_up": 0.7833333333,
+                "reason_code": "long_passed",
+            }
+        ],
+    )
+
+    with server.app.test_client() as client:
+        events = client.get("/api/events?source=live_real&limit=10").get_json()
+
+    assert events[0]["action"] == "BUY_UP"
+    assert events[0]["filt_passed"] == 1
+    details = json.loads(events[0]["details"])
+    assert details["order_id"] == "0xabc"
+    assert details["p5_up"] == 0.8
+    assert details["p1_up"] == 0.6333333333
+    assert details["p4_up"] == 0.7833333333
+    assert details["market_slug"] == "btc-updown-5m-1781628900"
 
 
 def test_status_bar_uses_source_label_and_configured_status_source():
@@ -2367,13 +2723,15 @@ def test_live_page_defaults_to_trading_console_layout():
     assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
     assert 'StatCard label="CLOB Balance"' in source
     assert 'StatCard label="Open/Pending"' in source
-    assert 'StatCard label="Today PnL"' in source
+    assert 'StatCard label="Realized PnL"' in source
     assert 'StatCard label="Total Win Rate"' in source
     assert 'StatCard label="Today Win Rate"' in source
     assert 'StatCard label="Total Pass Rate"' in source
     assert 'StatCard label="Today Pass Rate"' in source
-    assert 'StatCard label="Real Win Rate"' in source
-    assert 'StatCard label="Mode"' in source
+    assert 'StatCard label="Settled Win Rate"' in source
+    assert 'StatCard label="Orders"' in source
+    assert 'StatCard label="Signal Result"' in source
+    assert 'StatCard label="Mode"' not in source
     assert 'StatCard label="Readiness"' not in source
     assert 'StatCard label="Health"' not in source
 
@@ -2736,6 +3094,19 @@ def test_live_page_surfaces_current_clob_orders_panel():
     assert "audit?.open_orders" in source
     assert "order.remaining_size" in source
     assert "No current CLOB open orders" in source
+
+
+def test_live_page_surfaces_live_ledger_order_records_panel():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+
+    assert "LiveLedgerOrdersPanel" in source
+    assert "<LiveLedgerOrdersPanel liveReal={liveReal}" in live_section
+    assert "Live Ledger Orders" in source
+    assert "liveReal?.order_records" in source
+    assert "positions and settled real orders" in source
+    assert "order.settle_ts || order.settled_at" in source
+    assert "order.settlement_source" in source
 
 
 def test_live_page_separates_live_real_and_paper_monitor_tabs():

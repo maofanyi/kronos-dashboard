@@ -4,6 +4,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import sys
@@ -288,6 +289,269 @@ def _live_prediction_artifact_history_path():
     return KRONOS_CHECKPOINT_DIR / "aligned_prod_shift1_predictions.jsonl"
 
 
+def _live_formal_report_path():
+    return KRONOS_REPORT_DIR / "prediction_bound_live_formal_latest.json"
+
+
+def _live_formal_prediction_history_path():
+    return KRONOS_REPORT_DIR / "prediction_bound_live_formal_predictions.jsonl"
+
+
+def _live_formal_report():
+    path = _live_formal_report_path()
+    return path, _read_json(path) or {}
+
+
+def _live_formal_prediction_record():
+    path, report = _live_formal_report()
+    prediction = report.get("prediction") if isinstance(report.get("prediction"), dict) else {}
+    if not prediction:
+        return None
+    record = dict(prediction)
+    record.setdefault("source", report.get("source") or "prediction_bound_live_order")
+    record.setdefault("type", "decision")
+    record.setdefault("artifact_created_at", record.get("created_at") or report.get("created_at"))
+    record.setdefault("created_at", record.get("artifact_created_at") or report.get("created_at"))
+    record.setdefault("submitted", report.get("submitted"))
+    record.setdefault("report_created_at", report.get("created_at"))
+    record.setdefault("report_path", str(path))
+    if "passed" not in record:
+        action = str(record.get("action") or "").upper()
+        record["passed"] = action not in {"", "HOLD"} and bool(record.get("would_place_order", True))
+    return record
+
+
+def _prediction_record_key(record: dict):
+    return (
+        record.get("decision_id")
+        or record.get("prediction_artifact_decision_id")
+        or "|".join(
+            str(record.get(key) or "")
+            for key in ("decision_bar_ts", "entry_ts", "settle_ts", "action")
+        )
+    )
+
+
+def _prediction_record_dedupe_keys(record: dict):
+    keys = set()
+    for key in ("decision_id", "prediction_artifact_decision_id"):
+        value = record.get(key)
+        if value:
+            keys.add(str(value))
+    window_key = "|".join(
+        str(record.get(key) or "")
+        for key in ("decision_bar_ts", "entry_ts", "settle_ts", "action")
+    )
+    if window_key.strip("|"):
+        keys.add(window_key)
+    return keys
+
+
+def _iso_from_any(value):
+    parsed = _parse_dt(value)
+    return _iso_utc(parsed) if parsed is not None else value
+
+
+def _live_formal_out_log_path():
+    preferred = KRONOS_LOG_DIR / "prediction_bound_live_formal_latest.out.log"
+    if preferred.exists():
+        return preferred
+    files = sorted(
+        KRONOS_LOG_DIR.glob("prediction_bound_live_formal_*.out.log") if KRONOS_LOG_DIR.exists() else [],
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+    return files[0] if files else preferred
+
+
+def _text_file_encoding(path: Path):
+    try:
+        with path.open("rb") as f:
+            prefix = f.read(4)
+    except OSError:
+        return "utf-8-sig"
+    if prefix.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if prefix.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    return "utf-8-sig"
+
+
+def _live_formal_log_prediction_records(limit=100):
+    path = _live_formal_out_log_path()
+    if not path.exists():
+        return []
+    lines = deque(maxlen=max(limit * 4, limit, 20))
+    try:
+        with path.open("r", encoding=_text_file_encoding(path), errors="replace") as f:
+            for line in f:
+                if " status=" in line and " action=" in line:
+                    lines.append(line.strip())
+    except OSError:
+        return []
+
+    records = []
+    pattern = re.compile(
+        r"^(?P<created_at>\S+)\s+status=(?P<status>\S+)\s+"
+        r"ts=(?P<ts>.+?)\s+entry=(?P<entry>\S+)\s+settle=(?P<settle>\S+)\s+"
+        r"action=(?P<action>\S+)\s+reason_code=(?P<reason_code>\S+)"
+    )
+    for line in lines:
+        match = pattern.search(line)
+        if not match:
+            continue
+        action = match.group("action").upper()
+        decision_bar_ts = _iso_from_any(match.group("ts"))
+        entry_ts = _iso_from_any(match.group("entry"))
+        settle_ts = _iso_from_any(match.group("settle"))
+        records.append(
+            {
+                "source": "prediction_bound_live_formal_log",
+                "type": "decision",
+                "artifact_created_at": match.group("created_at"),
+                "created_at": match.group("created_at"),
+                "decision_bar_ts": decision_bar_ts,
+                "entry_ts": entry_ts,
+                "settle_ts": settle_ts,
+                "signal_entry_ts": entry_ts,
+                "signal_settle_ts": settle_ts,
+                "target_market_entry_ts": entry_ts,
+                "target_market_settle_ts": settle_ts,
+                "execution_market_shift": "next_period",
+                "decision_id": f"formal_live:{decision_bar_ts}:{entry_ts}:{settle_ts}:{action}",
+                "action": action,
+                "passed": action not in {"", "HOLD"},
+                "reason_code": match.group("reason_code"),
+                "reason": match.group("reason_code"),
+                "status": match.group("status"),
+            }
+        )
+    return records[-limit:]
+
+
+def _live_formal_history_prediction_records(limit=100):
+    return [
+        record
+        for record in _tail_jsonl(_live_formal_prediction_history_path(), limit=max(limit, 1))
+        if isinstance(record, dict)
+    ]
+
+
+def _prediction_record_match_key(record: dict):
+    return "|".join(
+        str(record.get(key) or "")
+        for key in ("decision_bar_ts", "entry_ts", "settle_ts", "action")
+    )
+
+
+def _live_ledger_prediction_records():
+    payload = _read_json(_live_real_ledger_path())
+    rows = payload if isinstance(payload, list) else []
+    records = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        action = str(row.get("action") or "").upper()
+        if not action or action == "HOLD":
+            continue
+        record = {
+            "source": "live_real_order_ledger",
+            "type": "decision",
+            "created_at": row.get("created_at"),
+            "artifact_created_at": row.get("created_at"),
+            "decision_id": row.get("order_key") or row.get("signal_id") or row.get("order_id"),
+            "order_id": row.get("order_id"),
+            "order_key": row.get("order_key") or row.get("signal_id"),
+            "action": action,
+            "direction": row.get("direction"),
+            "side": row.get("side"),
+            "market_slug": row.get("market_slug"),
+            "market_id": row.get("market_id"),
+            "decision_bar_ts": row.get("decision_bar_ts"),
+            "entry_ts": row.get("entry_ts"),
+            "settle_ts": row.get("settle_ts"),
+            "target_market_entry_ts": row.get("entry_ts"),
+            "target_market_settle_ts": row.get("settle_ts"),
+            "execution_market_shift": "next_period",
+            "passed": True,
+            "would_place_order": True,
+            "submitted": True,
+            "status": row.get("status"),
+            "price": row.get("price"),
+            "size": row.get("size"),
+            "filled_size": row.get("filled_size"),
+            "remaining_size": row.get("remaining_size"),
+            "reference_price": row.get("reference_price"),
+            "reference_price_source": row.get("reference_price_source"),
+            "p5_up": row.get("p5_up"),
+            "p1_up": row.get("p1_up"),
+            "p4_up": row.get("p4_up"),
+            "reason_code": row.get("reason_code"),
+            "reason": row.get("reason_code") or row.get("status"),
+        }
+        records.append(record)
+    return records
+
+
+def _enrich_prediction_records_from_live_ledger(records: list[dict]):
+    ledger_records = _live_ledger_prediction_records()
+    if not ledger_records:
+        return records
+    by_key = {}
+    for row in ledger_records:
+        for key in (
+            row.get("decision_id"),
+            row.get("order_key"),
+            _prediction_record_match_key(row),
+        ):
+            if key:
+                by_key[str(key)] = row
+    enriched = []
+    copy_keys = (
+        "order_id",
+        "order_key",
+        "direction",
+        "side",
+        "market_slug",
+        "market_id",
+        "price",
+        "size",
+        "filled_size",
+        "remaining_size",
+        "reference_price",
+        "reference_price_source",
+        "p5_up",
+        "p1_up",
+        "p4_up",
+        "status",
+        "submitted",
+        "would_place_order",
+    )
+    for record in records:
+        match = None
+        for key in (
+            record.get("decision_id"),
+            record.get("order_key"),
+            _prediction_record_match_key(record),
+        ):
+            if key and str(key) in by_key:
+                match = by_key[str(key)]
+                break
+        if match:
+            record = dict(record)
+            for key in copy_keys:
+                if record.get(key) in (None, "") and match.get(key) not in (None, ""):
+                    record[key] = match.get(key)
+            if record.get("reason") in (None, "", "no_side_passed") and match.get("reason"):
+                record["reason"] = match.get("reason")
+            if record.get("reason_code") in (None, "") and match.get("reason_code"):
+                record["reason_code"] = match.get("reason_code")
+            if record.get("passed") is not True:
+                record["passed"] = bool(match.get("passed"))
+        enriched.append(record)
+    return enriched
+
+
 def _artifact_created_at(record: dict):
     for key in ("artifact_created_at", "created_at", "ts", "decision_bar_ts", "entry_ts"):
         value = record.get(key)
@@ -340,11 +604,28 @@ def _prediction_artifact_event(record: dict, sequence: int):
 
 
 def _live_prediction_artifact_events(limit=100, since=""):
-    records = [
-        record
-        for record in _tail_jsonl(_live_prediction_artifact_history_path(), limit=max(limit, 1))
-        if isinstance(record, dict)
-    ]
+    records = []
+    formal_record = _live_formal_prediction_record()
+    if isinstance(formal_record, dict):
+        records.append(formal_record)
+    formal_history_records = _live_formal_history_prediction_records(limit=max(limit, 1))
+    formal_log_records = _live_formal_log_prediction_records(limit=max(limit, 1))
+    history_records = []
+    if not records and not formal_history_records and not formal_log_records:
+        history_records = [
+            record
+            for record in _tail_jsonl(_live_prediction_artifact_history_path(), limit=max(limit, 1))
+            if isinstance(record, dict)
+        ]
+    seen = set()
+    deduped = []
+    for record in [*records, *formal_history_records, *formal_log_records, *history_records]:
+        keys = _prediction_record_dedupe_keys(record)
+        if keys and keys.intersection(seen):
+            continue
+        seen.update(keys)
+        deduped.append(record)
+    records = _enrich_prediction_records_from_live_ledger(deduped)
     events = [_prediction_artifact_event(record, index + 1) for index, record in enumerate(records)]
     if since:
         since_ts = _parse_dt(since)
@@ -875,7 +1156,8 @@ $patterns = ConvertFrom-Json @'
 Get-CimInstance Win32_Process |
   Where-Object {{
     $cmd = [string]$_.CommandLine
-    ($_.Name -match '^(python|python\\.exe|py|py\\.exe)$') -and
+    ($_.ProcessId -ne $PID) -and
+    ($_.Name -match '^(python|python\\.exe|py|py\\.exe|powershell|powershell\\.exe|pwsh|pwsh\\.exe)$') -and
     (($patterns | Where-Object {{ $cmd -like "*$_*" }} | Select-Object -First 1) -ne $null)
   }} |
   Select-Object ProcessId,Name,
@@ -1056,6 +1338,24 @@ def _settled_stats_summary(records):
         "wins": wins,
         "losses": losses,
         "win_rate": round(wins / len(settled), 4) if settled else 0.0,
+    }
+
+
+def _market_result_stats_summary(records):
+    resolved = [
+        record
+        for record in (records or [])
+        if isinstance(record, dict)
+        and record.get("actual_up_chainlink") is not None
+        and record.get("signal_would_have_won") is not None
+    ]
+    wins = sum(1 for record in resolved if record.get("signal_would_have_won") is True)
+    losses = sum(1 for record in resolved if record.get("signal_would_have_won") is False)
+    return {
+        "resolved": len(resolved),
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / len(resolved), 4) if resolved else 0.0,
     }
 
 
@@ -1241,25 +1541,40 @@ def _order_status_summary(records):
     open_or_pending = 0
     settled = 0
     cancelled = 0
+    no_fill_cancelled = 0
+    filled_orders = 0
     filled = 0.0
     for record in records:
         status = str(record.get("status") or "").upper()
         status_counts[status or "UNKNOWN"] = status_counts.get(status or "UNKNOWN", 0) + 1
+        filled_size = 0.0
+        try:
+            filled_size = float(record.get("filled_size") or record.get("fill_size") or 0.0)
+        except (TypeError, ValueError):
+            filled_size = 0.0
         if status in {"OPEN", "PENDING", "SUBMITTED", "PARTIAL", "MATCHED", "LIVE"}:
             open_or_pending += 1
         if status in {"SETTLED", "FILLED", "WON", "LOST", "CLOSED"} or _is_settled_record(record):
             settled += 1
+        no_fill = (
+            status == "NO_FILL"
+            or str(record.get("execution_result") or "").lower() == "no_fill"
+            or (status in {"CANCELLED", "CANCELED"} and filled_size <= 0)
+        )
         if status in {"CANCELLED", "CANCELED"}:
             cancelled += 1
-        try:
-            filled += float(record.get("filled_size") or record.get("fill_size") or 0.0)
-        except (TypeError, ValueError):
-            pass
+        if no_fill and filled_size <= 0:
+            no_fill_cancelled += 1
+        if filled_size > 0:
+            filled_orders += 1
+        filled += filled_size
     return {
         "total": len(records),
         "open_or_pending": open_or_pending,
         "settled": settled,
         "cancelled": cancelled,
+        "no_fill_cancelled": no_fill_cancelled,
+        "filled_orders": filled_orders,
         "filled_size": round(filled, 8),
         "status_counts": status_counts,
     }
@@ -1271,6 +1586,68 @@ def _latest_record(records):
         key=lambda item: _record_ts(item) or datetime.min.replace(tzinfo=timezone.utc),
     )
     return ordered[-1] if ordered else None
+
+
+def _float_value(record, *keys):
+    for key in keys:
+        try:
+            value = record.get(key)
+            if value in (None, ""):
+                continue
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _live_order_record_summary(record):
+    status = str(record.get("status") or "").upper() or "UNKNOWN"
+    filled_size = _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size") or 0.0
+    size = _float_value(record, "size", "original_size", "target_size")
+    remaining = _float_value(record, "remaining_size")
+    if remaining is None and size is not None:
+        remaining = max(0.0, size - filled_size)
+    return {
+        "order_id": record.get("order_id"),
+        "market_slug": record.get("market_slug"),
+        "status": status,
+        "direction": record.get("direction") or record.get("side") or record.get("action"),
+        "token_outcome": record.get("token_outcome") or record.get("outcome"),
+        "price": _float_value(record, "price", "limit_price"),
+        "average_fill_price": _float_value(record, "average_fill_price", "avg_fill_price"),
+        "size": size,
+        "filled_size": round(filled_size, 8),
+        "remaining_size": round(remaining, 8) if remaining is not None else None,
+        "pnl": _float_value(record, "pnl", "net_pnl", "realized_pnl", "pnl_usdc"),
+        "won": _record_won(record),
+        "entry_ts": record.get("entry_ts"),
+        "settle_ts": record.get("settle_ts"),
+        "created_at": record.get("created_at"),
+        "updated_at": record.get("updated_at"),
+        "settled_at": record.get("settled_at"),
+        "fill_source": record.get("fill_source"),
+        "settlement_source": record.get("settlement_source"),
+        "market_result_source": record.get("market_result_source"),
+        "execution_result": record.get("execution_result"),
+        "signal_id": record.get("signal_id") or record.get("order_key"),
+    }
+
+
+def _live_order_timeline_ts(record):
+    for key in ("settle_ts", "entry_ts", "created_at", "settled_at", "updated_at", "ts"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _live_order_records(records, *, limit=60):
+    ordered = sorted(
+        [record for record in records if isinstance(record, dict)],
+        key=lambda item: _live_order_timeline_ts(item) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    return [_live_order_record_summary(record) for record in ordered[:limit]]
 
 
 def _live_soak_summary():
@@ -1298,30 +1675,157 @@ def _live_soak_summary():
     }
 
 
+def _live_formal_summary():
+    path, report = _live_formal_report()
+    prediction = report.get("prediction") if isinstance(report.get("prediction"), dict) else {}
+    report_mtime, report_age_seconds = _path_age(path if path.exists() else None)
+    return {
+        "available": path.exists(),
+        "report": str(path),
+        "report_mtime": report_mtime,
+        "report_age_seconds": report_age_seconds,
+        "ok": bool(report.get("ok")),
+        "submitted": bool(report.get("submitted")),
+        "terminal_reason": str(report.get("terminal_reason") or ""),
+        "reason": str(report.get("reason") or ""),
+        "attempts": int(report.get("attempts", 0) or 0),
+        "latest_action": prediction.get("action"),
+        "latest_reason": prediction.get("reason_code") or prediction.get("reason") or report.get("reason"),
+        "latest_decision_id": prediction.get("decision_id") or prediction.get("prediction_artifact_decision_id"),
+        "latest_created_at": prediction.get("created_at") or report.get("created_at"),
+        "decision_bar_ts": prediction.get("decision_bar_ts"),
+        "entry_ts": prediction.get("entry_ts"),
+        "settle_ts": prediction.get("settle_ts"),
+        "target_market_entry_ts": prediction.get("target_market_entry_ts"),
+        "target_market_settle_ts": prediction.get("target_market_settle_ts"),
+        "execution_market_shift": prediction.get("execution_market_shift"),
+    }
+
+
+def _live_process_runtime(*, formal_available, formal=None, soak=None):
+    formal = formal if isinstance(formal, dict) else {}
+    soak = soak if isinstance(soak, dict) else {}
+    if formal_available:
+        supervisor_runtime = _process_summary(["run_prediction_bound_live_formal_supervisor.ps1"])
+        child_runtime = _process_summary(["run_prediction_bound_live_order.py"])
+        runtime = dict(supervisor_runtime if supervisor_runtime.get("running") else child_runtime)
+        runtime["role"] = "formal_supervisor" if supervisor_runtime.get("running") else "formal_child"
+        runtime["child_runtime"] = child_runtime
+        if not runtime.get("started_at") and formal.get("latest_created_at"):
+            started = _parse_dt(formal.get("latest_created_at"))
+            runtime.update({
+                "started_at": _iso_utc(started),
+                "uptime_seconds": _timestamp_age_seconds(started),
+            })
+        return runtime
+
+    runtime = _process_summary(["run_prediction_bound_live_soak.py"])
+    runtime = dict(runtime)
+    runtime["role"] = "soak"
+    if not runtime.get("started_at") and soak.get("started_at"):
+        started = _parse_dt(soak.get("started_at"))
+        runtime.update({
+            "started_at": _iso_utc(started),
+            "uptime_seconds": _timestamp_age_seconds(started),
+        })
+    return runtime
+
+
+def _live_restart_contract_path():
+    configured = (os.environ.get("DASHBOARD_LIVE_RESTART_CONTRACT") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_CONFIG_DIR / path
+    return KRONOS_CONFIG_DIR / "aligned_prod_current_next_chainlink_30d30d_m049_shares5_live_params.json"
+
+
+def _live_restart_contract():
+    payload = _read_json(_live_restart_contract_path()) or {}
+    contract = payload.get("live_restart_contract") if isinstance(payload.get("live_restart_contract"), dict) else {}
+    return contract if isinstance(contract, dict) else {}
+
+
+def _latest_formal_supervisor_line():
+    path = KRONOS_LOG_DIR / "prediction_bound_live_formal_supervisor_latest.log"
+    if not path.exists():
+        return ""
+    try:
+        lines = path.read_text(encoding="utf-8-sig").splitlines()
+    except OSError:
+        return ""
+    for line in reversed(lines):
+        if "formal_live_supervisor started" in line:
+            return line
+    return lines[-1] if lines else ""
+
+
+def _extract_formal_supervisor_limits():
+    line = _latest_formal_supervisor_line()
+    if not line:
+        return {}
+    mapping = {
+        "max_daily_loss": ("max_daily_loss_usdc", float),
+        "max_daily_trades": ("max_daily_trades", int),
+        "max_consecutive_losses": ("max_consecutive_losses", int),
+        "max_open_or_pending": ("max_open_or_pending_orders", int),
+    }
+    limits = {}
+    for key, (target, caster) in mapping.items():
+        match = re.search(rf"\b{re.escape(key)}=([0-9.]+)", line)
+        if not match:
+            continue
+        try:
+            limits[target] = caster(float(match.group(1))) if caster is int else caster(match.group(1))
+        except (TypeError, ValueError):
+            continue
+    return limits
+
+
+def _live_formal_risk_limits(fallback=None):
+    limits = dict(RISK_LIMITS)
+    if isinstance(fallback, dict):
+        limits.update({key: fallback[key] for key in limits if key in fallback})
+    formal_path, _ = _live_formal_report()
+    if not formal_path.exists():
+        return limits
+    contract = _live_restart_contract()
+    contract_mapping = {
+        "max_daily_loss_usdc": "max_daily_loss_usdc",
+        "max_daily_trades": "max_daily_trades",
+        "max_consecutive_losses": "max_consecutive_losses",
+        "max_open_or_pending_orders": "max_open_or_pending_orders",
+    }
+    for source_key, target_key in contract_mapping.items():
+        if source_key in contract:
+            limits[target_key] = contract[source_key]
+    limits.update(_extract_formal_supervisor_limits())
+    return limits
+
+
 def _live_real_summary(limits_override=None, current_balance=None):
     ledger_path = _live_real_ledger_path()
     records = _rows_from_ledger_payload(_read_json(ledger_path))
+    formal = _live_formal_summary()
     risk = _risk_summary_from_records(
         records,
         inputs={"ledger": str(ledger_path), "record_count": len(records)},
         limits_override=limits_override,
     )
-    runtime = _process_summary(["run_prediction_bound_live_soak.py"])
     soak = _live_soak_summary()
-    if not runtime.get("started_at") and soak.get("started_at"):
-        started = _parse_dt(soak.get("started_at"))
-        runtime = {
-            **runtime,
-            "started_at": _iso_utc(started),
-            "uptime_seconds": _timestamp_age_seconds(started),
-        }
+    runtime = _live_process_runtime(
+        formal_available=bool(formal.get("available")),
+        formal=formal,
+        soak=soak,
+    )
     return {
         "ledger": str(ledger_path),
         "ledger_exists": ledger_path.exists(),
         "runtime": runtime,
+        "formal": formal,
         "soak": soak,
         "orders": _order_status_summary(records),
         "stats": _settled_stats_summary(records),
+        "market_results": _market_result_stats_summary(records),
         "risk": risk,
         "equity": _equity_summary_from_records(
             records,
@@ -1329,6 +1833,7 @@ def _live_real_summary(limits_override=None, current_balance=None):
             source="live_real_orders",
         ),
         "latest_order": _latest_record(records),
+        "order_records": _live_order_records(records),
     }
 
 
@@ -2045,7 +2550,7 @@ def _safety_report_summary():
     paper_risk_summary = _live_risk_summary(checkpoint)
     today_summary = _live_today_summary(checkpoint, paper_risk_summary, dryrun_summary)
     live_real_summary = _live_real_summary(
-        limits_override=preflight_risk_limits,
+        limits_override=_live_formal_risk_limits(preflight_risk_limits),
         current_balance=balance_value,
     )
     live_real_risk_summary = live_real_summary["risk"]
@@ -2281,8 +2786,33 @@ def _safety_report_summary():
         and gate_report_age_seconds is not None
         and gate_report_age_seconds <= CLOB_READONLY_MAX_AGE_SECONDS
     )
+    formal_summary = live_real_summary.get("formal") if isinstance(live_real_summary.get("formal"), dict) else {}
+    formal_max_age_seconds = int(os.environ.get("DASHBOARD_FORMAL_LIVE_MAX_AGE_SECONDS", "420"))
+    formal_age_seconds = formal_summary.get("report_age_seconds")
+    formal_fresh = (
+        bool(formal_summary.get("available"))
+        and formal_age_seconds is not None
+        and formal_age_seconds <= formal_max_age_seconds
+    )
     report_refresh = _report_refresh_summary(
         [
+            _report_refresh_item(
+                key="formal_live",
+                label="Formal Live",
+                report=formal_summary.get("report") or "",
+                available=bool(formal_summary.get("available")),
+                ok=bool(formal_summary.get("available")),
+                fresh=formal_fresh,
+                age_seconds=formal_age_seconds,
+                max_age_seconds=formal_max_age_seconds,
+                blockers=[] if formal_summary.get("available") else ["missing_formal_live_report"],
+                actions={
+                    "missing": "Start formal live runner",
+                    "stale": "Check formal live runner",
+                    "blocked": "Review formal live report",
+                    "ready": "Monitoring formal live",
+                },
+            ),
             _report_refresh_item(
                 key="live_gate",
                 label="Live Gate",
@@ -2374,6 +2904,7 @@ def _safety_report_summary():
         "reports": {
             "allowance": str(allowance_path) if allowance_path else "",
             "execution": str(execution_path) if execution_path else "",
+            "live_formal": formal_summary.get("report") or "",
             "live_gate": str(effective_gate_path) if effective_gate_path else "",
             "live_preflight": str(preflight_path) if preflight_path else "",
         },

@@ -435,6 +435,26 @@ interface LiveSafety {
     ledger: string;
     ledger_exists: boolean;
     runtime: RuntimeSummary;
+    formal?: {
+      available: boolean;
+      report: string;
+      report_age_seconds?: number | null;
+      ok: boolean;
+      submitted: boolean;
+      terminal_reason: string;
+      reason?: string;
+      attempts: number;
+      latest_action?: string | null;
+      latest_reason?: string | null;
+      latest_decision_id?: string | null;
+      latest_created_at?: string | null;
+      decision_bar_ts?: string | null;
+      entry_ts?: string | null;
+      settle_ts?: string | null;
+      target_market_entry_ts?: string | null;
+      target_market_settle_ts?: string | null;
+      execution_market_shift?: string | null;
+    };
     soak: {
       available: boolean;
       report: string;
@@ -456,13 +476,22 @@ interface LiveSafety {
       open_or_pending: number;
       settled: number;
       cancelled: number;
+      no_fill_cancelled?: number;
+      filled_orders?: number;
       filled_size: number;
       status_counts: Record<string, number>;
     };
     stats: SettledStats;
+    market_results?: {
+      resolved: number;
+      wins: number;
+      losses: number;
+      win_rate: number;
+    };
     risk: LiveSafety["risk"];
     equity: EquitySummary;
     latest_order?: Record<string, unknown> | null;
+    order_records?: LiveOrderRecord[];
   };
   paper_monitor?: {
     run_source: string;
@@ -494,7 +523,34 @@ type RuntimeSummary = {
   started_at?: string | null;
   uptime_seconds?: number | null;
   patterns?: string[];
+  role?: string;
+  child_runtime?: RuntimeSummary;
   error?: string;
+};
+
+type LiveOrderRecord = {
+  order_id?: string | null;
+  market_slug?: string | null;
+  status?: string;
+  direction?: string | null;
+  token_outcome?: string | null;
+  price?: number | null;
+  average_fill_price?: number | null;
+  size?: number | null;
+  filled_size?: number | null;
+  remaining_size?: number | null;
+  pnl?: number | null;
+  won?: boolean | null;
+  entry_ts?: string | null;
+  settle_ts?: string | null;
+  created_at?: string | null;
+  updated_at?: string | null;
+  settled_at?: string | null;
+  fill_source?: string | null;
+  settlement_source?: string | null;
+  market_result_source?: string | null;
+  execution_result?: string | null;
+  signal_id?: string | null;
 };
 
 type ChecklistItem = {
@@ -548,6 +604,24 @@ const orderSize = (value?: number | null) => {
 };
 
 const orderPrice = (value?: number | null) => (value == null ? "-" : value.toFixed(3));
+const orderValue = (value?: number | null) => (value == null ? "-" : signedMoney(value));
+
+const liveOrderStatusTone = (status?: string) => {
+  const normalized = String(status || "").toUpperCase();
+  if (normalized === "SETTLED" || normalized === "FILLED") return "border-emerald-500/30 bg-emerald-500/10 text-emerald-300";
+  if (normalized.includes("OPEN") || normalized.includes("PENDING") || normalized.includes("PARTIAL")) return "border-amber-500/30 bg-amber-500/10 text-amber-300";
+  if (normalized.includes("CANCEL") || normalized === "NO_FILL") return "border-zinc-700 bg-zinc-900 text-zinc-400";
+  return "border-zinc-800 bg-zinc-950 text-zinc-400";
+};
+
+const liveOrderGroup = (order: LiveOrderRecord) => {
+  const status = String(order.status || "").toUpperCase();
+  const filled = order.filled_size ?? 0;
+  if (status === "SETTLED") return "Settled";
+  if (filled > 0 || status.includes("OPEN") || status.includes("PENDING") || status.includes("PARTIAL") || status === "FILLED") return "Position";
+  if (status.includes("CANCEL") || status === "NO_FILL") return "Closed";
+  return "Record";
+};
 
 const localTime = (value?: string | number) => {
   if (value == null) return "-";
@@ -1469,28 +1543,32 @@ function runtimeState(runtime?: RuntimeSummary | null) {
 
 function LiveSoakPanel({ liveReal }: { liveReal?: LiveSafety["live_real"] | null }) {
   const runtime = runtimeState(liveReal?.runtime);
+  const childRuntime = liveReal?.runtime?.child_runtime;
+  const formal = liveReal?.formal;
   const soak = liveReal?.soak;
   const blockers = soak?.blockers ?? [];
+  const reportAge = formal?.report_age_seconds ?? soak?.report_age_seconds;
   return (
     <Panel
-      title="Live Soak Process"
-      sub="real-order runner status"
+      title="Live Formal Process"
+      sub="current-next real-order runner"
       right={<StatusPill ok={runtime.ok === true} label={runtime.label} />}
     >
       <div className="grid gap-3 p-4">
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
           <HealthTile label="Runtime" value={runtime.label} ok={runtime.ok} />
-          <HealthTile label="Started" value={shortDateTime(liveReal?.runtime?.started_at || soak?.started_at || undefined)} ok={runtime.ok} />
-          <HealthTile label="Attempts" value={`${soak?.attempts ?? 0}`} />
-          <HealthTile label="Submissions" value={`${soak?.submitted_count ?? 0}`} ok={(soak?.submitted_count ?? 0) >= 0} />
-          <HealthTile label="Submit Mode" value={soak?.submit_enabled ? "armed" : "preview"} ok={!soak?.submit_enabled ? true : undefined} />
-          <HealthTile label="Terminal" value={soak?.terminal_reason || "-"} ok={soak?.terminal_reason ? soak.terminal_reason !== "submit_blocked" : undefined} />
-          <HealthTile label="Latest Action" value={soak?.latest_action || "-"} />
-          <HealthTile label="Report Age" value={ageLabel(soak?.report_age_seconds)} ok={(soak?.report_age_seconds ?? 9999) < 180} />
+          <HealthTile label="Started" value={shortDateTime(liveReal?.runtime?.started_at || formal?.latest_created_at || soak?.started_at || undefined)} ok={runtime.ok} />
+          <HealthTile label="Child Started" value={shortDateTime(childRuntime?.started_at || undefined)} ok={childRuntime?.running} />
+          <HealthTile label="Attempts" value={`${formal?.attempts ?? soak?.attempts ?? 0}`} />
+          <HealthTile label="Submissions" value={formal?.submitted ? "1+" : `${soak?.submitted_count ?? 0}`} ok={formal?.submitted ? true : (soak?.submitted_count ?? 0) >= 0} />
+          <HealthTile label="Mode" value={formal?.submitted ? "armed" : "watching"} ok={formal?.available ? true : undefined} />
+          <HealthTile label="Terminal" value={formal?.terminal_reason || soak?.terminal_reason || "-"} ok={formal?.terminal_reason ? formal.terminal_reason !== "submit_blocked" : soak?.terminal_reason ? soak.terminal_reason !== "submit_blocked" : undefined} />
+          <HealthTile label="Latest Action" value={formal?.latest_action || soak?.latest_action || "-"} />
+          <HealthTile label="Report Age" value={ageLabel(reportAge)} ok={(reportAge ?? 9999) < 420} />
         </div>
         <div className="rounded-md border border-zinc-900 bg-black/20 p-3">
           <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Latest Reason</div>
-          <div className="mt-1 truncate text-sm text-zinc-300">{soak?.latest_reason || "-"}</div>
+          <div className="mt-1 truncate text-sm text-zinc-300">{formal?.latest_reason || formal?.reason || soak?.latest_reason || "-"}</div>
           {blockers.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {blockers.slice(0, 4).map((blocker) => (
@@ -1522,11 +1600,11 @@ function LiveRealOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"] 
           <HealthTile label="Open/Pending" value={`${liveReal?.orders.open_or_pending ?? 0}`} ok={(liveReal?.orders.open_or_pending ?? 0) === 0} />
           <HealthTile label="Settled" value={`${liveReal?.orders.settled ?? 0}`} />
           <HealthTile label="Cancelled" value={`${liveReal?.orders.cancelled ?? 0}`} />
+          <HealthTile label="No-fill" value={`${liveReal?.orders.no_fill_cancelled ?? 0}`} />
           <HealthTile label="Filled Size" value={`${liveReal?.orders.filled_size ?? 0}`} />
           <HealthTile label="Daily PnL" value={signedMoney(liveReal?.risk?.metrics.daily_pnl_usdc ?? 0)} ok={(liveReal?.risk?.metrics.daily_pnl_usdc ?? 0) >= 0} />
           <HealthTile label="Daily Trades" value={`${liveReal?.risk?.metrics.daily_trades ?? 0}/${liveReal?.risk?.limits.max_daily_trades ?? "-"}`} />
           <HealthTile label="Loss Limit" value={money(liveReal?.risk?.limits.max_daily_loss_usdc ?? 0)} />
-          <HealthTile label="Ledger" value={liveReal?.ledger_exists ? "found" : "missing"} ok={liveReal?.ledger_exists} />
         </div>
         <div className="rounded-md border border-zinc-900 bg-black/20 p-3">
           <div className="mb-2 text-[11px] uppercase tracking-[0.14em] text-zinc-600">Latest Real Order</div>
@@ -1600,6 +1678,82 @@ function CurrentClobOrdersPanel({ audit }: { audit?: LiveSafety["clob_readonly"]
                   <td className="px-3 py-2 font-mono text-zinc-500">{shortDateTime(order.created_at)}</td>
                 </tr>
               ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
+function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"] | null }) {
+  const records = liveReal?.order_records ?? [];
+  const visible = records.slice(0, 12);
+  const positions = records.filter((record) => liveOrderGroup(record) === "Position").length;
+  const settled = records.filter((record) => liveOrderGroup(record) === "Settled").length;
+  const closed = records.filter((record) => liveOrderGroup(record) === "Closed").length;
+  return (
+    <Panel
+      title="Live Ledger Orders"
+      sub="positions and settled real orders"
+      right={<span className="font-mono text-xs text-zinc-500">{records.length} latest</span>}
+    >
+      <div className="border-b border-zinc-900 px-4 py-3">
+        <div className="grid grid-cols-3 gap-2">
+          <HealthTile label="Position" value={`${positions}`} ok={positions === 0 ? true : undefined} />
+          <HealthTile label="Settled" value={`${settled}`} />
+          <HealthTile label="Closed" value={`${closed}`} />
+        </div>
+      </div>
+      <div className="max-h-[420px] overflow-auto">
+        {visible.length === 0 ? (
+          <div className="px-4 py-8 text-center">
+            <div className="text-sm text-zinc-400">No live ledger orders</div>
+            <div className="mt-1 text-xs text-zinc-600">Filled and settled real orders will appear here</div>
+          </div>
+        ) : (
+          <table className="min-w-[900px] text-left text-xs">
+            <thead className="sticky top-0 bg-zinc-950 text-[11px] uppercase tracking-[0.12em] text-zinc-600">
+              <tr>
+                <th className="px-4 py-2 font-medium">Order</th>
+                <th className="px-3 py-2 font-medium">Group</th>
+                <th className="px-3 py-2 font-medium">Market</th>
+                <th className="px-3 py-2 font-medium">Dir</th>
+                <th className="px-3 py-2 font-medium">Price</th>
+                <th className="px-3 py-2 font-medium">Filled</th>
+                <th className="px-3 py-2 font-medium">Remaining</th>
+                <th className="px-3 py-2 font-medium">PnL</th>
+                <th className="px-3 py-2 font-medium">Settle</th>
+                <th className="px-3 py-2 font-medium">Source</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-900">
+              {visible.map((order, index) => {
+                const status = String(order.status || "-");
+                const group = liveOrderGroup(order);
+                const pnl = order.pnl ?? null;
+                return (
+                  <tr key={order.order_id || `${order.market_slug}-${index}`} className="hover:bg-zinc-900/40">
+                    <td className="px-4 py-2 font-mono text-zinc-300" title={order.order_id || ""}>{compactId(order.order_id || undefined)}</td>
+                    <td className="px-3 py-2">
+                      <span className={`inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] ${liveOrderStatusTone(status)}`}>{group}</span>
+                    </td>
+                    <td className="max-w-[230px] truncate px-3 py-2 font-mono text-zinc-400" title={order.market_slug || ""}>{order.market_slug || "-"}</td>
+                    <td className="px-3 py-2">
+                      <span className="inline-flex items-center gap-1 font-mono text-zinc-200">
+                        {directionIcon(order.token_outcome || order.direction || undefined)}
+                        {directionLabel(order.token_outcome || order.direction || "-")}
+                      </span>
+                    </td>
+                    <td className="px-3 py-2 font-mono text-zinc-100">{orderPrice(order.average_fill_price ?? order.price)}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-300">{orderSize(order.filled_size)}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-300">{orderSize(order.remaining_size)}</td>
+                    <td className={`px-3 py-2 font-mono font-semibold ${pnl == null ? "text-zinc-500" : pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{orderValue(pnl)}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-500">{shortDateTime(order.settle_ts || order.settled_at || undefined)}</td>
+                    <td className="px-3 py-2 font-mono text-zinc-500">{order.settlement_source || order.market_result_source || order.fill_source || "-"}</td>
+                  </tr>
+                );
+              })}
             </tbody>
           </table>
         )}
@@ -1739,10 +1893,18 @@ export default function Live({ activeTradingTab }: { activeTradingTab: TradingTa
   const liveWins = liveReal?.risk?.metrics.wins ?? 0;
   const liveLosses = liveReal?.risk?.metrics.losses ?? 0;
   const liveWinRate = liveReal?.risk?.metrics.win_rate ?? 0;
+  const liveMarketResults = liveReal?.market_results;
+  const liveSignalResolved = liveMarketResults?.resolved ?? 0;
+  const liveSignalWins = liveMarketResults?.wins ?? 0;
+  const liveSignalLosses = liveMarketResults?.losses ?? 0;
+  const liveSignalWinRate = liveMarketResults?.win_rate ?? 0;
   const liveEquityPnl = liveEquity?.pnl_usdc ?? livePnl;
   const liveRiskLimits = liveReal?.risk?.limits;
-  const liveSubmitted = liveReal?.soak.submitted_count ?? 0;
-  const liveMode = liveReal?.soak.submit_enabled ? "ARMED" : "PREVIEW";
+  const liveSubmitted = liveReal?.orders.total ?? (liveReal?.formal?.submitted ? 1 : liveReal?.soak.submitted_count ?? 0);
+  const liveCancelled = liveReal?.orders.cancelled ?? 0;
+  const liveNoFillCancelled = liveReal?.orders.no_fill_cancelled ?? 0;
+  const liveFilledSize = liveReal?.orders.filled_size ?? 0;
+  const liveRuntimeRole = liveReal?.runtime?.role === "formal_supervisor" ? "supervisor" : "process";
   const paperOpenPending = (paperMonitor?.orders.open ?? todayOpen) + (paperMonitor?.orders.pending ?? pendingCount);
   const modeLabel = isPaperMonitorTab ? "Paper Monitor" : "Live Real";
   const modeStatus = isPaperMonitorTab ? "Simulation only" : safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked";
@@ -1760,12 +1922,12 @@ export default function Live({ activeTradingTab }: { activeTradingTab: TradingTa
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">
             <StatCard label="CLOB Balance" value={money(fundingBalance)} sub={fundingBalanceSub} icon={Wallet} tone={fundingBalanceTone} />
             <StatCard label="Open/Pending" value={`${liveOrderCount}`} sub={`live ledger | limit ${liveRiskLimits?.max_open_or_pending_orders ?? "-"}`} icon={Clock3} tone={liveOrderCount === 0 ? "text-emerald-300" : "text-amber-300"} />
-            <StatCard label="Today PnL" value={signedMoney(livePnl)} sub={`${liveTrades} real trades today`} icon={CircleDollarSign} tone={livePnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
-            <StatCard label="Real Win Rate" value={percent(liveWinRate)} sub={`${liveWins}W / ${liveLosses}L today`} icon={Target} tone={liveTrades === 0 ? "text-zinc-100" : liveWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
+            <StatCard label="Realized PnL" value={signedMoney(livePnl)} sub={`${liveTrades} settled today | ${liveCancelled} cancelled`} icon={CircleDollarSign} tone={livePnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
+            <StatCard label="Settled Win Rate" value={percent(liveWinRate)} sub={`${liveWins}W / ${liveLosses}L settled`} icon={Target} tone={liveTrades === 0 ? "text-zinc-100" : liveWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
             <StatCard label="Loss Limit" value={money(liveRiskLimits?.max_daily_loss_usdc ?? 0)} sub="daily guarded stop" icon={AlertTriangle} tone="text-zinc-100" />
-            <StatCard label="Soak Runtime" value={liveRuntime.label} sub={`${liveReal?.runtime?.matches.length ?? 0} process match`} icon={RadioTower} tone={liveRuntime.ok ? "text-emerald-300" : "text-amber-300"} />
-            <StatCard label="Submitted" value={`${liveSubmitted}`} sub={`${liveReal?.soak.attempts ?? 0} attempts`} icon={ListChecks} tone={liveSubmitted === 0 ? "text-zinc-100" : "text-emerald-300"} />
-            <StatCard label="Mode" value={liveMode} sub={safety?.kill_switch?.state ?? "locked"} icon={Lock} tone={liveReal?.soak.submit_enabled ? "text-amber-300" : "text-zinc-100"} />
+            <StatCard label="Live Runtime" value={liveRuntime.label} sub={`${liveReal?.runtime?.matches.length ?? 0} ${liveRuntimeRole} match`} icon={RadioTower} tone={liveRuntime.ok ? "text-emerald-300" : "text-amber-300"} />
+            <StatCard label="Orders" value={`${liveSubmitted}`} sub={`${liveFilledSize} filled | ${liveNoFillCancelled} no-fill`} icon={ListChecks} tone={liveSubmitted === 0 ? "text-zinc-100" : liveFilledSize > 0 ? "text-emerald-300" : "text-amber-300"} />
+            <StatCard label="Signal Result" value={percent(liveSignalWinRate)} sub={`${liveSignalWins}W / ${liveSignalLosses}L market result`} icon={Target} tone={liveSignalResolved === 0 ? "text-zinc-100" : liveSignalWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
           </div>
 
           <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]">
@@ -1776,8 +1938,12 @@ export default function Live({ activeTradingTab }: { activeTradingTab: TradingTa
             <LiveSoakPanel liveReal={liveReal} />
           </div>
 
-          <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(360px,0.75fr)]">
+          <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(360px,0.75fr)_minmax(0,1.25fr)]">
             <CurrentClobOrdersPanel audit={safety?.clob_readonly} />
+            <LiveLedgerOrdersPanel liveReal={liveReal} />
+          </div>
+
+          <div className="grid min-w-0 gap-5">
             <LiveRealOrdersPanel liveReal={liveReal} />
           </div>
 
