@@ -135,6 +135,14 @@ def _live_real_ledger_path():
     return KRONOS_CHECKPOINT_DIR / "live_real_orders_current_next.json"
 
 
+def _polymarket_account_activity_path():
+    configured = (os.environ.get("DASHBOARD_POLYMARKET_ACCOUNT_ACTIVITY_REPORT") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_REPORT_DIR / path
+    return KRONOS_REPORT_DIR / "polymarket_account_activity_latest.json"
+
+
 def _safe_feature_path(rel_path: str):
     root = KRONOS_FEATURE_DIR.resolve()
     candidate = (root / rel_path).resolve()
@@ -1650,6 +1658,102 @@ def _live_order_records(records, *, limit=60):
     return [_live_order_record_summary(record) for record in ordered[:limit]]
 
 
+def _unix_timestamp_iso(value):
+    try:
+        timestamp = float(value)
+    except (TypeError, ValueError):
+        return None
+    if timestamp <= 0:
+        return None
+    return datetime.fromtimestamp(timestamp, tz=timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _polymarket_activity_ts(row):
+    if not isinstance(row, dict):
+        return None
+    timestamp_iso = _unix_timestamp_iso(row.get("timestamp"))
+    if timestamp_iso:
+        return _parse_dt(timestamp_iso)
+    for key in ("created_at", "createdAt", "updated_at", "updatedAt", "ts"):
+        parsed = _parse_dt(row.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _polymarket_activity_summary(row):
+    ts = _polymarket_activity_ts(row)
+    return {
+        "type": str(row.get("type") or "").upper(),
+        "side": str(row.get("side") or "").upper(),
+        "outcome": row.get("outcome"),
+        "price": _num(row.get("price")),
+        "size": _num(row.get("size")),
+        "usdc_size": _num(row.get("usdcSize") or row.get("usdc_size")),
+        "slug": row.get("slug") or row.get("eventSlug"),
+        "event_slug": row.get("eventSlug") or row.get("slug"),
+        "title": row.get("title"),
+        "timestamp": row.get("timestamp"),
+        "timestamp_iso": _iso_utc(ts),
+        "transaction_hash": row.get("transactionHash") or row.get("transaction_hash"),
+    }
+
+
+def _polymarket_position_summary(row):
+    return {
+        "slug": row.get("slug") or row.get("eventSlug"),
+        "event_slug": row.get("eventSlug") or row.get("slug"),
+        "title": row.get("title"),
+        "outcome": row.get("outcome"),
+        "size": _num(row.get("size")),
+        "avg_price": _num(row.get("avgPrice") or row.get("avg_price")),
+        "current_value": _num(row.get("currentValue") or row.get("current_value")),
+        "cash_pnl": _num(row.get("cashPnl") or row.get("cash_pnl")),
+        "realized_pnl": _num(row.get("realizedPnl") or row.get("realized_pnl")),
+        "cur_price": _num(row.get("curPrice") or row.get("cur_price")),
+        "redeemable": bool(row.get("redeemable")),
+        "mergeable": bool(row.get("mergeable")),
+    }
+
+
+def _polymarket_account_activity_summary(limit=30):
+    path = _polymarket_account_activity_path()
+    report = _read_json(path) or {}
+    activity = report.get("activity") if isinstance(report.get("activity"), list) else []
+    positions = report.get("positions") if isinstance(report.get("positions"), list) else []
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    report_mtime, report_age_seconds = _path_age(path if path.exists() else None)
+    ordered_activity = sorted(
+        [row for row in activity if isinstance(row, dict)],
+        key=lambda row: _polymarket_activity_ts(row) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )
+    ordered_positions = sorted(
+        [row for row in positions if isinstance(row, dict)],
+        key=lambda row: abs(_num(row.get("cashPnl") or row.get("cash_pnl")) or 0.0),
+        reverse=True,
+    )
+    return {
+        "available": path.exists(),
+        "ok": bool(report.get("ok")),
+        "source": report.get("source") or "polymarket_data_api",
+        "report": str(path),
+        "report_mtime": report_mtime,
+        "report_age_seconds": report_age_seconds,
+        "created_at": report.get("created_at"),
+        "user": report.get("user"),
+        "reason": report.get("reason"),
+        "summary": {
+            "activity_count": int(summary.get("activity_count", len(activity)) or 0),
+            "positions_count": int(summary.get("positions_count", len(positions)) or 0),
+            "trade_count": int(summary.get("trade_count", 0) or 0),
+            "redeem_count": int(summary.get("redeem_count", 0) or 0),
+        },
+        "recent_activity": [_polymarket_activity_summary(row) for row in ordered_activity[:limit]],
+        "positions": [_polymarket_position_summary(row) for row in ordered_positions[:limit]],
+    }
+
+
 def _live_soak_summary():
     path = KRONOS_REPORT_DIR / "prediction_bound_live_soak_latest.json"
     report = _read_json(path) or {}
@@ -1834,6 +1938,7 @@ def _live_real_summary(limits_override=None, current_balance=None):
         ),
         "latest_order": _latest_record(records),
         "order_records": _live_order_records(records),
+        "account_activity": _polymarket_account_activity_summary(),
     }
 
 

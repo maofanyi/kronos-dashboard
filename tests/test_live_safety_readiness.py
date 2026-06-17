@@ -1678,6 +1678,67 @@ def test_live_safety_surfaces_current_clob_open_orders(tmp_path, monkeypatch):
     assert audit["open_orders"][0]["remaining_size"] == 4.0
 
 
+def test_live_safety_includes_polymarket_account_activity_report(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    _write_json(
+        report_dir / "polymarket_account_activity_latest.json",
+        {
+            "ok": True,
+            "source": "polymarket_data_api",
+            "created_at": "2026-06-17T10:52:30Z",
+            "user": "0xfunder",
+            "summary": {
+                "activity_count": 2,
+                "positions_count": 1,
+                "trade_count": 2,
+                "redeem_count": 0,
+            },
+            "activity": [
+                {
+                    "timestamp": 1781692189,
+                    "type": "TRADE",
+                    "side": "BUY",
+                    "outcome": "Down",
+                    "price": 0.49,
+                    "size": 2.97,
+                    "usdcSize": 1.4553,
+                    "slug": "btc-updown-5m-1781692200",
+                    "title": "Bitcoin Up or Down",
+                    "transactionHash": "0xtrade",
+                }
+            ],
+            "positions": [
+                {
+                    "slug": "btc-updown-5m-1781692200",
+                    "title": "Bitcoin Up or Down",
+                    "outcome": "Down",
+                    "size": 5,
+                    "avgPrice": 0.49,
+                    "cashPnl": -2.45,
+                    "redeemable": True,
+                }
+            ],
+        },
+    )
+
+    summary = server._safety_report_summary()
+    account = summary["live_real"]["account_activity"]
+
+    assert account["available"] is True
+    assert account["ok"] is True
+    assert account["user"] == "0xfunder"
+    assert account["summary"]["trade_count"] == 2
+    assert account["recent_activity"][0]["slug"] == "btc-updown-5m-1781692200"
+    assert account["recent_activity"][0]["usdc_size"] == 1.4553
+    assert account["positions"][0]["cash_pnl"] == -2.45
+
+
 def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -3107,6 +3168,19 @@ def test_live_page_surfaces_live_ledger_order_records_panel():
     assert "positions and settled real orders" in source
     assert "order.settle_ts || order.settled_at" in source
     assert "order.settlement_source" in source
+
+
+def test_live_page_surfaces_polymarket_account_activity_panel():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+
+    assert "interface PolymarketAccountActivity" in source
+    assert "function PolymarketAccountActivityPanel" in source
+    assert "<PolymarketAccountActivityPanel account={liveReal?.account_activity}" in live_section
+    assert "PM Account Activity" in source
+    assert "Data API trades, redeems, positions" in source
+    assert "account?.recent_activity" in source
+    assert "account?.positions" in source
 
 
 def test_live_page_separates_live_real_and_paper_monitor_tabs():

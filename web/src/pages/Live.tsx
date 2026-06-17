@@ -152,6 +152,56 @@ interface LiveIntel {
   };
 }
 
+interface PolymarketAccountActivityRow {
+  type?: string;
+  side?: string;
+  outcome?: string;
+  price?: number | null;
+  size?: number | null;
+  usdc_size?: number | null;
+  slug?: string;
+  event_slug?: string;
+  title?: string;
+  timestamp?: number | string | null;
+  timestamp_iso?: string | null;
+  transaction_hash?: string;
+}
+
+interface PolymarketAccountPosition {
+  slug?: string;
+  event_slug?: string;
+  title?: string;
+  outcome?: string;
+  size?: number | null;
+  avg_price?: number | null;
+  current_value?: number | null;
+  cash_pnl?: number | null;
+  realized_pnl?: number | null;
+  cur_price?: number | null;
+  redeemable?: boolean;
+  mergeable?: boolean;
+}
+
+interface PolymarketAccountActivity {
+  available: boolean;
+  ok: boolean;
+  source?: string;
+  report: string;
+  report_mtime?: string | null;
+  report_age_seconds?: number | null;
+  created_at?: string | null;
+  user?: string | null;
+  reason?: string | null;
+  summary: {
+    activity_count: number;
+    positions_count: number;
+    trade_count: number;
+    redeem_count: number;
+  };
+  recent_activity: PolymarketAccountActivityRow[];
+  positions: PolymarketAccountPosition[];
+}
+
 interface LiveSafety {
   mode: string;
   run_source: string;
@@ -492,6 +542,7 @@ interface LiveSafety {
     equity: EquitySummary;
     latest_order?: Record<string, unknown> | null;
     order_records?: LiveOrderRecord[];
+    account_activity?: PolymarketAccountActivity;
   };
   paper_monitor?: {
     run_source: string;
@@ -1686,6 +1737,110 @@ function CurrentClobOrdersPanel({ audit }: { audit?: LiveSafety["clob_readonly"]
   );
 }
 
+function PolymarketAccountActivityPanel({ account }: { account?: PolymarketAccountActivity | null }) {
+  const activity = account?.recent_activity ?? [];
+  const positions = account?.positions ?? [];
+  const summary = account?.summary;
+  const fresh = (account?.report_age_seconds ?? 9999) < 180;
+  return (
+    <Panel
+      title="PM Account Activity"
+      sub="Data API trades, redeems, positions"
+      right={<StatusPill ok={account?.ok === true && fresh} label={account?.available ? ageLabel(account?.report_age_seconds) : "missing"} />}
+    >
+      <div className="border-b border-zinc-900 px-4 py-3">
+        <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
+          <HealthTile label="Trades" value={`${summary?.trade_count ?? 0}`} ok={(summary?.trade_count ?? 0) >= 0} />
+          <HealthTile label="Redeems" value={`${summary?.redeem_count ?? 0}`} />
+          <HealthTile label="Positions" value={`${summary?.positions_count ?? positions.length}`} />
+          <HealthTile label="Report Age" value={ageLabel(account?.report_age_seconds)} ok={fresh} />
+        </div>
+        {account?.reason && <div className="mt-2 truncate text-xs text-amber-300">{account.reason}</div>}
+      </div>
+
+      <div className="max-h-[460px] overflow-auto">
+        <div className="border-b border-zinc-900 px-4 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-600">Recent Activity</div>
+        {activity.length === 0 ? (
+          <div className="px-4 py-6 text-center">
+            <div className="text-sm text-zinc-400">No PM account activity report rows</div>
+            <div className="mt-1 text-xs text-zinc-600">{account?.available ? "waiting for Data API rows" : "waiting for account activity sync"}</div>
+          </div>
+        ) : (
+          <table className="min-w-[760px] text-left text-xs">
+            <thead className="sticky top-0 bg-zinc-950 text-[11px] uppercase tracking-[0.12em] text-zinc-600">
+              <tr>
+                <th className="px-4 py-2 font-medium">Time</th>
+                <th className="px-3 py-2 font-medium">Type</th>
+                <th className="px-3 py-2 font-medium">Market</th>
+                <th className="px-3 py-2 font-medium">Side</th>
+                <th className="px-3 py-2 font-medium">Price</th>
+                <th className="px-3 py-2 font-medium">Size</th>
+                <th className="px-3 py-2 font-medium">USDC</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-900">
+              {activity.slice(0, 8).map((row, index) => (
+                <tr key={`${row.transaction_hash || row.slug || "activity"}-${index}`} className="hover:bg-zinc-900/40">
+                  <td className="px-4 py-2 font-mono text-zinc-500">{shortDateTime(row.timestamp_iso || row.timestamp || undefined)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-300">{row.type || "-"}</td>
+                  <td className="max-w-[260px] truncate px-3 py-2 font-mono text-zinc-400" title={row.title || row.slug || ""}>{row.slug || row.event_slug || "-"}</td>
+                  <td className="px-3 py-2">
+                    <span className="inline-flex items-center gap-1 font-mono text-zinc-200">
+                      {directionIcon(row.outcome || row.side)}
+                      {row.side || "-"} {row.outcome || ""}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-zinc-100">{orderPrice(row.price)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-300">{orderSize(row.size)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-300">{orderValue(row.usdc_size)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+
+        <div className="border-y border-zinc-900 px-4 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-600">Positions</div>
+        {positions.length === 0 ? (
+          <div className="px-4 py-6 text-center">
+            <div className="text-sm text-zinc-400">No PM account positions</div>
+            <div className="mt-1 text-xs text-zinc-600">Filled positions will appear here after Data API sync</div>
+          </div>
+        ) : (
+          <table className="min-w-[760px] text-left text-xs">
+            <thead className="sticky top-0 bg-zinc-950 text-[11px] uppercase tracking-[0.12em] text-zinc-600">
+              <tr>
+                <th className="px-4 py-2 font-medium">Market</th>
+                <th className="px-3 py-2 font-medium">Outcome</th>
+                <th className="px-3 py-2 font-medium">Size</th>
+                <th className="px-3 py-2 font-medium">Avg</th>
+                <th className="px-3 py-2 font-medium">Cash PnL</th>
+                <th className="px-3 py-2 font-medium">Redeem</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-900">
+              {positions.slice(0, 8).map((position, index) => (
+                <tr key={`${position.slug || "position"}-${position.outcome || ""}-${index}`} className="hover:bg-zinc-900/40">
+                  <td className="max-w-[280px] truncate px-4 py-2 font-mono text-zinc-400" title={position.title || position.slug || ""}>{position.slug || position.event_slug || "-"}</td>
+                  <td className="px-3 py-2">
+                    <span className="inline-flex items-center gap-1 font-mono text-zinc-200">
+                      {directionIcon(position.outcome)}
+                      {directionLabel(position.outcome || "-")}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-zinc-300">{orderSize(position.size)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-100">{orderPrice(position.avg_price)}</td>
+                  <td className={`px-3 py-2 font-mono font-semibold ${position.cash_pnl == null ? "text-zinc-500" : position.cash_pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{orderValue(position.cash_pnl)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-400">{position.redeemable ? "yes" : "no"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </Panel>
+  );
+}
+
 function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"] | null }) {
   const records = liveReal?.order_records ?? [];
   const visible = records.slice(0, 12);
@@ -1938,8 +2093,9 @@ export default function Live({ activeTradingTab }: { activeTradingTab: TradingTa
             <LiveSoakPanel liveReal={liveReal} />
           </div>
 
-          <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(360px,0.75fr)_minmax(0,1.25fr)]">
+          <div className="grid min-w-0 gap-5 xl:grid-cols-2 2xl:grid-cols-[minmax(320px,0.65fr)_minmax(420px,0.95fr)_minmax(0,1.15fr)]">
             <CurrentClobOrdersPanel audit={safety?.clob_readonly} />
+            <PolymarketAccountActivityPanel account={liveReal?.account_activity} />
             <LiveLedgerOrdersPanel liveReal={liveReal} />
           </div>
 
