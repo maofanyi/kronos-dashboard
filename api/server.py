@@ -1465,6 +1465,303 @@ def _weekly_pnl_calendar_from_records(records, *, now=None):
     }
 
 
+def _analytics_trade_fact(record, *, hypothetical=False):
+    if not isinstance(record, dict):
+        return None
+    status = str(record.get("status") or "").upper() or "UNKNOWN"
+    filled_size = _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size") or 0.0
+    size = _float_value(record, "size", "original_size", "target_size", "requested_size", "order_size_shares")
+    price = _float_value(record, "average_fill_price", "avg_fill_price", "price", "limit_price")
+
+    if hypothetical:
+        raw_price = _float_value(record, "price", "limit_price")
+        hypothetical_pnl, hypothetical_won, hypothetical_pnl_basis = _hypothetical_order_result(
+            record,
+            status=status,
+            filled_size=filled_size,
+            size=size,
+            price=raw_price,
+            actual_pnl=_float_value(record, "pnl", "net_pnl", "realized_pnl", "pnl_usdc"),
+        )
+        if hypothetical_pnl is None or hypothetical_won is None:
+            return None
+        pnl = hypothetical_pnl
+        won = hypothetical_won
+        basis = hypothetical_pnl_basis
+        price = raw_price
+    else:
+        if not _is_equity_settled_record(record):
+            return None
+        pnl = _record_pnl(record)
+        won = _record_won(record)
+        basis = "actual_settlement"
+
+    ts = _record_ts(record)
+    direction = _order_outcome_direction(record) or str(record.get("direction") or record.get("side") or record.get("action") or "").upper() or "UNKNOWN"
+    price_tier = str(record.get("price_tier") or "").strip()
+    if not price_tier:
+        price_tier = f"price_{price:.2f}" if price is not None else "legacy_or_unset"
+    return {
+        "order_id": record.get("order_id"),
+        "market_slug": record.get("market_slug"),
+        "status": status,
+        "pnl": round(float(pnl), 8),
+        "won": won,
+        "ts": ts,
+        "ts_iso": _iso_utc(ts),
+        "direction": direction,
+        "price": price,
+        "price_tier": price_tier,
+        "filled_size": round(float(filled_size), 8),
+        "size": size,
+        "settlement_source": record.get("settlement_source") or record.get("market_result_source") or record.get("fill_source") or "",
+        "execution_result": record.get("execution_result") or status,
+        "basis": basis,
+    }
+
+
+def _analytics_metric_summary(facts):
+    facts = [fact for fact in (facts or []) if isinstance(fact, dict)]
+    count = len(facts)
+    wins = sum(1 for fact in facts if fact.get("won") is True)
+    losses = sum(1 for fact in facts if fact.get("won") is False)
+    gross_profit = sum(float(fact.get("pnl") or 0.0) for fact in facts if float(fact.get("pnl") or 0.0) > 0)
+    gross_loss = sum(float(fact.get("pnl") or 0.0) for fact in facts if float(fact.get("pnl") or 0.0) < 0)
+    total_pnl = gross_profit + gross_loss
+    average_win = gross_profit / wins if wins else None
+    average_loss = gross_loss / losses if losses else None
+    loss_abs = abs(gross_loss)
+    profit_factor = gross_profit / loss_abs if loss_abs > 0 else None
+    payoff_ratio = average_win / abs(average_loss) if average_win is not None and average_loss not in (None, 0) else None
+    breakeven_win_rate = abs(average_loss) / (average_win + abs(average_loss)) if average_win is not None and average_loss not in (None, 0) else None
+    return {
+        "count": count,
+        "settled": count,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / count, 4) if count else 0.0,
+        "total_pnl_usdc": round(total_pnl, 8),
+        "gross_profit_usdc": round(gross_profit, 8),
+        "gross_loss_usdc": round(gross_loss, 8),
+        "average_pnl_usdc": round(total_pnl / count, 8) if count else 0.0,
+        "average_win_usdc": round(average_win, 8) if average_win is not None else None,
+        "average_loss_usdc": round(average_loss, 8) if average_loss is not None else None,
+        "profit_factor": round(profit_factor, 4) if profit_factor is not None else None,
+        "payoff_ratio": round(payoff_ratio, 4) if payoff_ratio is not None else None,
+        "breakeven_win_rate": round(breakeven_win_rate, 4) if breakeven_win_rate is not None else None,
+    }
+
+
+def _analytics_drawdown(points):
+    if not points:
+        return {
+            "points": [],
+            "max_drawdown_usdc": 0.0,
+            "max_drawdown_pct": 0.0,
+            "current_drawdown_usdc": 0.0,
+            "current_drawdown_pct": 0.0,
+            "peak": 0.0,
+            "trough": 0.0,
+        }
+    peak = float(points[0])
+    max_drawdown = 0.0
+    max_drawdown_pct = 0.0
+    trough = float(points[0])
+    drawdown_points = []
+    for raw_value in points:
+        value = float(raw_value)
+        if value > peak:
+            peak = value
+        drawdown = peak - value
+        drawdown_pct = drawdown / peak if peak else 0.0
+        if drawdown > max_drawdown:
+            max_drawdown = drawdown
+            max_drawdown_pct = drawdown_pct
+            trough = value
+        drawdown_points.append(round(-drawdown, 8))
+    current_peak = max(float(value) for value in points)
+    current_value = float(points[-1])
+    current_drawdown = current_peak - current_value
+    current_drawdown_pct = current_drawdown / current_peak if current_peak else 0.0
+    return {
+        "points": drawdown_points,
+        "max_drawdown_usdc": round(max_drawdown, 8),
+        "max_drawdown_pct": round(max_drawdown_pct, 4),
+        "current_drawdown_usdc": round(current_drawdown, 8),
+        "current_drawdown_pct": round(current_drawdown_pct, 4),
+        "peak": round(current_peak, 8),
+        "trough": round(trough, 8),
+    }
+
+
+def _analytics_streaks(facts):
+    longest_win = 0
+    longest_loss = 0
+    current_win = 0
+    current_loss = 0
+    for fact in sorted(facts or [], key=lambda item: item.get("ts") or datetime.min.replace(tzinfo=timezone.utc)):
+        if fact.get("won") is True:
+            current_win += 1
+            current_loss = 0
+        elif fact.get("won") is False:
+            current_loss += 1
+            current_win = 0
+        else:
+            current_win = 0
+            current_loss = 0
+        longest_win = max(longest_win, current_win)
+        longest_loss = max(longest_loss, current_loss)
+    return {
+        "longest_win_streak": longest_win,
+        "longest_loss_streak": longest_loss,
+        "current_win_streak": current_win,
+        "current_loss_streak": current_loss,
+    }
+
+
+def _analytics_breakdown(facts, key_fn, *, limit=16):
+    groups = {}
+    for fact in facts or []:
+        key = str(key_fn(fact) or "unknown")
+        groups.setdefault(key, []).append(fact)
+    rows = []
+    for key, items in groups.items():
+        summary = _analytics_metric_summary(items)
+        rows.append({"key": key, "label": key.replace("_", " "), **summary})
+    rows.sort(key=lambda item: (-int(item["count"]), -abs(float(item["total_pnl_usdc"])), str(item["key"])))
+    return rows[:limit]
+
+
+def _analytics_daily_series(facts):
+    dated = [fact for fact in facts or [] if isinstance(fact.get("ts"), datetime)]
+    if not dated:
+        return []
+    start = min(fact["ts"].date() for fact in dated)
+    end = max(fact["ts"].date() for fact in dated)
+    days = []
+    current = start
+    by_day = {}
+    for fact in dated:
+        by_day.setdefault(fact["ts"].date(), []).append(fact)
+    while current <= end:
+        day_facts = by_day.get(current, [])
+        days.append({"date": current.isoformat(), **_analytics_metric_summary(day_facts)})
+        current += timedelta(days=1)
+    return days
+
+
+def _analytics_window(facts, *, now, days=None, today=False):
+    if today:
+        filtered = [fact for fact in facts if isinstance(fact.get("ts"), datetime) and fact["ts"].date() == now.date()]
+    elif days is not None:
+        cutoff = now - timedelta(days=days)
+        filtered = [fact for fact in facts if isinstance(fact.get("ts"), datetime) and fact["ts"] >= cutoff]
+    else:
+        filtered = facts
+    return _analytics_metric_summary(filtered)
+
+
+def _live_analytics_summary():
+    ledger_path = _live_real_ledger_path()
+    records = _rows_from_ledger_payload(_read_json(ledger_path))
+    actual_facts = [
+        fact
+        for fact in (_analytics_trade_fact(record) for record in records)
+        if fact is not None
+    ]
+    actual_facts = sorted(actual_facts, key=lambda item: item.get("ts") or datetime.min.replace(tzinfo=timezone.utc))
+    hypothetical_facts = [
+        fact
+        for fact in (_analytics_trade_fact(record, hypothetical=True) for record in records)
+        if fact is not None
+    ]
+    now = datetime.now(timezone.utc)
+    equity = _equity_summary_from_records(records, source="live_real_orders")
+    labels = ["Start"] + [
+        fact.get("ts_iso") or ""
+        for fact in actual_facts
+    ]
+    drawdown = _analytics_drawdown(equity.get("points") or [])
+    summary = _analytics_metric_summary(actual_facts)
+    hypothetical_summary = _analytics_metric_summary(hypothetical_facts)
+    return {
+        "source": "live_real_orders_current_next",
+        "ledger": str(ledger_path),
+        "ledger_exists": ledger_path.exists(),
+        "record_count": len(records),
+        "generated_at": _iso_utc(now),
+        "summary": {
+            **summary,
+            **_analytics_streaks(actual_facts),
+            "max_drawdown_usdc": drawdown["max_drawdown_usdc"],
+            "max_drawdown_pct": drawdown["max_drawdown_pct"],
+            "current_drawdown_usdc": drawdown["current_drawdown_usdc"],
+            "current_drawdown_pct": drawdown["current_drawdown_pct"],
+        },
+        "windows": {
+            "today_utc": _analytics_window(actual_facts, now=now, today=True),
+            "last_24h": _analytics_window(actual_facts, now=now, days=1),
+            "last_7d": _analytics_window(actual_facts, now=now, days=7),
+            "all": summary,
+        },
+        "equity": {
+            **equity,
+            "labels": labels,
+            "drawdown_points": drawdown["points"],
+            "drawdown": drawdown,
+        },
+        "pnl_composition": {
+            "gross_profit_usdc": summary["gross_profit_usdc"],
+            "gross_loss_usdc": summary["gross_loss_usdc"],
+            "absolute_loss_usdc": round(abs(summary["gross_loss_usdc"]), 8),
+            "profit_share": round(
+                summary["gross_profit_usdc"] / (summary["gross_profit_usdc"] + abs(summary["gross_loss_usdc"])),
+                4,
+            )
+            if summary["gross_profit_usdc"] + abs(summary["gross_loss_usdc"]) > 0
+            else 0.0,
+            "loss_share": round(
+                abs(summary["gross_loss_usdc"]) / (summary["gross_profit_usdc"] + abs(summary["gross_loss_usdc"])),
+                4,
+            )
+            if summary["gross_profit_usdc"] + abs(summary["gross_loss_usdc"]) > 0
+            else 0.0,
+        },
+        "breakdowns": {
+            "price_tier": _analytics_breakdown(actual_facts, lambda fact: fact.get("price_tier")),
+            "direction": _analytics_breakdown(actual_facts, lambda fact: fact.get("direction")),
+            "price": _analytics_breakdown(actual_facts, lambda fact: f"{float(fact['price']):.2f}" if fact.get("price") is not None else "unknown"),
+            "settlement_source": _analytics_breakdown(actual_facts, lambda fact: fact.get("settlement_source") or "unknown"),
+            "status": _analytics_breakdown(actual_facts, lambda fact: fact.get("status") or "unknown"),
+        },
+        "daily": _analytics_daily_series(actual_facts),
+        "hypothetical_no_fill": {
+            **hypothetical_summary,
+            "breakdowns": {
+                "price_tier": _analytics_breakdown(hypothetical_facts, lambda fact: fact.get("price_tier")),
+                "direction": _analytics_breakdown(hypothetical_facts, lambda fact: fact.get("direction")),
+                "price": _analytics_breakdown(hypothetical_facts, lambda fact: f"{float(fact['price']):.2f}" if fact.get("price") is not None else "unknown"),
+            },
+            "records": [
+                {
+                    key: value
+                    for key, value in fact.items()
+                    if key not in {"ts"}
+                }
+                for fact in sorted(hypothetical_facts, key=lambda item: item.get("ts") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:80]
+            ],
+        },
+        "recent": [
+            {
+                key: value
+                for key, value in fact.items()
+                if key not in {"ts"}
+            }
+            for fact in sorted(actual_facts, key=lambda item: item.get("ts") or datetime.min.replace(tzinfo=timezone.utc), reverse=True)[:80]
+        ],
+    }
+
+
 def _risk_records_from_payload(payload):
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -4298,6 +4595,11 @@ def api_live_safety():
 @app.route("/api/live-risk")
 def api_live_risk():
     return jsonify(_live_risk_summary())
+
+
+@app.route("/api/live-analytics")
+def api_live_analytics():
+    return jsonify(_live_analytics_summary())
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,16 @@
-import { Activity, BarChart3 } from "lucide-react";
+import { Activity, BarChart3, PieChart } from "lucide-react";
 import { useState } from "react";
 import BTCPriceBar from "./components/BTCPriceBar";
 import StatusBar from "./components/StatusBar";
+import Analytics from "./pages/Analytics";
 import Backtest from "./pages/Backtest";
 import Live, { type TradingTab } from "./pages/Live";
 
-type Tab = "live" | "research";
+type Tab = "live" | "analytics" | "research";
 
 const tabs: Array<[Tab, string, typeof Activity]> = [
   ["live", "Live", Activity],
+  ["analytics", "Analytics", PieChart],
   ["research", "Research", BarChart3],
 ];
 
@@ -40,6 +42,7 @@ export default function App() {
 
       <div className="p-4 lg:p-5">
         {tab === "live" && <Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab} />}
+        {tab === "analytics" && <Analytics />}
         {tab === "research" && <Backtest />}
       </div>
     </div>

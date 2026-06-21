@@ -171,6 +171,85 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
     assert no_fill_record["hypothetical_pnl_basis"] == "unfilled_limit"
 
 
+def test_live_analytics_summarizes_pnl_drawdown_and_no_fill_hypothetical(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "order_id": "win-049",
+                "status": "SETTLED",
+                "settled_at": "2026-06-14T00:05:00Z",
+                "pnl": 5.0,
+                "won": True,
+                "price": 0.49,
+                "price_tier": "maker_049",
+                "direction": "BUY_UP",
+                "settlement_source": "chainlink_candlestick",
+            },
+            {
+                "order_id": "loss-050",
+                "status": "SETTLED",
+                "settled_at": "2026-06-14T00:10:00Z",
+                "pnl": -2.0,
+                "won": False,
+                "price": 0.50,
+                "price_tier": "taker_050",
+                "direction": "BUY_DOWN",
+                "settlement_source": "chainlink_candlestick",
+            },
+            {
+                "order_id": "loss-049",
+                "status": "SETTLED",
+                "settled_at": "2026-06-14T00:15:00Z",
+                "pnl": -3.0,
+                "won": False,
+                "price": 0.49,
+                "price_tier": "maker_049",
+                "direction": "BUY_UP",
+                "settlement_source": "chainlink_candlestick",
+            },
+            {
+                "order_id": "nofill-049",
+                "status": "CANCELLED",
+                "created_at": "2026-06-14T00:20:00Z",
+                "execution_result": "no_fill",
+                "size": 10,
+                "filled_size": 0,
+                "price": 0.49,
+                "price_tier": "maker_049",
+                "direction": "BUY_UP",
+                "actual_up_chainlink": True,
+                "signal_would_have_won": True,
+            },
+        ],
+    )
+
+    summary = server._live_analytics_summary()
+
+    assert summary["summary"]["settled"] == 3
+    assert summary["summary"]["wins"] == 1
+    assert summary["summary"]["losses"] == 2
+    assert summary["summary"]["total_pnl_usdc"] == 0.0
+    assert summary["summary"]["profit_factor"] == 1.0
+    assert summary["summary"]["max_drawdown_usdc"] == 5.0
+    assert summary["equity"]["points"] == [500.0, 505.0, 503.0, 500.0]
+    price_tiers = {row["key"]: row for row in summary["breakdowns"]["price_tier"]}
+    assert price_tiers["maker_049"]["count"] == 2
+    assert price_tiers["maker_049"]["total_pnl_usdc"] == 2.0
+    assert price_tiers["taker_050"]["count"] == 1
+    assert price_tiers["taker_050"]["total_pnl_usdc"] == -2.0
+    assert summary["hypothetical_no_fill"]["count"] == 1
+    assert summary["hypothetical_no_fill"]["wins"] == 1
+    assert summary["hypothetical_no_fill"]["total_pnl_usdc"] == 5.1
+
+    with server.app.test_client() as client:
+        payload = client.get("/api/live-analytics").get_json()
+    assert payload["summary"]["settled"] == 3
+
+
 def test_paper_monitor_exposes_total_win_rate_from_checkpoint():
     checkpoint = {
         "balance": 502.0,
@@ -3352,18 +3431,35 @@ def test_live_formal_process_shows_total_and_child_runtime():
     assert '<HealthTile label="Child Started"' in source
 
 
-def test_app_collapses_top_nav_to_live_and_research():
+def test_app_keeps_top_nav_to_live_analytics_and_research():
     source = Path("web/src/App.tsx").read_text(encoding="utf-8")
 
     assert 'import Live, { type TradingTab } from "./pages/Live";' in source
-    assert 'type Tab = "live" | "research";' in source
+    assert 'import Analytics from "./pages/Analytics";' in source
+    assert 'type Tab = "live" | "analytics" | "research";' in source
     assert '["live", "Live", Activity]' in source
+    assert '["analytics", "Analytics", PieChart]' in source
     assert '["research", "Research", BarChart3]' in source
     assert '["live-real", "Live Real", Activity]' not in source
     assert '["paper-monitor", "Paper Monitor", Activity]' not in source
     assert "Compare" not in source
     assert "setActiveTradingTab" in source
     assert "<Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab}" in source
+    assert 'tab === "analytics" && <Analytics />' in source
+
+
+def test_analytics_page_surfaces_trade_performance_sections():
+    source = Path("web/src/pages/Analytics.tsx").read_text(encoding="utf-8")
+
+    assert 'usePolling<AnalyticsData>("/api/live-analytics"' in source
+    assert "Total PnL" in source
+    assert "Win Rate" in source
+    assert "Profit Factor" in source
+    assert "Max Drawdown" in source
+    assert "PnL Composition" in source
+    assert "Price Tier Breakdown" in source
+    assert "No-Fill Outcome" in source
+    assert "Drawdown" in source
 
 
 def test_live_page_keeps_paper_trade_tables_out_of_live_real_tab():
