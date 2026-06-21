@@ -54,8 +54,12 @@ type AnalyticsData = {
   ledger_exists: boolean;
   record_count: number;
   generated_at?: string | null;
+  day?: string;
+  day_tz?: string;
+  day_start_utc?: string;
+  day_end_utc?: string;
   summary: AnalyticsSummary;
-  windows: Record<"today_utc" | "last_24h" | "last_7d" | "all", MetricSummary>;
+  windows: Record<"today" | "today_utc" | "last_24h" | "last_7d" | "all", MetricSummary>;
   equity: {
     points: number[];
     labels?: string[];
@@ -213,7 +217,7 @@ function BreakdownTable({ rows, title, sub }: { rows?: BreakdownRow[]; title: st
 
 function WindowPanel({ windows }: { windows?: AnalyticsData["windows"] }) {
   const rows: Array<[string, MetricSummary | undefined]> = [
-    ["Today UTC", windows?.today_utc],
+    ["Today Trading Day", windows?.today ?? windows?.today_utc],
     ["Last 24h", windows?.last_24h],
     ["Last 7d", windows?.last_7d],
     ["All", windows?.all],

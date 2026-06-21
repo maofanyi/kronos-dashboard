@@ -247,6 +247,7 @@ interface LiveSafety {
     status_reason?: string;
     next_action?: string;
     report: string;
+    report_source?: string;
     report_mtime?: string | null;
     report_age_seconds?: number | null;
     fresh: boolean;
@@ -337,6 +338,7 @@ interface LiveSafety {
       blockers?: string[];
     }>;
   };
+  legacy_report_refresh?: LiveSafety["report_refresh"];
   market_data?: {
     ready: boolean;
     price?: number | null;
@@ -431,9 +433,65 @@ interface LiveSafety {
       requires_confirmation?: boolean;
     }>;
   };
+  live_trading_status?: {
+    ok: boolean;
+    status: string;
+    label: string;
+    next_action?: string;
+    blockers?: Array<{
+      key: string;
+      label: string;
+      severity?: string;
+      value?: unknown;
+      expected?: unknown;
+      action?: string;
+    }>;
+    formal?: {
+      available?: boolean;
+      running?: boolean;
+      supervisor_running?: boolean;
+      child_running?: boolean;
+      fresh?: boolean;
+      age_seconds?: number | null;
+      max_age_seconds?: number | null;
+      latest_action?: string | null;
+      latest_reason?: string | null;
+      terminal_reason?: string | null;
+    };
+    sync?: {
+      available?: boolean;
+      running?: boolean;
+      fresh?: boolean;
+      ok?: boolean;
+      age_seconds?: number | null;
+      max_age_seconds?: number | null;
+      reconcile_errors?: number | null;
+      open_orders?: number | null;
+      settlement_source?: string | null;
+    };
+    risk?: {
+      ok?: boolean;
+      reason?: string | null;
+      blockers?: Array<{ key: string; label: string; value?: unknown; expected?: unknown; action?: string }>;
+    };
+    pause?: {
+      paused?: boolean;
+      reason?: string | null;
+      age_seconds?: number | null;
+    };
+    orders?: {
+      open_or_pending?: number;
+      total?: number;
+      filled_size?: number;
+    };
+  };
   risk?: {
     ok: boolean;
     metrics: {
+      day?: string;
+      day_tz?: string;
+      day_start_utc?: string;
+      day_end_utc?: string;
       day_utc: string;
       daily_pnl_usdc: number;
       daily_trades: number;
@@ -449,8 +507,35 @@ interface LiveSafety {
       max_consecutive_losses: number;
       max_open_or_pending_orders: number;
     };
+    resilience?: {
+      ok: boolean;
+      reason?: string;
+      failures?: string[];
+      warnings?: string[];
+      source?: string;
+      metrics?: {
+        total_trades?: number;
+        total_pnl_usdc?: number;
+        wins?: number;
+        losses?: number;
+        win_rate?: number;
+        profit_factor?: number | null;
+        max_drawdown_usdc?: number;
+        max_consecutive_losses?: number;
+        same_direction_cooldowns?: Record<string, { losses?: number; active?: boolean; active_until?: string | null }>;
+        limits?: {
+          max_smoke_drawdown_usdc?: number;
+          same_direction_loss_cooldown_count?: number;
+          same_direction_loss_cooldown_minutes?: number;
+        };
+      };
+    };
   };
   today?: {
+    day?: string;
+    day_tz?: string;
+    day_start_utc?: string;
+    day_end_utc?: string;
     day_utc: string;
     signals: {
       total: number;
@@ -566,6 +651,7 @@ interface LiveSafety {
       win_rate: number;
     };
     risk: LiveSafety["risk"];
+    risk_resilience?: NonNullable<LiveSafety["risk"]>["resilience"];
     risk_controls?: RiskControls;
     equity: EquitySummary;
     weekly_pnl_calendar?: WeeklyPnlCalendar;
@@ -1034,9 +1120,12 @@ function StatCard({
   );
 }
 
-function StatusPill({ ok, label }: { ok: boolean; label: string }) {
+function StatusPill({ ok, label, danger = false }: { ok: boolean; label: string; danger?: boolean }) {
+  const badTone = danger
+    ? "border-rose-500/30 bg-rose-500/10 text-rose-300"
+    : "border-amber-500/25 bg-amber-500/10 text-amber-300";
   return (
-    <span className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${ok ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300" : "border-amber-500/25 bg-amber-500/10 text-amber-300"}`}>
+    <span className={`inline-flex items-center gap-1 rounded border px-2 py-1 text-xs ${ok ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300" : badTone}`}>
       {ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
       {label}
     </span>
@@ -1075,6 +1164,7 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
   const criticalBlockers = Math.max(0, (readiness?.critical_blockers ?? 0) - ignoredCriticalBlockers);
   const fundingBlockers = readiness?.funding_blockers ?? 0;
   const riskBlockers = readiness?.risk_blockers ?? 0;
+  const riskBlocked = riskBlockers > 0 || safety?.risk?.resilience?.ok === false;
   const fundingBalance = safety?.funding?.balance;
   const fundingAllowance = safety?.funding?.min_allowance;
   const fundingAllowanceLabel = compactAllowance(fundingAllowance, safety?.funding?.allowance_ok === true || fundingReady);
@@ -1086,14 +1176,14 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
     <CollapsiblePanel
       title="Live Safety"
       sub={source}
-      right={<StatusPill ok={health?.state === "ok" && dryrunClean && preflightReady && fundingReady && criticalBlockers === 0} label={health?.state === "ok" && dryrunClean && preflightReady && fundingReady && criticalBlockers === 0 ? "Safe" : "Review"} />}
+      right={<StatusPill ok={health?.state === "ok" && dryrunClean && preflightReady && fundingReady && criticalBlockers === 0 && !riskBlocked} danger={riskBlocked} label={health?.state === "ok" && dryrunClean && preflightReady && fundingReady && criticalBlockers === 0 && !riskBlocked ? "Safe" : riskBlocked ? "Risk blocked" : "Review"} />}
       summary={
         <div className="flex min-w-0 flex-wrap gap-2">
           <StatusPill ok label={liveEnabled ? "Real orders enabled" : "Locked"} />
           <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Health OK" : "Review"} />
           <StatusPill ok={criticalBlockers === 0} label={`Critical ${criticalBlockers}`} />
           <StatusPill ok={fundingBlockers === 0} label={`Funding ${fundingBlockers}`} />
-          <StatusPill ok={riskBlockers === 0} label={`Risk ${riskBlockers}`} />
+          <StatusPill ok={!riskBlocked} danger={riskBlocked} label={riskBlocked ? `Risk blocked ${riskBlockers}` : `Risk ${riskBlockers}`} />
           <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : `Funding gap ${money(fundingGap)}`} />
           {!liveEnabled && <StatusPill ok={dryrunClean} label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`} />}
           <StatusPill ok={gateReady} label={gateReady ? "Gate ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`} />
@@ -1108,7 +1198,7 @@ function SafetyStrip({ safety, health }: { safety?: LiveSafety | null; health?: 
           <StatusPill ok={safety?.clob?.authenticated === true} label="CLOB auth" />
           <StatusPill ok={criticalBlockers === 0} label={`Critical blockers ${criticalBlockers}`} />
           <StatusPill ok={fundingBlockers === 0} label={`Funding blockers ${fundingBlockers}`} />
-          <StatusPill ok={riskBlockers === 0} label={`Risk blockers ${riskBlockers}`} />
+          <StatusPill ok={!riskBlocked} danger={riskBlocked} label={riskBlocked ? `Risk blocked ${riskBlockers}` : `Risk blockers ${riskBlockers}`} />
           <StatusPill ok={safety?.funding?.balance_ok === true} label={`Balance ${fundingBalance == null ? "-" : money(fundingBalance)}`} />
           <StatusPill ok={safety?.funding?.allowance_ok === true} label={`Allowance ${fundingAllowanceLabel}`} />
           <StatusPill ok={fundingReady} label={`Balance Gap ${money(safety?.funding?.balance_shortfall_usdc ?? 0)}`} />
@@ -1348,11 +1438,12 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
   const dryrunRecords = today?.dryrun.records ?? 0;
   const dryrunWouldPlaceRate = dryrunRecords === 0 ? null : (today?.dryrun.would_place ?? 0) / dryrunRecords;
   const dryrunBlockedRate = dryrunRecords === 0 ? null : (today?.dryrun.blocked ?? 0) / dryrunRecords;
+  const dayLabel = `${today?.day_tz ?? "Trading day"} ${today?.day ?? today?.day_utc ?? "-"}`;
 
   return (
     <Panel
       title="Today Cockpit"
-      sub={`UTC ${today?.day_utc ?? "-"}`}
+      sub={dayLabel}
       right={<StatusPill ok={makerTarget <= 0.49} label={`Maker Target ${makerTarget.toFixed(2)}`} />}
     >
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.72fr)]">
@@ -1409,40 +1500,54 @@ function TodayCockpit({ today }: { today?: LiveSafety["today"] | null }) {
   );
 }
 
-function TradingStatusPanel({ safety, health }: { safety?: LiveSafety | null; health?: LiveIntel["health"] | null }) {
-  const funding = safety?.funding;
-  const operator = safety?.operator_summary;
-  const rail = safety?.first_order_rail;
-  const currentStage = rail?.stages?.find((stage) => stage.key === rail?.current_key);
-  const fundingReady = funding?.funding_ready === true;
-  const manualReady = rail?.ready_for_manual_confirmation === true;
-  const stageLabel = currentStage?.label || operator?.current_stage_label || "Live safety";
-  const stageStatus = currentStage?.status || operator?.status || "review";
-  const primaryBlocker = operator?.primary_blocker || currentStage?.blockers?.[0] || "none";
-  const nextAction = operator?.next_action || currentStage?.action || "Review trading readiness";
-  const dryrunClean = (safety?.dryrun?.submitted_count ?? 0) === 0;
+function TradingStatusPanel({ safety }: { safety?: LiveSafety | null }) {
+  const liveStatus = safety?.live_trading_status;
+  const formal = liveStatus?.formal;
+  const sync = liveStatus?.sync;
+  const risk = liveStatus?.risk;
+  const orders = liveStatus?.orders;
+  const blockers = liveStatus?.blockers ?? [];
+  const statusOk = liveStatus?.ok === true;
+  const statusLabel = liveStatus?.label ?? "Waiting";
+  const formalValue = formal?.running ? (formal?.fresh ? "running / fresh" : `running / stale ${ageLabel(formal?.age_seconds)}`) : "not running";
+  const syncValue = sync?.running ? (sync?.fresh ? "running / fresh" : `running / stale ${ageLabel(sync?.age_seconds)}`) : "not running";
+  const riskValue = risk?.ok === false ? risk.reason || risk.blockers?.map((item) => item.label).join(", ") || "blocked" : "clear";
+  const openPending = orders?.open_or_pending ?? 0;
 
   return (
     <Panel
       title="Trading Status"
-      sub="stage, blockers, and next action"
-      right={<StatusPill ok={manualReady} label={manualReady ? "Manual ready" : "Review"} />}
+      sub="formal live, sync, and risk"
+      right={<StatusPill ok={statusOk} danger={liveStatus?.status === "risk_blocked" || liveStatus?.status === "paused"} label={statusLabel} />}
     >
       <div className="grid gap-3 p-4">
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
-          <HealthTile label="Current Stage" value={stageLabel} ok={manualReady || stageStatus !== "blocked"} />
-          <HealthTile label="Stage Status" value={stageStatus.replace(/_/g, " ")} ok={manualReady || stageStatus === "complete"} />
-          <HealthTile label="Manual Confirmation" value={manualReady ? "ready" : "locked"} ok={manualReady} />
-          <HealthTile label="Primary Blocker" value={primaryBlocker} ok={primaryBlocker === "none"} />
+          <HealthTile label="Formal Live" value={formalValue} ok={formal?.running === true && formal?.fresh === true} />
+          <HealthTile label="Order Sync" value={syncValue} ok={sync?.running === true && sync?.fresh === true && sync?.ok === true} />
+          <HealthTile label="Risk State" value={riskValue} ok={risk?.ok} />
+          <HealthTile label="Open Orders" value={`${openPending}`} ok={openPending === 0} />
         </div>
         <div className="rounded-md border border-zinc-900 bg-black/20 p-3">
           <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">Next Action</div>
-          <div className="mt-1 text-sm font-medium text-zinc-100">{nextAction}</div>
-          <div className="mt-3 flex flex-wrap gap-2">
-            <StatusPill ok={health?.state === "ok"} label={health?.state === "ok" ? "Runtime OK" : "Runtime review"} />
-            <StatusPill ok={fundingReady} label={fundingReady ? "Funding ready" : "Funding needed"} />
-            <StatusPill ok={dryrunClean} label={dryrunClean ? "Dry-run clean" : "Dry-run review"} />
-          </div>
+          <div className="mt-1 text-sm font-medium text-zinc-100">{liveStatus?.next_action || "Waiting for live status"}</div>
+          {blockers.length > 0 ? (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {blockers.slice(0, 4).map((blocker) => (
+                <StatusPill
+                  key={blocker.key}
+                  ok={false}
+                  danger={blocker.severity === "risk" || blocker.key === "live_paused"}
+                  label={`${blocker.label}${blocker.value == null ? "" : ` ${blocker.value}`}`}
+                />
+              ))}
+            </div>
+          ) : (
+            <div className="mt-3 flex flex-wrap gap-2">
+              <StatusPill ok label={formal?.latest_action ? `Signal ${formal.latest_action}` : "Formal monitoring"} />
+              <StatusPill ok={sync?.ok === true} label={sync?.settlement_source ? `Sync ${sync.settlement_source}` : "Sync ready"} />
+              <StatusPill ok={risk?.ok !== false} label={risk?.ok === false ? "Risk blocked" : "Risk clear"} />
+            </div>
+          )}
         </div>
       </div>
     </Panel>
@@ -1512,7 +1617,7 @@ function ClobReadonlyPanel({ audit }: { audit?: LiveSafety["clob_readonly"] | nu
   return (
     <Panel
       title="CLOB Read-only Audit"
-      sub={audit?.report?.split(/[\\/]/).pop() || "live gate and allowance report"}
+      sub={audit?.report_source || audit?.report?.split(/[\\/]/).pop() || "live gate and allowance report"}
       right={<StatusPill ok={audit?.ready === true} label={audit?.ready ? "Ready" : audit?.available ? "Review" : "Missing"} />}
     >
       <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1fr)_minmax(300px,0.55fr)]">
@@ -1611,18 +1716,18 @@ function ReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["report_refres
   return (
     <Panel
       title="Report Freshness"
-      sub="live gate, preflight, and CLOB audit"
+      sub="formal live, order sync, and account activity"
       right={<StatusPill ok={refresh?.ready === true} label={refresh?.ready ? "Fresh" : `${issueCount} review`} />}
     >
-      <div className="grid gap-3 p-4 lg:grid-cols-3">
+      <div className="grid gap-3 p-4 lg:grid-cols-4">
         {items.length === 0 ? (
-          <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3 lg:col-span-3">
+          <div className="rounded-md border border-amber-500/20 bg-amber-500/5 p-3 lg:col-span-4">
             <div className="flex items-center gap-2 text-sm font-medium text-amber-200">
               <AlertTriangle className="h-4 w-4 shrink-0" />
               <span>No freshness reports</span>
             </div>
             <div className="mt-2 text-xs text-zinc-500">
-              Waiting for live gate, preflight, and CLOB audit reports
+              Waiting for formal live, order sync, and account activity reports
             </div>
           </div>
         ) : items.map((item) => (
@@ -1646,6 +1751,53 @@ function ReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["report_refres
                 {item.blockers?.slice(0, 2).join(" / ")}
               </div>
             )}
+          </div>
+        ))}
+      </div>
+    </Panel>
+  );
+}
+
+function LegacyReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["legacy_report_refresh"] | null }) {
+  const items = refresh?.items ?? [];
+  const issueCount = (refresh?.missing_count ?? 0) + (refresh?.stale_count ?? 0) + (refresh?.blocked_count ?? 0);
+  const statusTone = (status: string) => {
+    if (status === "ready") return "border-emerald-500/25 bg-emerald-500/10 text-emerald-300";
+    if (status === "blocked") return "border-rose-500/25 bg-rose-500/10 text-rose-300";
+    if (status === "stale" || status === "missing") return "border-amber-500/25 bg-amber-500/10 text-amber-300";
+    return "border-zinc-700 bg-zinc-900/70 text-zinc-300";
+  };
+  return (
+    <Panel
+      title="Legacy Preflight Reports"
+      sub="diagnostic-only legacy readiness reports"
+      right={<StatusPill ok={refresh?.ready === true} label={refresh?.ready ? "Fresh" : `${issueCount} diagnostic`} />}
+    >
+      <div className="grid gap-3 p-4 lg:grid-cols-3">
+        {items.length === 0 ? (
+          <div className="rounded-md border border-zinc-800 bg-black/20 p-3 lg:col-span-3">
+            <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
+              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-300" />
+              <span>No freshness reports</span>
+            </div>
+            <div className="mt-2 text-xs text-zinc-500">Waiting for legacy preflight diagnostics</div>
+          </div>
+        ) : items.map((item) => (
+          <div key={item.key} className="min-w-0 rounded-md border border-zinc-900 bg-black/20 p-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="truncate text-sm font-medium text-zinc-100">{item.label}</div>
+              <span className={`rounded border px-2 py-0.5 font-mono text-[11px] uppercase ${statusTone(item.status)}`}>
+                {item.status}
+              </span>
+            </div>
+            <div className="mt-3 grid grid-cols-2 gap-2">
+              <HealthTile label="Age" value={ageLabel(item.age_seconds)} ok={item.fresh} />
+              <HealthTile label="Max Age" value={ageLabel(item.max_age_seconds)} />
+            </div>
+            <div className="mt-3 truncate text-xs text-zinc-400">{item.next_action}</div>
+            <div className="mt-2 truncate font-mono text-[11px] text-zinc-600">
+              {item.report?.split(/[\\/]/).pop() || "-"}
+            </div>
           </div>
         ))}
       </div>
@@ -1682,6 +1834,9 @@ function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveS
   const liveRisk = safety?.risk;
   const metrics = liveRisk?.metrics;
   const limits = liveRisk?.limits;
+  const resilience = liveRisk?.resilience;
+  const resilienceMetrics = resilience?.metrics;
+  const resilienceLimits = resilienceMetrics?.limits;
   const fundingReady = safety?.funding?.funding_ready === true;
   const fundingBalance = safety?.funding?.balance;
   const fundingAllowance = safety?.funding?.min_allowance;
@@ -1712,6 +1867,16 @@ function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveS
           label="Open/Pending"
           value={metrics && limits ? `${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders}` : `${(maker?.open_orders.length ?? 0) + (maker?.pending_positions.length ?? 0)}`}
           ok={metrics && limits ? metrics.open_or_pending_orders < limits.max_open_or_pending_orders : undefined}
+        />
+        <HealthTile
+          label="Smoke Drawdown"
+          value={resilienceMetrics?.max_drawdown_usdc == null ? "-" : `${money(resilienceMetrics.max_drawdown_usdc)} / ${money(resilienceLimits?.max_smoke_drawdown_usdc ?? 0)}`}
+          ok={resilience?.ok}
+        />
+        <HealthTile
+          label="Risk State"
+          value={resilience?.failures?.length ? resilience.failures.join(", ") : "clear"}
+          ok={resilience?.ok}
         />
         <HealthTile label="Missed" value={`${risk?.missed_trades?.length ?? 0}`} ok={(risk?.missed_trades?.length ?? 0) === 0} />
         <HealthTile label="Rejections" value={`${risk?.max_open_rejections_count ?? 0}`} ok={(risk?.max_open_rejections_count ?? 0) === 0} />
@@ -2220,13 +2385,16 @@ export default function Live({
   const latestSignalKpiAge = todayStats?.activity?.latest_signal_age_seconds;
   const latestSignalFresh = (latestSignalKpiAge ?? 9999) < 600;
   const signalKpiTone = todaySignalTotal === 0 ? "text-zinc-100" : latestSignalFresh ? "text-emerald-300" : "text-amber-300";
-  const operator = safety?.operator_summary;
   const readinessSummary = safety?.readiness_summary;
   const readinessPassed = readinessSummary?.passed ?? 0;
   const readinessTotal = readinessSummary?.total ?? 0;
   const readinessCritical = readinessSummary?.critical_blockers ?? 0;
   const readinessReady = readinessSummary?.ready === true;
   const readinessTone = readinessReady ? "text-emerald-300" : readinessCritical > 0 ? "text-rose-300" : "text-amber-300";
+  const riskResilience = safety?.risk?.resilience ?? liveReal?.risk_resilience;
+  const riskBlockerItems = (safety?.checklist ?? []).filter((item) => item.severity === "risk" && !item.ok);
+  const riskControlTriggered = riskBlockerItems.length > 0 || riskResilience?.ok === false;
+  const riskControlReason = riskResilience?.reason || riskBlockerItems.map((item) => item.label).join(", ");
   const dryrun = safety?.dryrun;
   const dryrunSubmitted = dryrun?.submitted_count ?? 0;
   const dryrunValue = `${dryrun?.would_place_count ?? 0}/${dryrun?.ledger_count ?? 0}`;
@@ -2320,6 +2488,21 @@ export default function Live({
 
       {activeTradingTab === "live-real" && (
         <div className="space-y-5">
+          {riskControlTriggered && (
+            <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-4 py-3">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-rose-200">Risk Control Triggered</div>
+                  <div className="mt-1 text-xs text-rose-100/80">{riskControlReason || "Live risk controls are blocking new entries."}</div>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {riskBlockerItems.slice(0, 4).map((item) => (
+                    <StatusPill key={item.key} ok={false} danger label={`${item.label}: ${item.value == null ? "-" : `${item.value}`}`} />
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
           <div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">
             <StatCard label="CLOB Balance" value={money(clobPortfolioValue)} sub={clobPortfolioSub} icon={Wallet} tone={fundingBalanceTone} />
             <StatCard label="Total PnL" value={signedMoney(liveEquityPnl)} sub={`${liveEquity?.settled ?? 0} settled total`} icon={CircleDollarSign} tone={liveEquityPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
@@ -2356,7 +2539,7 @@ export default function Live({
           </div>
 
           <div className="grid min-w-0 gap-5">
-            <TradingStatusPanel safety={safety} health={health} />
+            <TradingStatusPanel safety={safety} />
           </div>
 
           <CollapsiblePanel
@@ -2390,9 +2573,10 @@ export default function Live({
                 <ReadinessChecklist safety={safety} health={health} intel={intel} />
               </div>
 
-              <div className="grid gap-5 xl:grid-cols-3">
+              <div className="grid gap-5 xl:grid-cols-4">
                 <MarketDataPanel data={safety?.market_data} />
                 <ReportFreshnessPanel refresh={safety?.report_refresh} />
+                <LegacyReportFreshnessPanel refresh={safety?.legacy_report_refresh} />
                 <RiskPanel intel={intel} safety={safety} />
               </div>
 

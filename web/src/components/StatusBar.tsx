@@ -167,6 +167,23 @@ interface SafetyData {
       latest_order_age_seconds?: number | null;
     };
   };
+  live_trading_status?: {
+    ok?: boolean;
+    status?: string;
+    label?: string;
+    next_action?: string;
+    formal?: {
+      running?: boolean;
+      fresh?: boolean;
+      age_seconds?: number | null;
+    };
+    sync?: {
+      running?: boolean;
+      fresh?: boolean;
+      ok?: boolean;
+      age_seconds?: number | null;
+    };
+  };
 }
 
 interface LiveIntel {
@@ -348,6 +365,8 @@ function readinessAction(key: string) {
 const LIVE_MODE_NON_OPERATIONAL_CHECKS = new Set([
   "real_orders_locked",
   "dryrun_no_submitted_orders",
+  "live_trade_gate_available",
+  "live_trade_gate_ready",
   "live_preflight_available",
   "live_preflight_chain_ok",
   "live_preflight_fresh",
@@ -364,6 +383,7 @@ export default function StatusBar() {
   const liveEnabled = safety?.real_orders_enabled === true;
   const orderModeOk = liveEnabled || (!liveEnabled && safety?.kill_switch?.state !== "armed");
   const health = intel?.health;
+  const liveTradingStatus = safety?.live_trading_status;
   const metrics = safety?.risk?.metrics;
   const limits = safety?.risk?.limits;
   const today = safety?.today;
@@ -406,7 +426,7 @@ export default function StatusBar() {
         severity: "runtime",
       },
     ];
-    return [...apiItems, ...runtimeItems];
+    return liveEnabled ? apiItems : [...apiItems, ...runtimeItems];
   }, [health?.checkpoint_age_seconds, health?.latest_event_age_seconds, intel?.issues?.log_errors?.length, liveEnabled, safety?.checklist]);
   const localReadiness = summarizeChecklistReadiness(checklist);
   const checksOk = localReadiness.ready;
@@ -434,7 +454,9 @@ export default function StatusBar() {
     safety?.funding?.allowance_shortfall_usdc ?? 0,
   );
   const fundingAllowanceLabel = compactAllowance(safety?.funding?.min_allowance, safety?.funding?.allowance_ok === true || fundingReady);
-  const needsReview = Boolean(error) || cooling || alertCritical > 0 || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
+  const runtimeLabel = liveEnabled ? liveTradingStatus?.label ?? "Waiting" : healthOk ? "Runtime OK" : "Runtime review";
+  const runtimeChipOk = liveEnabled ? liveTradingStatus?.ok === true : healthOk;
+  const needsReview = Boolean(error) || cooling || alertCritical > 0 || !runtimeChipOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
   const operator = safety?.operator_summary;
   const operatorStage = operator?.current_stage_label ?? "Live safety";
   const operatorNextAction = operator?.next_action ?? "Review readiness";
@@ -446,7 +468,6 @@ export default function StatusBar() {
       : `PnL ${signedMoney(todayPnl)}`;
   const riskLabel = riskOk ? "Risk OK" : "Risk review";
   const alertLabel = alertCritical > 0 ? `Alerts ${alertCritical}` : "Alerts 0";
-  const runtimeLabel = healthOk ? "Runtime OK" : "Runtime review";
 
   return (
     <div className="border-b border-zinc-800 bg-[#090a0f] text-xs">
@@ -463,7 +484,7 @@ export default function StatusBar() {
             Live
           </span>
           <StatusChip ok={orderModeOk} label={liveEnabled ? "Real Enabled" : safety?.kill_switch?.state ?? "Locked"} icon="lock" />
-          <StatusChip ok={healthOk} label={runtimeLabel} icon="shield" />
+          <StatusChip ok={runtimeChipOk} label={runtimeLabel} icon="shield" />
           <StatusChip ok={riskOk} label={pnlOpenLabel} />
           <StatusChip ok={riskOk && riskBlockers === 0} label={riskLabel} />
           <StatusChip ok={alertCritical === 0} label={alertLabel} />
@@ -509,8 +530,17 @@ export default function StatusBar() {
                 value={metrics && limits ? `${metrics.consecutive_losses}/${limits.max_consecutive_losses}` : "-"}
                 ok={metrics && limits ? metrics.consecutive_losses < limits.max_consecutive_losses : undefined}
               />
-              <DetailTile label="Checkpoint" value={ageLabel(health?.checkpoint_age_seconds)} ok={(health?.checkpoint_age_seconds ?? 9999) < 600} />
-              <DetailTile label="Latest Event" value={ageLabel(health?.latest_event_age_seconds)} ok={(health?.latest_event_age_seconds ?? 9999) < 600} />
+              {liveEnabled ? (
+                <>
+                  <DetailTile label="Formal Live" value={ageLabel(liveTradingStatus?.formal?.age_seconds)} ok={liveTradingStatus?.formal?.running === true && liveTradingStatus?.formal?.fresh === true} />
+                  <DetailTile label="Order Sync" value={ageLabel(liveTradingStatus?.sync?.age_seconds)} ok={liveTradingStatus?.sync?.running === true && liveTradingStatus?.sync?.fresh === true && liveTradingStatus?.sync?.ok === true} />
+                </>
+              ) : (
+                <>
+                  <DetailTile label="Checkpoint" value={ageLabel(health?.checkpoint_age_seconds)} ok={(health?.checkpoint_age_seconds ?? 9999) < 600} />
+                  <DetailTile label="Latest Event" value={ageLabel(health?.latest_event_age_seconds)} ok={(health?.latest_event_age_seconds ?? 9999) < 600} />
+                </>
+              )}
               <DetailTile label="Open/Pending" value={`${metrics?.open_or_pending_orders ?? health?.pending_count ?? 0}`} ok={riskOk} />
               <DetailTile
                 label="Market Data"
@@ -524,11 +554,13 @@ export default function StatusBar() {
                   ok={dryrunOk}
                 />
               )}
-              <DetailTile
-                label="Live Gate"
-                value={liveGateReady ? "ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`}
-                ok={liveGateReady}
-              />
+              {!liveEnabled && (
+                <DetailTile
+                  label="Live Gate"
+                  value={liveGateReady ? "ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`}
+                  ok={liveGateReady}
+                />
+              )}
               {!liveEnabled && (
                 <DetailTile
                   label="Preflight"

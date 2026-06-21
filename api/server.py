@@ -11,8 +11,9 @@ import sys
 import threading
 import time
 from collections import deque
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, time as datetime_time, timedelta, timezone
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pandas as pd
 import requests
@@ -35,6 +36,7 @@ KRONOS_LOG_DIR = KRONOS_CHECKPOINT_DIR.parent / "logs"
 KRONOS_FEATURE_DIR = KRONOS_CHECKPOINT_DIR.parent / "features"
 KRONOS_CONFIG_DIR = KRONOS_CHECKPOINT_DIR.parent / "config"
 KRONOS_REPORT_DIR = KRONOS_CHECKPOINT_DIR.parent / "reports"
+KRONOS_RUNTIME_DIR = KRONOS_CHECKPOINT_DIR.parent / "runtime"
 LOG_ERROR_PATTERNS = ("traceback", "poll error", "unexpected", "exception", "timeout", "network", "oom")
 RISK_LIMITS = {
     "max_daily_loss_usdc": float(os.environ.get("MAX_DAILY_LOSS_USDC", "10")),
@@ -59,6 +61,7 @@ CLOB_ENV_KEYS = {
 }
 BTC_LIVE_MAX_PRICE_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_PRICE_AGE_SECONDS", "15"))
 BTC_LIVE_MAX_RECEIVED_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_RECEIVED_AGE_SECONDS", "30"))
+DASHBOARD_TRADING_DAY_TZ_DEFAULT = "Asia/Shanghai"
 
 
 def _configured_paper_source():
@@ -681,9 +684,12 @@ def _live_alert_summary():
     path = KRONOS_REPORT_DIR / "live_alerts_latest.json"
     report = _read_json(path) or {}
     active = report.get("active") if isinstance(report.get("active"), list) else []
+    report_mtime, report_age_seconds = _path_age(path if path.exists() else None)
     return {
         "available": path.exists(),
         "report": str(path),
+        "report_mtime": report_mtime,
+        "report_age_seconds": report_age_seconds,
         "active_count": int(report.get("active_count", len(active)) or 0),
         "selected_count": int(report.get("selected_count", 0) or 0),
         "critical_count": sum(1 for item in active if item.get("severity") == "critical"),
@@ -758,13 +764,14 @@ def _latest_timestamp_summary(timestamps, now_dt=None):
     return _iso_utc(latest), _timestamp_age_seconds(latest, now_dt)
 
 
-def _live_dryrun_today_summary(rows=None):
+def _live_dryrun_today_summary(rows=None, *, now=None):
     rows = [row for row in (rows or []) if isinstance(row, dict)]
-    today = datetime.now(timezone.utc).date()
+    day_info = _dashboard_day_info(now=now)
+    today = day_info["day"]
     todays = []
     for index, row in enumerate(rows):
         ts = _dryrun_record_ts(row)
-        if ts is not None and ts.date() == today:
+        if _timestamp_in_dashboard_day(ts, today):
             todays.append((index, row, ts))
     todays_sorted = sorted(todays, key=lambda item: (item[2], item[0]))
     today_rows = [row for _, row, _ in todays_sorted]
@@ -1279,6 +1286,66 @@ def _check_status(report: dict, name: str):
     return None
 
 
+def _dashboard_trading_day_timezone():
+    configured = (
+        os.environ.get("DASHBOARD_TRADING_DAY_TZ")
+        or os.environ.get("DASHBOARD_DAY_TZ")
+        or DASHBOARD_TRADING_DAY_TZ_DEFAULT
+    ).strip()
+    normalized = configured.lower()
+    if normalized in {"asia/shanghai", "shanghai", "utc+8", "utc+08:00", "+08:00", "cst"}:
+        return timezone(timedelta(hours=8), "Asia/Shanghai"), "Asia/Shanghai"
+    if normalized in {"utc", "etc/utc", "z"}:
+        return timezone.utc, "UTC"
+    try:
+        return ZoneInfo(configured), configured
+    except ZoneInfoNotFoundError:
+        return timezone.utc, "UTC"
+
+
+def _ensure_aware_utc(value):
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _dashboard_day_info(*, now=None, day=None):
+    tz, label = _dashboard_trading_day_timezone()
+    if isinstance(day, str):
+        day_value = date.fromisoformat(day)
+    elif isinstance(day, date):
+        day_value = day
+    else:
+        now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+        day_value = now_dt.astimezone(tz).date()
+    start_local = datetime.combine(day_value, datetime_time.min, tzinfo=tz)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+    return {
+        "day": day_value,
+        "day_iso": day_value.isoformat(),
+        "day_tz": label,
+        "start_utc": start_utc,
+        "end_utc": end_utc,
+        "start_utc_iso": _iso_utc(start_utc),
+        "end_utc_iso": _iso_utc(end_utc),
+    }
+
+
+def _dashboard_day_key(ts):
+    if ts is None:
+        return None
+    tz, _ = _dashboard_trading_day_timezone()
+    return _ensure_aware_utc(ts).astimezone(tz).date()
+
+
+def _timestamp_in_dashboard_day(ts, day):
+    return ts is not None and _dashboard_day_key(ts) == day
+
+
 def _parse_dt(value):
     if value in (None, ""):
         return None
@@ -1415,7 +1482,8 @@ def _weekly_pnl_calendar_from_records(records, *, now=None):
     current = now if isinstance(now, datetime) else datetime.now(timezone.utc)
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
-    today = current.astimezone(timezone.utc).date()
+    day_info = _dashboard_day_info(now=current)
+    today = day_info["day"]
     start = today - timedelta(days=6)
     days = {}
     for offset in range(7):
@@ -1434,7 +1502,7 @@ def _weekly_pnl_calendar_from_records(records, *, now=None):
         ts = _record_ts(record)
         if ts is None:
             continue
-        day = ts.astimezone(timezone.utc).date()
+        day = _dashboard_day_key(ts)
         key = day.isoformat()
         if key not in days:
             continue
@@ -1461,7 +1529,8 @@ def _weekly_pnl_calendar_from_records(records, *, now=None):
         "wins": wins,
         "losses": losses,
         "win_rate": round(wins / settled, 4) if settled else 0.0,
-        "source": "settled_ledger_utc",
+        "day_tz": day_info["day_tz"],
+        "source": "settled_ledger_trading_day",
     }
 
 
@@ -1636,13 +1705,13 @@ def _analytics_daily_series(facts):
     dated = [fact for fact in facts or [] if isinstance(fact.get("ts"), datetime)]
     if not dated:
         return []
-    start = min(fact["ts"].date() for fact in dated)
-    end = max(fact["ts"].date() for fact in dated)
+    start = min(_dashboard_day_key(fact["ts"]) for fact in dated)
+    end = max(_dashboard_day_key(fact["ts"]) for fact in dated)
     days = []
     current = start
     by_day = {}
     for fact in dated:
-        by_day.setdefault(fact["ts"].date(), []).append(fact)
+        by_day.setdefault(_dashboard_day_key(fact["ts"]), []).append(fact)
     while current <= end:
         day_facts = by_day.get(current, [])
         days.append({"date": current.isoformat(), **_analytics_metric_summary(day_facts)})
@@ -1652,7 +1721,12 @@ def _analytics_daily_series(facts):
 
 def _analytics_window(facts, *, now, days=None, today=False):
     if today:
-        filtered = [fact for fact in facts if isinstance(fact.get("ts"), datetime) and fact["ts"].date() == now.date()]
+        today_key = _dashboard_day_info(now=now)["day"]
+        filtered = [
+            fact
+            for fact in facts
+            if isinstance(fact.get("ts"), datetime) and _dashboard_day_key(fact["ts"]) == today_key
+        ]
     elif days is not None:
         cutoff = now - timedelta(days=days)
         filtered = [fact for fact in facts if isinstance(fact.get("ts"), datetime) and fact["ts"] >= cutoff]
@@ -1716,6 +1790,7 @@ def _live_analytics_summary():
         if fact is not None
     ]
     now = datetime.now(timezone.utc)
+    day_info = _dashboard_day_info(now=now)
     current_balance, current_balance_source = _live_current_balance_value()
     equity = _equity_summary_from_records(
         records,
@@ -1735,6 +1810,10 @@ def _live_analytics_summary():
         "ledger_exists": ledger_path.exists(),
         "record_count": len(records),
         "generated_at": _iso_utc(now),
+        "day": day_info["day_iso"],
+        "day_tz": day_info["day_tz"],
+        "day_start_utc": day_info["start_utc_iso"],
+        "day_end_utc": day_info["end_utc_iso"],
         "summary": {
             **summary,
             **_analytics_streaks(actual_facts),
@@ -1744,6 +1823,7 @@ def _live_analytics_summary():
             "current_drawdown_pct": drawdown["current_drawdown_pct"],
         },
         "windows": {
+            "today": _analytics_window(actual_facts, now=now, today=True),
             "today_utc": _analytics_window(actual_facts, now=now, today=True),
             "last_24h": _analytics_window(actual_facts, now=now, days=1),
             "last_7d": _analytics_window(actual_facts, now=now, days=7),
@@ -1832,9 +1912,187 @@ def _consecutive_losses(records):
     return streak
 
 
-def _risk_summary_from_records(records, inputs=None, limits_override=None):
+def _risk_excluded(record):
+    value = record.get("risk_excluded", record.get("exclude_from_risk", False))
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y"}
+    return False
+
+
+def _record_direction(record):
+    value = str(record.get("direction") or record.get("side") or record.get("action") or "").upper()
+    if value in {"SHORT", "BUY_DOWN", "DOWN"}:
+        return "DOWN"
+    if value in {"LONG", "BUY_UP", "UP"}:
+        return "UP"
+    return value or "UNKNOWN"
+
+
+def _max_drawdown(records):
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for record in records:
+        equity += _record_pnl(record)
+        peak = max(peak, equity)
+        max_drawdown = max(max_drawdown, peak - equity)
+    return round(max_drawdown, 6)
+
+
+def _same_direction_cooldowns(records, *, count, minutes, now):
+    losses_by_direction = {}
+    for record in records:
+        direction = _record_direction(record)
+        won = _record_won(record)
+        ts = _record_ts(record)
+        if won is False:
+            losses_by_direction.setdefault(direction, []).append(ts)
+        elif won is True:
+            losses_by_direction[direction] = []
+
+    cooldowns = {}
+    duration = timedelta(minutes=max(0, int(minutes)))
+    for direction, timestamps in losses_by_direction.items():
+        if len(timestamps) < int(count):
+            continue
+        last_ts = timestamps[-1]
+        active_until = last_ts + duration if last_ts is not None else None
+        active = active_until is not None and active_until > now
+        cooldowns[direction] = {
+            "losses": len(timestamps),
+            "active": active,
+            "active_until": active_until.isoformat().replace("+00:00", "Z") if active_until else None,
+        }
+    return cooldowns
+
+
+def _risk_resilience_summary_from_records(records, controls=None):
+    controls = controls if isinstance(controls, dict) else {}
+    rules = controls.get("summary") if isinstance(controls.get("summary"), dict) else {}
+    max_smoke_drawdown = _num(rules.get("max_smoke_drawdown_usdc"))
+    if max_smoke_drawdown is None:
+        max_smoke_drawdown = 25.0
+    cooldown_count = int(_num(rules.get("same_direction_loss_cooldown_count")) or 1)
+    cooldown_minutes = int(_num(rules.get("same_direction_loss_cooldown_minutes")) or 30)
+    rows = [
+        record
+        for record in (records or [])
+        if isinstance(record, dict) and not _risk_excluded(record)
+    ]
+    ordered = sorted(rows, key=lambda item: _record_ts(item) or datetime.min.replace(tzinfo=timezone.utc))
+    total_pnl = round(sum(_record_pnl(record) for record in ordered), 6)
+    wins = sum(1 for record in ordered if _record_won(record) is True)
+    losses = sum(1 for record in ordered if _record_won(record) is False)
+    gross_profit = sum(max(_record_pnl(record), 0.0) for record in ordered)
+    gross_loss = abs(sum(min(_record_pnl(record), 0.0) for record in ordered))
+    max_drawdown = _max_drawdown(ordered)
+    now = datetime.now(timezone.utc)
+    cooldowns = _same_direction_cooldowns(
+        ordered,
+        count=cooldown_count,
+        minutes=cooldown_minutes,
+        now=now,
+    )
+    failures = []
+    warnings = []
+    if any(record.get("requires_manual_cancel") for record in rows):
+        failures.append("manual_cancel_required")
+    uncertain = {"UNKNOWN", "CANCEL_FAILED", "FAILED_CANCEL", "ORDER_STATUS_UNKNOWN"}
+    if any(str(record.get("status") or "").strip().upper() in uncertain for record in rows):
+        failures.append("uncertain_order_lifecycle")
+    for record in rows:
+        maker_price = _num(record.get("maker_price") or record.get("price"))
+        fill_price = _num(record.get("filled_avg_price") or record.get("average_fill_price"))
+        if maker_price is not None and fill_price is not None and fill_price - maker_price > 0.02 + 1e-12:
+            warnings.append("fill_quality_drift")
+            break
+    if max_drawdown >= abs(float(max_smoke_drawdown)):
+        failures.append("max_smoke_drawdown_usdc")
+    for direction, state in cooldowns.items():
+        if state.get("active"):
+            failures.append(f"same_direction_loss_cooldown:{direction}")
+    metrics = {
+        "total_trades": len(ordered),
+        "total_pnl_usdc": total_pnl,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / len(ordered), 4) if ordered else 0.0,
+        "profit_factor": round(gross_profit / gross_loss, 6) if gross_loss > 0 else None,
+        "max_drawdown_usdc": max_drawdown,
+        "max_consecutive_losses": _consecutive_losses(ordered),
+        "same_direction_cooldowns": cooldowns,
+        "limits": {
+            "max_smoke_drawdown_usdc": float(max_smoke_drawdown),
+            "same_direction_loss_cooldown_count": cooldown_count,
+            "same_direction_loss_cooldown_minutes": cooldown_minutes,
+        },
+    }
+    return {
+        "ok": not failures,
+        "reason": "risk-resilience limits passed" if not failures else f"risk-resilience limits breached: {', '.join(failures)}",
+        "failures": failures,
+        "warnings": warnings,
+        "metrics": metrics,
+        "source": "live_real_orders_current_next",
+    }
+
+
+def _risk_resilience_checks(resilience):
+    if not isinstance(resilience, dict):
+        return []
+    metrics = resilience.get("metrics") if isinstance(resilience.get("metrics"), dict) else {}
+    limits = metrics.get("limits") if isinstance(metrics.get("limits"), dict) else {}
+    failures = set(str(item) for item in resilience.get("failures", []) or [])
+    max_drawdown = round(float(metrics.get("max_drawdown_usdc") or 0.0), 2)
+    max_drawdown_limit = float(limits.get("max_smoke_drawdown_usdc") or 0.0)
+    cooldown_failures = sorted(item for item in failures if item.startswith("same_direction_loss_cooldown:"))
+    lifecycle_failures = failures.intersection({"manual_cancel_required", "uncertain_order_lifecycle"})
+    return [
+        {
+            "key": "risk_smoke_drawdown",
+            "label": "Smoke drawdown",
+            "ok": "max_smoke_drawdown_usdc" not in failures,
+            "value": max_drawdown,
+            "expected": f"< {max_drawdown_limit}",
+            "severity": "risk",
+        },
+        {
+            "key": "risk_same_direction_cooldown",
+            "label": "Direction cooldown",
+            "ok": not cooldown_failures,
+            "value": ", ".join(cooldown_failures) if cooldown_failures else "clear",
+            "expected": "no active cooldown",
+            "severity": "risk",
+        },
+        {
+            "key": "risk_order_lifecycle",
+            "label": "Order lifecycle risk",
+            "ok": not lifecycle_failures,
+            "value": ", ".join(sorted(lifecycle_failures)) if lifecycle_failures else "clear",
+            "expected": "no uncertain order lifecycle",
+            "severity": "risk",
+        },
+    ]
+
+
+def _attach_risk_resilience(risk, resilience):
+    risk = dict(risk)
+    checks = list(risk.get("checks") or [])
+    checks.extend(_risk_resilience_checks(resilience))
+    risk["checks"] = checks
+    risk["resilience"] = resilience
+    risk["ok"] = bool(risk.get("ok")) and bool(resilience.get("ok") if isinstance(resilience, dict) else True)
+    return risk
+
+
+def _risk_summary_from_records(records, inputs=None, limits_override=None, *, now=None):
     records = [record for record in (records or []) if isinstance(record, dict)]
-    today = datetime.now(timezone.utc).date()
+    day_info = _dashboard_day_info(now=now)
+    today = day_info["day"]
     todays = []
     open_or_pending = 0
 
@@ -1843,7 +2101,7 @@ def _risk_summary_from_records(records, inputs=None, limits_override=None):
         if status in {"OPEN", "PENDING", "SUBMITTED"}:
             open_or_pending += 1
         ts = _record_ts(record)
-        if ts is not None and ts.date() == today:
+        if _timestamp_in_dashboard_day(ts, today):
             todays.append(record)
 
     settled = [record for record in todays if _is_settled_record(record)]
@@ -1900,6 +2158,10 @@ def _risk_summary_from_records(records, inputs=None, limits_override=None):
         "ok": all(check["ok"] for check in checks),
         "checks": checks,
         "metrics": {
+            "day": today.isoformat(),
+            "day_tz": day_info["day_tz"],
+            "day_start_utc": day_info["start_utc_iso"],
+            "day_end_utc": day_info["end_utc_iso"],
             "day_utc": today.isoformat(),
             "daily_pnl_usdc": round(daily_pnl, 8),
             "daily_trades": daily_trades,
@@ -2313,6 +2575,213 @@ def _live_process_runtime(*, formal_available, formal=None, soak=None):
     return runtime
 
 
+def _live_order_sync_summary():
+    path = KRONOS_REPORT_DIR / "live_order_sync_latest.json"
+    report = _read_json(path) or {}
+    report_mtime, report_mtime_age_seconds = _path_age(path if path.exists() else None)
+    created_ts = _parse_dt(report.get("created_at"))
+    age_seconds = _timestamp_age_seconds(created_ts) if created_ts is not None else report_mtime_age_seconds
+    max_age_seconds = int(os.environ.get("DASHBOARD_LIVE_ORDER_SYNC_MAX_AGE_SECONDS", "240"))
+    summary = report.get("summary") if isinstance(report.get("summary"), dict) else {}
+    runtime = _process_summary(["run_live_order_sync_loop.py"])
+    reconcile_errors = int(_num(summary.get("reconcile_errors")) or 0)
+    ok = bool(report.get("ok")) and reconcile_errors == 0
+    fresh = path.exists() and age_seconds is not None and age_seconds <= max_age_seconds
+    return {
+        "available": path.exists(),
+        "report": str(path),
+        "report_mtime": report_mtime,
+        "created_at": report.get("created_at"),
+        "age_seconds": age_seconds,
+        "max_age_seconds": max_age_seconds,
+        "fresh": fresh,
+        "ok": ok,
+        "runtime": runtime,
+        "running": bool(runtime.get("running")),
+        "reconcile_errors": reconcile_errors,
+        "open_orders": int(_num(summary.get("open_orders")) or 0),
+        "settled": int(_num(summary.get("settled")) or 0),
+        "trade_reconciled": int(_num(summary.get("trade_reconciled")) or 0),
+        "settlement_source": summary.get("settlement_source"),
+        "summary": summary,
+    }
+
+
+def _live_pause_flag_summary():
+    path = KRONOS_RUNTIME_DIR / "live_paused.flag"
+    report_mtime, age_seconds = _path_age(path if path.exists() else None)
+    reason = ""
+    if path.exists():
+        payload = _read_json(path)
+        if isinstance(payload, dict):
+            reason = str(payload.get("reason") or "")
+        if not reason:
+            try:
+                reason = path.read_text(encoding="utf-8-sig").strip()
+            except OSError:
+                reason = ""
+    return {
+        "paused": path.exists(),
+        "path": str(path),
+        "reason": reason or None,
+        "mtime": report_mtime,
+        "age_seconds": age_seconds,
+    }
+
+
+def _live_trading_status(live_real_summary, sync_summary):
+    live_real_summary = live_real_summary if isinstance(live_real_summary, dict) else {}
+    sync_summary = sync_summary if isinstance(sync_summary, dict) else _live_order_sync_summary()
+    formal = live_real_summary.get("formal") if isinstance(live_real_summary.get("formal"), dict) else {}
+    runtime = live_real_summary.get("runtime") if isinstance(live_real_summary.get("runtime"), dict) else {}
+    child_runtime = runtime.get("child_runtime") if isinstance(runtime.get("child_runtime"), dict) else {}
+    risk = live_real_summary.get("risk") if isinstance(live_real_summary.get("risk"), dict) else {}
+    risk_checks = risk.get("checks") if isinstance(risk.get("checks"), list) else []
+    orders = live_real_summary.get("orders") if isinstance(live_real_summary.get("orders"), dict) else {}
+    pause = _live_pause_flag_summary()
+
+    formal_max_age_seconds = int(os.environ.get("DASHBOARD_FORMAL_LIVE_MAX_AGE_SECONDS", "420"))
+    formal_age_seconds = formal.get("report_age_seconds")
+    formal_fresh = (
+        bool(formal.get("available"))
+        and formal_age_seconds is not None
+        and formal_age_seconds <= formal_max_age_seconds
+    )
+    supervisor_running = bool(runtime.get("running"))
+    child_running = bool(child_runtime.get("running")) if child_runtime else supervisor_running
+    formal_running = supervisor_running and child_running
+    risk_blockers = [
+        {
+            "key": str(check.get("key") or ""),
+            "label": str(check.get("label") or check.get("key") or "Risk"),
+            "severity": str(check.get("severity") or "risk"),
+            "value": check.get("value"),
+            "expected": check.get("expected"),
+            "action": "Pause trading and review live risk",
+        }
+        for check in risk_checks
+        if isinstance(check, dict) and check.get("severity") == "risk" and not check.get("ok")
+    ]
+    blockers = []
+    if pause["paused"]:
+        blockers.append({
+            "key": "live_paused",
+            "label": "Live paused",
+            "severity": "critical",
+            "value": pause.get("reason") or "pause flag exists",
+            "action": "Remove pause flag only after review",
+        })
+    if not bool(formal.get("available")):
+        blockers.append({
+            "key": "formal_live_missing",
+            "label": "Formal live report missing",
+            "severity": "critical",
+            "value": "missing",
+            "action": "Start formal live supervisor",
+        })
+    elif not formal_fresh:
+        blockers.append({
+            "key": "formal_live_stale",
+            "label": "Formal live report stale",
+            "severity": "critical",
+            "value": formal_age_seconds,
+            "expected": f"<= {formal_max_age_seconds}s",
+            "action": "Check formal live child",
+        })
+    if not formal_running:
+        blockers.append({
+            "key": "formal_live_process",
+            "label": "Formal live process",
+            "severity": "critical",
+            "value": "not running",
+            "action": "Restart formal live supervisor",
+        })
+    if not sync_summary.get("running"):
+        blockers.append({
+            "key": "live_order_sync_process",
+            "label": "Order sync process",
+            "severity": "critical",
+            "value": "not running",
+            "action": "Restart live order sync loop",
+        })
+    if not sync_summary.get("fresh"):
+        blockers.append({
+            "key": "live_order_sync_stale",
+            "label": "Order sync report stale",
+            "severity": "critical",
+            "value": sync_summary.get("age_seconds"),
+            "expected": f"<= {sync_summary.get('max_age_seconds')}s",
+            "action": "Check live order sync loop",
+        })
+    if not sync_summary.get("ok"):
+        blockers.append({
+            "key": "live_order_sync_ok",
+            "label": "Order sync ok",
+            "severity": "critical",
+            "value": sync_summary.get("reconcile_errors"),
+            "expected": "ok=true and reconcile_errors=0",
+            "action": "Review live order sync report",
+        })
+    blockers.extend(risk_blockers)
+
+    if pause["paused"]:
+        status = "paused"
+        label = "Paused"
+    elif risk_blockers:
+        status = "risk_blocked"
+        label = "Risk blocked"
+    elif blockers:
+        status = "needs_review"
+        label = "Review"
+    else:
+        status = "running"
+        label = "Running"
+
+    return {
+        "ok": not blockers,
+        "status": status,
+        "label": label,
+        "next_action": blockers[0]["action"] if blockers else "Monitoring formal live",
+        "blockers": blockers,
+        "formal": {
+            "available": bool(formal.get("available")),
+            "running": formal_running,
+            "supervisor_running": supervisor_running,
+            "child_running": child_running,
+            "fresh": formal_fresh,
+            "age_seconds": formal_age_seconds,
+            "max_age_seconds": formal_max_age_seconds,
+            "report": formal.get("report"),
+            "latest_action": formal.get("latest_action"),
+            "latest_reason": formal.get("latest_reason") or formal.get("reason"),
+            "terminal_reason": formal.get("terminal_reason"),
+        },
+        "sync": {
+            "available": bool(sync_summary.get("available")),
+            "running": bool(sync_summary.get("running")),
+            "fresh": bool(sync_summary.get("fresh")),
+            "ok": bool(sync_summary.get("ok")),
+            "age_seconds": sync_summary.get("age_seconds"),
+            "max_age_seconds": sync_summary.get("max_age_seconds"),
+            "report": sync_summary.get("report"),
+            "reconcile_errors": sync_summary.get("reconcile_errors"),
+            "open_orders": sync_summary.get("open_orders"),
+            "settlement_source": sync_summary.get("settlement_source"),
+        },
+        "risk": {
+            "ok": bool(risk.get("ok")),
+            "blockers": risk_blockers,
+            "reason": (risk.get("resilience") or {}).get("reason") if isinstance(risk.get("resilience"), dict) else None,
+        },
+        "pause": pause,
+        "orders": {
+            "open_or_pending": int(_num(orders.get("open_or_pending")) or 0),
+            "total": int(_num(orders.get("total")) or 0),
+            "filled_size": _num(orders.get("filled_size")) or 0.0,
+        },
+    }
+
+
 def _live_restart_contract_path():
     configured = (os.environ.get("DASHBOARD_LIVE_RESTART_CONTRACT") or "").strip()
     if configured:
@@ -2490,11 +2959,13 @@ def _live_real_summary(limits_override=None, current_balance=None):
     records = _rows_from_ledger_payload(_read_json(ledger_path))
     formal = _live_formal_summary()
     _, formal_report = _live_formal_report()
-    risk = _risk_summary_from_records(
+    risk_controls = _live_risk_controls(formal_report, limits_override=limits_override)
+    risk_resilience = _risk_resilience_summary_from_records(records, controls=risk_controls)
+    risk = _attach_risk_resilience(_risk_summary_from_records(
         records,
         inputs={"ledger": str(ledger_path), "record_count": len(records)},
         limits_override=limits_override,
-    )
+    ), risk_resilience)
     soak = _live_soak_summary()
     runtime = _live_process_runtime(
         formal_available=bool(formal.get("available")),
@@ -2511,7 +2982,8 @@ def _live_real_summary(limits_override=None, current_balance=None):
         "stats": _settled_stats_summary(records),
         "market_results": _market_result_stats_summary(records),
         "risk": risk,
-        "risk_controls": _live_risk_controls(formal_report, limits_override=limits_override),
+        "risk_controls": risk_controls,
+        "risk_resilience": risk_resilience,
         "equity": _equity_summary_from_records(
             records,
             current_balance=current_balance,
@@ -2583,12 +3055,12 @@ def _usage(numerator, denominator):
 
 def _is_today_record(record, day):
     ts = _record_ts(record)
-    return ts is not None and ts.date() == day
+    return _timestamp_in_dashboard_day(ts, day)
 
 
 def _is_today_event(event, day):
     ts = _parse_dt(event.get("_t") or event.get("ts") or event.get("created_at"))
-    return ts is not None and ts.date() == day
+    return _timestamp_in_dashboard_day(ts, day)
 
 
 def _is_decision_event(event):
@@ -2676,9 +3148,9 @@ def _dashboard_today_trade_records(day, source="live"):
         rows = conn.execute(
             """SELECT pnl, won, regime, direction, size, entry_bar, settle_bar, created_at, details
                FROM trades
-               WHERE source=? AND won!=-1 AND substr(settle_bar, 1, 10)=?
+               WHERE source=? AND won!=-1
                ORDER BY settle_bar ASC, entry_bar ASC""",
-            (source, day.isoformat()),
+            (source,),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -2690,6 +3162,8 @@ def _dashboard_today_trade_records(day, source="live"):
 
     records = []
     for row in rows:
+        if not _timestamp_in_dashboard_day(_parse_dt(row["settle_bar"]), day):
+            continue
         won = row["won"]
         records.append(
             {
@@ -2718,9 +3192,9 @@ def _dashboard_today_decision_events(day, source="live"):
         rows = conn.execute(
             """SELECT kline_n, action, dir5, dir4, regime, filt_passed, reason, created_at, details
                FROM events
-               WHERE source=? AND substr(created_at, 1, 10)=?
+               WHERE source=?
                ORDER BY created_at ASC, kline_n ASC""",
-            (source, day.isoformat()),
+            (source,),
         ).fetchall()
     except sqlite3.Error:
         return []
@@ -2732,6 +3206,8 @@ def _dashboard_today_decision_events(day, source="live"):
 
     events = []
     for row in rows:
+        if not _timestamp_in_dashboard_day(_parse_dt(row["created_at"]), day):
+            continue
         passed = row["filt_passed"]
         events.append(
             {
@@ -2759,12 +3235,13 @@ def _source_events_for_day(source, day, limit=1000):
     ]
 
 
-def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None):
+def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None, *, now=None):
     checkpoint = checkpoint if isinstance(checkpoint, dict) else (_read_json(_paper_checkpoint_path()) or {})
     risk_summary = risk_summary if isinstance(risk_summary, dict) else _live_risk_summary(checkpoint)
     dryrun_summary = dryrun_summary if isinstance(dryrun_summary, dict) else _live_dryrun_ledger_summary()
-    now_dt = datetime.now(timezone.utc)
-    today = now_dt.date()
+    now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+    day_info = _dashboard_day_info(now=now_dt)
+    today = day_info["day"]
 
     trades = [item for item in checkpoint.get("trades", []) or [] if isinstance(item, dict)]
     pending = [item for item in checkpoint.get("pending_orders", []) or [] if isinstance(item, dict)]
@@ -2807,7 +3284,7 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
     daily_trades_metric = metrics.get("daily_trades")
     if not daily_trades_metric and todays_settled:
         daily_trades_metric = len(todays_settled)
-    dryrun_today = dryrun_summary.get("today") or _live_dryrun_today_summary()
+    dryrun_today = dryrun_summary.get("today") or _live_dryrun_today_summary(now=now_dt)
     latest_signal_at, latest_signal_age_seconds = _latest_timestamp_summary(
         [_parse_dt(event.get("_t") or event.get("ts") or event.get("created_at")) for event in events],
         now_dt,
@@ -2824,6 +3301,10 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None)
     latest_dryrun_age_seconds = dryrun_today.get("latest_age_seconds")
 
     return {
+        "day": today.isoformat(),
+        "day_tz": day_info["day_tz"],
+        "day_start_utc": day_info["start_utc_iso"],
+        "day_end_utc": day_info["end_utc_iso"],
         "day_utc": today.isoformat(),
         "signals": {
             "total": len(events),
@@ -2933,6 +3414,9 @@ def _readiness_action(key):
         "risk_daily_trades": "Wait for daily trade limit reset",
         "risk_consecutive_losses": "Pause after loss streak",
         "risk_open_or_pending": "Clear open or pending orders",
+        "risk_smoke_drawdown": "Pause trading and review live drawdown",
+        "risk_same_direction_cooldown": "Wait for direction cooldown to expire",
+        "risk_order_lifecycle": "Reconcile uncertain live order lifecycle",
     }
     return actions.get(str(key or ""), "Review readiness check")
 
@@ -2988,6 +3472,9 @@ def _first_order_rail(checklist):
                 "risk_daily_trades",
                 "risk_consecutive_losses",
                 "risk_open_or_pending",
+                "risk_smoke_drawdown",
+                "risk_same_direction_cooldown",
+                "risk_order_lifecycle",
             ],
             "Run live preflight chain",
         ),
@@ -3083,6 +3570,7 @@ def _clob_readonly_status(
     *,
     available,
     fresh,
+    require_quote_probes=True,
     authenticated,
     account_read_ok,
     allowance_read_ok,
@@ -3106,11 +3594,11 @@ def _clob_readonly_status(
         return "open_orders_read_blocked", "Check CLOB open orders access"
     if open_orders_count != 0:
         return "open_orders_present", "Cancel or reconcile open orders"
-    if market_probe_count == 0:
+    if require_quote_probes and market_probe_count == 0:
         return "missing_quote_probes", "Run live trade gate report"
-    if quote_executable_count != market_probe_count:
+    if require_quote_probes and quote_executable_count != market_probe_count:
         return "quote_probe_blocked", "Review CLOB quote probes"
-    if blockers:
+    if require_quote_probes and blockers:
         return "live_gate_blocked", "Clear live gate blockers"
     return "ready", "Ready for guarded preflight"
 
@@ -3243,6 +3731,8 @@ def _safety_report_summary():
         current_balance=balance_value,
     )
     live_real_risk_summary = live_real_summary["risk"]
+    live_order_sync_summary = _live_order_sync_summary()
+    live_trading_status = _live_trading_status(live_real_summary, live_order_sync_summary)
     paper_monitor_summary = _paper_monitor_summary(checkpoint, paper_risk_summary, today_summary)
     market_data_summary = _btc_live_market_data_summary()
     alert_summary = _live_alert_summary()
@@ -3384,9 +3874,16 @@ def _safety_report_summary():
         if isinstance(probe, dict)
     ]
     clob_report_path = effective_gate_path or allowance_path
-    clob_report_mtime = None
-    clob_report_age_seconds = None
-    if clob_report_path:
+    account_refresh_dt = _parse_dt(account_refresh.get("created_at")) if refreshed_account else None
+    account_refresh_age_seconds = _timestamp_age_seconds(account_refresh_dt) if account_refresh_dt is not None else None
+    account_refresh_fresh = (
+        bool(refreshed_account)
+        and account_refresh_age_seconds is not None
+        and account_refresh_age_seconds <= CLOB_READONLY_MAX_AGE_SECONDS
+    )
+    clob_report_mtime = _iso_utc(account_refresh_dt) if account_refresh_dt is not None else None
+    clob_report_age_seconds = account_refresh_age_seconds
+    if clob_report_mtime is None and clob_report_path:
         try:
             clob_report_mtime_dt = datetime.fromtimestamp(clob_report_path.stat().st_mtime, tz=timezone.utc)
             clob_report_mtime = clob_report_mtime_dt.isoformat()
@@ -3395,11 +3892,13 @@ def _safety_report_summary():
             clob_report_mtime = None
             clob_report_age_seconds = None
     clob_report_fresh = (
-        bool(clob_report_path)
+        account_refresh_fresh
+        or bool(clob_report_path)
         and clob_report_age_seconds is not None
         and clob_report_age_seconds <= CLOB_READONLY_MAX_AGE_SECONDS
     )
-    clob_blockers = live_gate_summary.get("blockers", []) or []
+    require_quote_probes = not bool(refreshed_account)
+    clob_blockers = [] if refreshed_account else (live_gate_summary.get("blockers", []) or [])
     clob_readonly_available = bool(live_gate_summary.get("available") or allowance_report)
     clob_readonly_ready = (
         clob_authenticated
@@ -3407,14 +3906,15 @@ def _safety_report_summary():
         and allowance_read_ok
         and open_orders_read_ok
         and open_orders_count == 0
-        and market_probe_count > 0
-        and quote_executable_count == market_probe_count
+        and (not require_quote_probes or market_probe_count > 0)
+        and (not require_quote_probes or quote_executable_count == market_probe_count)
         and clob_report_fresh
         and not clob_blockers
     )
     clob_status_reason, clob_next_action = _clob_readonly_status(
         available=clob_readonly_available,
         fresh=clob_report_fresh,
+        require_quote_probes=require_quote_probes,
         authenticated=clob_authenticated,
         account_read_ok=account_read_ok,
         allowance_read_ok=allowance_read_ok,
@@ -3430,6 +3930,7 @@ def _safety_report_summary():
         "status_reason": clob_status_reason,
         "next_action": clob_next_action,
         "report": str(clob_report_path or ""),
+        "report_source": account_source,
         "report_mtime": clob_report_mtime,
         "report_age_seconds": clob_report_age_seconds,
         "fresh": clob_report_fresh,
@@ -3483,6 +3984,16 @@ def _safety_report_summary():
         and formal_age_seconds is not None
         and formal_age_seconds <= formal_max_age_seconds
     )
+    account_activity = live_real_summary.get("account_activity") if isinstance(live_real_summary.get("account_activity"), dict) else {}
+    account_activity_max_age_seconds = int(os.environ.get("DASHBOARD_ACCOUNT_ACTIVITY_MAX_AGE_SECONDS", "600"))
+    account_activity_age_seconds = account_activity.get("report_age_seconds")
+    account_activity_fresh = (
+        bool(account_activity.get("available"))
+        and account_activity_age_seconds is not None
+        and account_activity_age_seconds <= account_activity_max_age_seconds
+    )
+    live_alerts_ready = int(alert_summary.get("critical_count", 0) or 0) == 0
+    live_alerts_age_seconds = alert_summary.get("report_age_seconds")
     report_refresh = _report_refresh_summary(
         [
             _report_refresh_item(
@@ -3502,6 +4013,59 @@ def _safety_report_summary():
                     "ready": "Monitoring formal live",
                 },
             ),
+            _report_refresh_item(
+                key="live_order_sync",
+                label="Order Sync",
+                report=live_order_sync_summary.get("report") or "",
+                available=bool(live_order_sync_summary.get("available")),
+                ok=bool(live_order_sync_summary.get("ok")),
+                fresh=bool(live_order_sync_summary.get("fresh")),
+                age_seconds=live_order_sync_summary.get("age_seconds"),
+                max_age_seconds=live_order_sync_summary.get("max_age_seconds"),
+                blockers=["reconcile_errors"] if live_order_sync_summary.get("reconcile_errors") else [],
+                actions={
+                    "missing": "Start live order sync loop",
+                    "stale": "Check live order sync loop",
+                    "blocked": "Review live order sync report",
+                    "ready": "Monitoring live order sync",
+                },
+            ),
+            _report_refresh_item(
+                key="polymarket_account_activity",
+                label="Account Activity",
+                report=account_activity.get("report") or "",
+                available=bool(account_activity.get("available")),
+                ok=bool(account_activity.get("ok")) or bool(account_activity.get("available")),
+                fresh=account_activity_fresh,
+                age_seconds=account_activity_age_seconds,
+                max_age_seconds=account_activity_max_age_seconds,
+                blockers=[] if account_activity.get("available") else ["missing_account_activity"],
+                actions={
+                    "missing": "Start Polymarket account activity sync",
+                    "stale": "Refresh Polymarket account activity sync",
+                    "blocked": "Review account activity report",
+                    "ready": "Monitoring account activity",
+                },
+            ),
+            _report_refresh_item(
+                key="live_alerts",
+                label="Live Alerts",
+                report=alert_summary.get("report") or "",
+                available=True,
+                ok=live_alerts_ready,
+                fresh=True,
+                age_seconds=live_alerts_age_seconds,
+                max_age_seconds=None,
+                blockers=[item.get("key") or item.get("title") or "critical_alert" for item in (alert_summary.get("active") or []) if item.get("severity") == "critical"],
+                actions={
+                    "blocked": "Review active live alerts",
+                    "ready": "No critical live alerts",
+                },
+            ),
+        ]
+    )
+    legacy_report_refresh = _report_refresh_summary(
+        [
             _report_refresh_item(
                 key="live_gate",
                 label="Live Gate",
@@ -3599,6 +4163,8 @@ def _safety_report_summary():
         },
         "dryrun": dryrun_summary,
         "live_real": live_real_summary,
+        "live_order_sync": live_order_sync_summary,
+        "live_trading_status": live_trading_status,
         "paper_monitor": paper_monitor_summary,
         "live_gate": live_gate_summary,
         "preflight_chain": preflight_summary,
@@ -3609,6 +4175,7 @@ def _safety_report_summary():
         "operator_summary": operator_summary,
         "clob_readonly": clob_readonly,
         "report_refresh": report_refresh,
+        "legacy_report_refresh": legacy_report_refresh,
         "first_order_rail": first_order_rail,
         "risk": live_real_risk_summary,
         "today": today_summary,

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 from api import server
@@ -12,6 +12,123 @@ from api import server
 def _write_json(path: Path, payload) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_dashboard_today_risk_uses_configured_trading_day_timezone(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
+    now = datetime(2026, 6, 21, 16, 30, tzinfo=timezone.utc)
+    records = [
+        {
+            "status": "SETTLED",
+            "pnl": 1.0,
+            "settled_at": "2026-06-21T16:05:00Z",
+        },
+        {
+            "status": "SETTLED",
+            "pnl": -1.0,
+            "settled_at": "2026-06-21T15:55:00Z",
+        },
+    ]
+
+    summary = server._risk_summary_from_records(
+        records,
+        limits_override={"max_daily_loss_usdc": 10, "max_daily_trades": 10},
+        now=now,
+    )
+
+    assert summary["metrics"]["day"] == "2026-06-22"
+    assert summary["metrics"]["day_tz"] == "Asia/Shanghai"
+    assert summary["metrics"]["day_start_utc"] == "2026-06-21T16:00:00Z"
+    assert summary["metrics"]["day_end_utc"] == "2026-06-22T16:00:00Z"
+    assert summary["metrics"]["daily_trades"] == 1
+    assert summary["metrics"]["daily_pnl_usdc"] == 1.0
+
+
+def test_dashboard_today_db_fallback_filters_by_trading_day_window(monkeypatch, tmp_path):
+    monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
+    db_path = tmp_path / "dashboard.db"
+    monkeypatch.setattr(server, "DB_PATH", db_path)
+    conn = sqlite3.connect(db_path)
+    conn.execute(
+        """CREATE TABLE trades (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            pnl REAL,
+            won INTEGER,
+            regime TEXT,
+            direction TEXT,
+            size REAL,
+            entry_bar TEXT,
+            settle_bar TEXT,
+            created_at TEXT,
+            details TEXT
+        )"""
+    )
+    conn.execute(
+        """CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            source TEXT NOT NULL,
+            kline_n INTEGER,
+            action TEXT,
+            dir5 TEXT,
+            dir4 TEXT,
+            regime TEXT,
+            filt_passed INTEGER,
+            reason TEXT,
+            created_at TEXT,
+            details TEXT
+        )"""
+    )
+    conn.execute(
+        """INSERT INTO trades (source, pnl, won, regime, direction, size, entry_bar, settle_bar, created_at, details)
+           VALUES ('live', 1.0, 1, 'r', 'UP', 10, '2026-06-21T16:00:00Z', '2026-06-21T16:05:00Z', '2026-06-21T16:05:01Z', '{}')"""
+    )
+    conn.execute(
+        """INSERT INTO trades (source, pnl, won, regime, direction, size, entry_bar, settle_bar, created_at, details)
+           VALUES ('live', -1.0, 0, 'r', 'DOWN', 10, '2026-06-21T15:50:00Z', '2026-06-21T15:55:00Z', '2026-06-21T15:55:01Z', '{}')"""
+    )
+    conn.execute(
+        """INSERT INTO events (source, kline_n, action, dir5, dir4, regime, filt_passed, reason, created_at, details)
+           VALUES ('live', 1, 'BUY_UP', 'UP', 'UP', 'r', 1, '', '2026-06-21T16:05:00Z', '{}')"""
+    )
+    conn.execute(
+        """INSERT INTO events (source, kline_n, action, dir5, dir4, regime, filt_passed, reason, created_at, details)
+           VALUES ('live', 2, 'HOLD', 'DOWN', 'DOWN', 'r', 0, 'old', '2026-06-21T15:55:00Z', '{}')"""
+    )
+    conn.commit()
+    conn.close()
+
+    day = date(2026, 6, 22)
+
+    trades = server._dashboard_today_trade_records(day)
+    events = server._dashboard_today_decision_events(day)
+
+    assert [trade["pnl"] for trade in trades] == [1.0]
+    assert [event["action"] for event in events] == ["BUY_UP"]
+
+
+def test_live_analytics_daily_series_uses_dashboard_trading_day(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
+    facts = [
+        {
+            "ts": datetime(2026, 6, 21, 15, 55, tzinfo=timezone.utc),
+            "pnl": -1.0,
+            "won": False,
+            "settled": True,
+        },
+        {
+            "ts": datetime(2026, 6, 21, 16, 5, tzinfo=timezone.utc),
+            "pnl": 1.0,
+            "won": True,
+            "settled": True,
+        },
+    ]
+
+    rows = server._analytics_daily_series(facts)
+
+    assert [row["date"] for row in rows] == ["2026-06-21", "2026-06-22"]
+    assert rows[0]["total_pnl_usdc"] == -1.0
+    assert rows[1]["total_pnl_usdc"] == 1.0
 
 
 def test_live_safety_labels_paper_source_without_calling_it_real_live(monkeypatch):
@@ -490,6 +607,184 @@ def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, t
     assert live_real["formal"]["latest_reason"] == "no_side_passed"
 
 
+def test_live_safety_surfaces_smoke_drawdown_resilience_blocker(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": True, "matches": [], "started_at": "2026-06-21T00:00:00Z", "uptime_seconds": 3600, "patterns": patterns},
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "order_id": "drawdown-loss-1",
+                "status": "SETTLED",
+                "direction": "DOWN",
+                "pnl": -54.25,
+                "entry_ts": "2026-06-21T20:55:00Z",
+                "settled_at": "2026-06-21T21:00:00Z",
+            }
+        ],
+    )
+    (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
+        (
+            "2026-06-21T00:00:00+00:00 formal_live_supervisor started "
+            "max_daily_loss=60 max_daily_trades=100 max_consecutive_losses=10 "
+            "max_open_or_pending=1 max_smoke_drawdown=50 "
+            "same_direction_loss_cooldown_count=8 same_direction_loss_cooldown_minutes=30"
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": False,
+            "submitted": False,
+            "reason": "latest prediction did not produce a would_place_order intent",
+            "prediction": {"action": "HOLD", "reason_code": "no_side_passed"},
+        },
+    )
+
+    summary = server._safety_report_summary()
+    risk = summary["live_real"]["risk"]
+    readiness_keys = {item["key"]: item for item in summary["checklist"]}
+
+    assert risk["ok"] is False
+    assert risk["resilience"]["ok"] is False
+    assert "max_smoke_drawdown_usdc" in risk["resilience"]["failures"]
+    assert readiness_keys["risk_smoke_drawdown"]["ok"] is False
+    assert readiness_keys["risk_smoke_drawdown"]["value"] == 54.25
+    assert summary["readiness_summary"]["risk_blockers"] >= 1
+
+
+def test_live_trading_status_uses_formal_sync_risk_not_stale_preflight(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    runtime_dir = tmp_path / "data" / "runtime"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    runtime_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(server, "KRONOS_RUNTIME_DIR", runtime_dir, raising=False)
+    monkeypatch.setenv("KRONOS_ENABLE_REAL_ORDERS", "YES")
+    now = datetime.now(timezone.utc)
+
+    def fake_process_summary(patterns):
+        text = " ".join(patterns)
+        running = any(
+            key in text
+            for key in (
+                "run_prediction_bound_live_formal_supervisor.ps1",
+                "run_prediction_bound_live_order.py",
+                "run_live_order_sync_loop.py",
+            )
+        )
+        return {
+            "running": running,
+            "matches": [{"pid": 1234, "command": text}] if running else [],
+            "started_at": server._iso_utc(now - timedelta(hours=2)) if running else None,
+            "uptime_seconds": 7200 if running else None,
+            "patterns": patterns,
+        }
+
+    monkeypatch.setattr(server, "_process_summary", fake_process_summary)
+    monkeypatch.setattr(
+        server,
+        "_btc_live_market_data_summary",
+        lambda: {"ready": True, "price_age_seconds": 1, "received_age_seconds": 1, "status": "fresh"},
+    )
+    monkeypatch.setattr(
+        server,
+        "_live_clob_account_snapshot",
+        lambda: {
+            "ok": True,
+            "source": "test",
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 100.0,
+                "min_allowance": 100.0,
+                "allowance_count": 3,
+            },
+        },
+    )
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
+        (
+            f"{server._iso_utc(now - timedelta(hours=2))} formal_live_supervisor started "
+            "order_size_shares=10 min_price=0.49 active_max_price=0.5 max_price=0.52 "
+            "max_notional=5.2 max_daily_loss=60 max_daily_trades=100 max_consecutive_losses=10 "
+            "max_open_or_pending=1 max_smoke_drawdown=50 same_direction_loss_cooldown_count=8 "
+            "same_direction_loss_cooldown_minutes=30 signal_max_age=360 reference_price_source=chainlink"
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": server._iso_utc(now - timedelta(seconds=10)),
+            "ok": False,
+            "submitted": False,
+            "reason": "latest prediction did not produce a would_place_order intent",
+            "prediction": {
+                "action": "HOLD",
+                "reason_code": "no_side_passed",
+                "created_at": server._iso_utc(now - timedelta(seconds=10)),
+                "execution_market_shift": "next_period",
+            },
+        },
+    )
+    _write_json(
+        report_dir / "live_order_sync_latest.json",
+        {
+            "created_at": server._iso_utc(now - timedelta(seconds=20)),
+            "ok": True,
+            "summary": {"open_orders": 0, "reconcile_errors": 0, "settlement_source": "chainlink"},
+        },
+    )
+    _write_json(
+        report_dir / "live_preflight_chain_latest.json",
+        {
+            "created_at": server._iso_utc(now - timedelta(days=3)),
+            "ok": False,
+            "submitted": False,
+            "blockers": ["stale_manual_preflight"],
+        },
+    )
+
+    status = server._safety_report_summary()["live_trading_status"]
+    blocker_keys = {item["key"] for item in status["blockers"]}
+
+    assert status["ok"] is True
+    assert status["status"] == "running"
+    assert status["label"] == "Running"
+    assert status["formal"]["running"] is True
+    assert status["formal"]["fresh"] is True
+    assert status["sync"]["running"] is True
+    assert status["sync"]["ok"] is True
+    assert status["sync"]["fresh"] is True
+    assert "live_preflight_fresh" not in blocker_keys
+    assert "stale_manual_preflight" not in blocker_keys
+
+
 def test_live_safety_summaries_include_source_scoped_equity_curves(monkeypatch, tmp_path):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -584,35 +879,37 @@ def test_live_real_summary_includes_recent_week_pnl_calendar(monkeypatch, tmp_pa
         lambda **_kwargs: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None},
     )
     monkeypatch.setattr(server, "_polymarket_account_activity_summary", lambda cash_balance=None: {"available": False})
-    today = datetime.now(timezone.utc).date()
+    day_info = server._dashboard_day_info(now=datetime.now(timezone.utc))
+    today = day_info["day"]
+    start_utc = day_info["start_utc"]
     _write_json(
         checkpoint_dir / "live_real_orders_current_next.json",
         [
             {
                 "order_id": "old",
                 "status": "SETTLED",
-                "settled_at": (today - timedelta(days=8)).isoformat() + "T01:00:00Z",
+                "settled_at": server._iso_utc(start_utc - timedelta(days=8) + timedelta(hours=1)),
                 "pnl": 99.0,
                 "won": True,
             },
             {
                 "order_id": "win",
                 "status": "SETTLED",
-                "settled_at": (today - timedelta(days=1)).isoformat() + "T01:00:00Z",
+                "settled_at": server._iso_utc(start_utc - timedelta(days=1) + timedelta(hours=1)),
                 "pnl": 2.5,
                 "won": True,
             },
             {
                 "order_id": "loss",
                 "status": "SETTLED",
-                "settled_at": today.isoformat() + "T02:00:00Z",
+                "settled_at": server._iso_utc(start_utc + timedelta(hours=2)),
                 "pnl": -5.2,
                 "won": False,
             },
             {
                 "order_id": "open",
                 "status": "OPEN",
-                "created_at": today.isoformat() + "T03:00:00Z",
+                "created_at": server._iso_utc(start_utc + timedelta(hours=3)),
                 "pnl": 1000.0,
             },
         ],
@@ -627,6 +924,7 @@ def test_live_real_summary_includes_recent_week_pnl_calendar(monkeypatch, tmp_pa
     assert calendar["wins"] == 1
     assert calendar["losses"] == 1
     assert calendar["days"][-1]["date"] == today.isoformat()
+    assert calendar["day_tz"] == "Asia/Shanghai"
     assert calendar["days"][-1]["pnl_usdc"] == -5.2
     assert calendar["days"][-1]["settled"] == 1
     assert calendar["days"][-1]["losses"] == 1
@@ -1335,6 +1633,87 @@ def test_live_safety_clob_readonly_marks_stale_report(tmp_path, monkeypatch):
     assert audit["next_action"] == "Refresh live trade gate report"
 
 
+def test_live_safety_clob_readonly_uses_fresh_account_refresh_when_gate_report_is_stale(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "CLOB_READONLY_MAX_AGE_SECONDS", 300)
+
+    gate_path = report_dir / "live_trade_gate_latest.json"
+    _write_json(
+        gate_path,
+        {
+            "ok": True,
+            "ready_for_live_smoke": True,
+            "blockers": [],
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "usdc_balance": 12.5,
+                "min_allowance": 15.0,
+            },
+            "funding_requirements": {
+                "required_min_balance_usdc": 10.0,
+                "required_smoke_notional_usdc": 2.6,
+                "required_min_allowance_usdc": 10.0,
+                "balance_shortfall_usdc": 0.0,
+                "smoke_notional_shortfall_usdc": 0.0,
+                "allowance_shortfall_usdc": 0.0,
+                "funding_ready": True,
+            },
+            "market_probes": [
+                {"direction": "UP", "ok": True, "quote_executable": True},
+                {"direction": "DOWN", "ok": True, "quote_executable": True},
+            ],
+            "checks": [
+                {"name": "clob_account_authenticated", "ok": True},
+                {"name": "account_balance_read_ok", "ok": True},
+                {"name": "account_allowance_read_ok", "ok": True},
+                {"name": "account_open_orders_read_ok", "ok": True},
+                {"name": "balance_meets_minimum", "ok": True},
+                {"name": "allowance_meets_minimum", "ok": True},
+            ],
+        },
+    )
+    stale_ts = (datetime.now(timezone.utc) - timedelta(minutes=10)).timestamp()
+    os.utime(gate_path, (stale_ts, stale_ts))
+
+    def fake_snapshot():
+        return {
+            "ok": True,
+            "source": "live_clob_account_refresh",
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "account": {
+                "authenticated": True,
+                "orders_read_ok": True,
+                "balance_read_ok": True,
+                "allowance_read_ok": True,
+                "open_orders_count": 0,
+                "open_orders": [],
+                "usdc_balance": 84.022643,
+                "min_allowance": 15.0,
+                "allowance_count": 3,
+            },
+        }
+
+    monkeypatch.setattr(server, "_live_clob_account_snapshot", fake_snapshot)
+
+    audit = server._safety_report_summary()["clob_readonly"]
+
+    assert audit["account_source"] == "live_clob_account_refresh"
+    assert audit["fresh"] is True
+    assert audit["ready"] is True
+    assert audit["status_reason"] == "ready"
+    assert audit["next_action"] == "Ready for guarded preflight"
+    assert audit["report_age_seconds"] <= server.CLOB_READONLY_MAX_AGE_SECONDS
+
+
 def test_live_safety_clob_readonly_marks_missing_report_next_action(tmp_path, monkeypatch):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"
@@ -2006,24 +2385,31 @@ def test_live_safety_includes_report_refresh_summary(tmp_path, monkeypatch):
 
     summary = server._safety_report_summary()
     refresh = summary["report_refresh"]
+    legacy_refresh = summary["legacy_report_refresh"]
     items = {item["key"]: item for item in refresh["items"]}
+    legacy_items = {item["key"]: item for item in legacy_refresh["items"]}
 
     assert refresh["ready"] is False
     assert refresh["total"] == 4
-    assert refresh["stale_count"] == 1
-    assert refresh["blocked_count"] >= 1
+    assert "live_order_sync" in items
+    assert "polymarket_account_activity" in items
+    assert "live_alerts" in items
     assert items["formal_live"]["status"] == "missing"
-    assert items["live_gate"]["report"].endswith("live_trade_gate_latest.json")
-    assert items["live_gate"]["available"] is True
-    assert items["live_gate"]["fresh"] is True
-    assert items["live_gate"]["status"] == "blocked"
-    assert items["live_gate"]["next_action"] == "Clear live gate blockers"
-    assert items["live_gate"]["blockers"] == ["balance_meets_minimum"]
-    assert items["live_preflight"]["fresh"] is False
-    assert items["live_preflight"]["status"] == "stale"
-    assert items["live_preflight"]["next_action"] == "Refresh live preflight chain"
-    assert items["clob_readonly"]["status"] == "blocked"
-    assert items["clob_readonly"]["next_action"] == "Run live trade gate report"
+    assert "live_gate" not in items
+    assert "live_preflight" not in items
+    assert "clob_readonly" not in items
+    assert legacy_refresh["total"] == 3
+    assert legacy_items["live_gate"]["report"].endswith("live_trade_gate_latest.json")
+    assert legacy_items["live_gate"]["available"] is True
+    assert legacy_items["live_gate"]["fresh"] is True
+    assert legacy_items["live_gate"]["status"] == "blocked"
+    assert legacy_items["live_gate"]["next_action"] == "Clear live gate blockers"
+    assert legacy_items["live_gate"]["blockers"] == ["balance_meets_minimum"]
+    assert legacy_items["live_preflight"]["fresh"] is False
+    assert legacy_items["live_preflight"]["status"] == "stale"
+    assert legacy_items["live_preflight"]["next_action"] == "Refresh live preflight chain"
+    assert legacy_items["clob_readonly"]["status"] == "blocked"
+    assert legacy_items["clob_readonly"]["next_action"] == "Run live trade gate report"
 
 
 def test_live_safety_includes_market_data_freshness(monkeypatch):
@@ -2205,8 +2591,9 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
     )
 
     now = datetime.now(timezone.utc)
-    today_prefix = now.strftime("%Y-%m-%d")
-    yesterday = now - timedelta(days=1)
+    day_info = server._dashboard_day_info(now=now)
+    today_prefix = day_info["day_iso"]
+    yesterday = day_info["start_utc"] - timedelta(hours=1)
     checkpoint = {
         "timestamp": now.isoformat(),
         "trades": [
@@ -2367,7 +2754,11 @@ def test_live_safety_includes_today_cockpit_summary(tmp_path, monkeypatch):
     summary = server._safety_report_summary()
     today = summary["today"]
 
+    assert today["day"] == today_prefix
     assert today["day_utc"] == today_prefix
+    assert today["day_tz"] == "Asia/Shanghai"
+    assert today["day_start_utc"] == day_info["start_utc_iso"]
+    assert today["day_end_utc"] == day_info["end_utc_iso"]
     assert today["signals"]["total"] == 2
     assert today["signals"]["passed"] == 1
     assert today["signals"]["blocked"] == 1
@@ -2432,8 +2823,9 @@ def test_live_safety_backfills_today_summary_from_dashboard_db_when_checkpoint_i
     )
 
     now = datetime.now(timezone.utc)
-    today_prefix = now.strftime("%Y-%m-%d")
-    yesterday_prefix = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+    day_info = server._dashboard_day_info(now=now)
+    start_utc = day_info["start_utc"]
+    today_prefix = day_info["day_iso"]
     _write_json(checkpoint_dir / "paper_live.json", {"trades": [], "pending_orders": [], "open_orders": []})
     (checkpoint_dir / "paper_live_events.jsonl").write_text("", encoding="utf-8")
 
@@ -2467,21 +2859,48 @@ def test_live_safety_backfills_today_summary_from_dashboard_db_when_checkpoint_i
         )"""
     )
     trade_rows = [
-        (26.02, 1, "BUY_UP", f"{today_prefix} 00:00:00+00:00", f"{today_prefix} 00:05:00+00:00"),
-        (-25.0, 0, "BUY_DOWN", f"{today_prefix} 00:05:00+00:00", f"{today_prefix} 00:10:00+00:00"),
-        (26.02, 1, "BUY_UP", f"{today_prefix}T00:10:00+00:00", f"{today_prefix}T00:15:00+00:00"),
-        (26.02, 1, "BUY_UP", f"{yesterday_prefix}T23:50:00+00:00", f"{yesterday_prefix}T23:55:00+00:00"),
+        (
+            26.02,
+            1,
+            "BUY_UP",
+            server._iso_utc(start_utc).replace("T", " ").replace("Z", "+00:00"),
+            server._iso_utc(start_utc + timedelta(minutes=5)).replace("T", " ").replace("Z", "+00:00"),
+        ),
+        (
+            -25.0,
+            0,
+            "BUY_DOWN",
+            server._iso_utc(start_utc + timedelta(minutes=5)).replace("T", " ").replace("Z", "+00:00"),
+            server._iso_utc(start_utc + timedelta(minutes=10)).replace("T", " ").replace("Z", "+00:00"),
+        ),
+        (
+            26.02,
+            1,
+            "BUY_UP",
+            server._iso_utc(start_utc + timedelta(minutes=10)).replace("Z", "+00:00"),
+            server._iso_utc(start_utc + timedelta(minutes=15)).replace("Z", "+00:00"),
+        ),
+        (
+            26.02,
+            1,
+            "BUY_UP",
+            server._iso_utc(start_utc - timedelta(minutes=10)),
+            server._iso_utc(start_utc - timedelta(minutes=5)),
+        ),
     ]
     conn.executemany(
         """INSERT INTO trades (source, pnl, won, regime, direction, size, entry_bar, settle_bar, created_at, details)
            VALUES ('live', ?, ?, 'test', ?, 25.0, ?, ?, ?, '{}')""",
-        [(pnl, won, direction, entry, settle, f"{today_prefix}T01:00:00Z") for pnl, won, direction, entry, settle in trade_rows],
+        [
+            (pnl, won, direction, entry, settle, server._iso_utc(start_utc + timedelta(hours=1)))
+            for pnl, won, direction, entry, settle in trade_rows
+        ],
     )
     event_rows = [
-        ("BUY_UP", 1, "LONG passed", f"{today_prefix}T00:00:00Z"),
-        ("BUY_DOWN", 1, "SHORT passed", f"{today_prefix}T00:05:00Z"),
-        ("HOLD", 0, "macro_gate", f"{today_prefix}T00:10:00Z"),
-        ("BUY_UP", 1, "old", f"{yesterday_prefix}T23:55:00Z"),
+        ("BUY_UP", 1, "LONG passed", server._iso_utc(start_utc)),
+        ("BUY_DOWN", 1, "SHORT passed", server._iso_utc(start_utc + timedelta(minutes=5))),
+        ("HOLD", 0, "macro_gate", server._iso_utc(start_utc + timedelta(minutes=10))),
+        ("BUY_UP", 1, "old", server._iso_utc(start_utc - timedelta(minutes=5))),
     ]
     conn.executemany(
         """INSERT INTO events (source, kline_n, action, dir5, dir4, regime, filt_passed, reason, created_at, details)
@@ -2507,8 +2926,12 @@ def test_live_safety_backfills_today_summary_from_dashboard_db_when_checkpoint_i
     assert today["signals"]["hold"] == 1
     assert today["signals"]["top_block_reason"] == "macro_gate"
     assert today["risk_usage"]["daily_trades"] == 0.3
-    assert today["activity"]["latest_trade_at"] == f"{today_prefix}T00:15:00Z"
-    assert today["activity"]["latest_signal_at"] == f"{today_prefix}T00:10:00Z"
+    assert today["day"] == today_prefix
+    assert today["day_tz"] == "Asia/Shanghai"
+    assert today["day_start_utc"] == day_info["start_utc_iso"]
+    assert today["day_end_utc"] == day_info["end_utc_iso"]
+    assert today["activity"]["latest_trade_at"] == server._iso_utc(start_utc + timedelta(minutes=15))
+    assert today["activity"]["latest_signal_at"] == server._iso_utc(start_utc + timedelta(minutes=10))
 
 
 def test_live_safety_marks_preflight_submission_as_critical(tmp_path, monkeypatch):
@@ -2937,6 +3360,14 @@ def test_live_page_mounts_today_cockpit():
     assert "0.49" in source
 
 
+def test_live_page_labels_today_with_configured_day_timezone():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "today?.day_tz" in source
+    assert "today?.day ?? today?.day_utc" in source
+    assert 'sub={`UTC ${today?.day_utc ?? "-"}`}' not in source
+
+
 def test_live_page_uses_today_summary_for_top_kpis():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -2985,6 +3416,14 @@ def test_live_page_mounts_risk_rules_card():
     assert 'title="Risk Rules"' in source
     assert "active_max_price" in source
     assert "same_direction_loss_cooldown_minutes" in source
+
+
+def test_live_page_surfaces_risk_resilience_alert_banner():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "risk?.resilience" in source
+    assert "Risk Control Triggered" in source
+    assert "riskBlockerItems" in source
 
 
 def test_live_page_scopes_real_order_lock_badge_to_live_real_mode():
@@ -3249,16 +3688,19 @@ def test_live_page_surfaces_first_order_rail():
     assert "requires_confirmation" in source
 
 
-def test_live_page_surfaces_operator_summary_card():
+def test_live_page_keeps_operator_summary_out_of_trading_status_card():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    panel_source = source[
+        source.index("function TradingStatusPanel"):
+        source.index("function FirstOrderRail")
+    ]
 
     assert "operator_summary" in source
-    assert "const operator = safety?.operator_summary" in source
-    assert "operator?.next_action" in source
-    assert "operator?.primary_blocker" in source
-    assert 'title="Trading Status"' in source
-    assert "Next Action" in source
-    assert "Primary Blocker" in source
+    assert "operator?.next_action" not in panel_source
+    assert "operator?.primary_blocker" not in panel_source
+    assert 'title="Trading Status"' in panel_source
+    assert "liveStatus?.next_action" in panel_source
+    assert "Primary Blocker" not in panel_source
 
 
 def test_trading_status_panel_avoids_duplicate_top_kpi_values():
@@ -3268,14 +3710,35 @@ def test_trading_status_panel_avoids_duplicate_top_kpi_values():
         source.index("function FirstOrderRail")
     ]
 
-    assert 'HealthTile label="Current Stage"' in panel_source
-    assert 'HealthTile label="Stage Status"' in panel_source
-    assert 'HealthTile label="Manual Confirmation"' in panel_source
-    assert 'HealthTile label="Primary Blocker"' in panel_source
+    assert 'HealthTile label="Formal Live"' in panel_source
+    assert 'HealthTile label="Order Sync"' in panel_source
+    assert 'HealthTile label="Risk State"' in panel_source
+    assert 'HealthTile label="Open Orders"' in panel_source
+    assert 'HealthTile label="Current Stage"' not in panel_source
+    assert 'HealthTile label="Stage Status"' not in panel_source
+    assert 'HealthTile label="Manual Confirmation"' not in panel_source
+    assert 'HealthTile label="Primary Blocker"' not in panel_source
     assert 'HealthTile label="Balance"' not in panel_source
     assert 'HealthTile label="Allowance"' not in panel_source
     assert 'HealthTile label="Open/Pending"' not in panel_source
     assert 'HealthTile label="Mode"' not in panel_source
+
+
+def test_live_page_trading_status_uses_live_trading_status_not_first_order_rail():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    panel_source = source[
+        source.index("function TradingStatusPanel"):
+        source.index("function FirstOrderRail")
+    ]
+
+    assert "live_trading_status" in source
+    assert "liveStatus" in panel_source
+    assert "safety?.first_order_rail" not in panel_source
+    assert "safety?.operator_summary" not in panel_source
+    assert "health?.state" not in panel_source
+    assert "Formal Live" in panel_source
+    assert "Order Sync" in panel_source
+    assert "Risk State" in panel_source
 
 
 def test_live_page_surfaces_today_dryrun_summary():
@@ -3454,6 +3917,9 @@ def test_analytics_page_surfaces_trade_performance_sections():
     source = Path("web/src/pages/Analytics.tsx").read_text(encoding="utf-8")
 
     assert 'usePolling<AnalyticsData>("/api/live-analytics"' in source
+    assert "day_tz?: string" in source
+    assert "Today Trading Day" in source
+    assert "Today UTC" not in source
     assert "Total PnL" in source
     assert "Win Rate" in source
     assert "Profit Factor" in source
@@ -3507,13 +3973,19 @@ def test_live_page_surfaces_report_freshness_panel():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert "report_refresh" in source
+    assert "legacy_report_refresh" in source
     assert "function ReportFreshnessPanel" in source
     assert "<ReportFreshnessPanel refresh={safety?.report_refresh}" in source
+    assert "<LegacyReportFreshnessPanel refresh={safety?.legacy_report_refresh}" in source
     assert "Report Freshness" in source
+    assert "Legacy Preflight Reports" in source
     assert "item.next_action" in source
     assert "item.status" in source
     assert "item.age_seconds" in source
     assert "item.report" in source
+    panel_source = source[source.index("function ReportFreshnessPanel"):source.index("function MarketDataPanel")]
+    assert "formal live, order sync, and account activity" in panel_source
+    assert "live gate, preflight, and CLOB audit" not in panel_source
 
 
 def test_live_page_shows_empty_state_for_missing_report_freshness_items():
@@ -3521,7 +3993,8 @@ def test_live_page_shows_empty_state_for_missing_report_freshness_items():
 
     assert "items.length === 0" in source
     assert "No freshness reports" in source
-    assert "Waiting for live gate, preflight, and CLOB audit reports" in source
+    assert "Waiting for formal live, order sync, and account activity reports" in source
+    assert "Waiting for legacy preflight diagnostics" in source
 
 
 def test_live_page_renders_blocked_report_freshness_as_alert():
@@ -3605,6 +4078,18 @@ def test_status_bar_surfaces_market_data_status():
     assert "const marketDataReady = safety?.market_data?.ready === true" in source
     assert "Market Data" in source
     assert "safety?.market_data?.source" in source
+
+
+def test_status_bar_uses_live_trading_status_for_live_runtime_review():
+    source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
+
+    assert "live_trading_status?: {" in source
+    assert "const liveTradingStatus = safety?.live_trading_status" in source
+    assert 'const runtimeLabel = liveEnabled ? liveTradingStatus?.label ?? "Waiting" : healthOk ? "Runtime OK" : "Runtime review"' in source
+    assert "const runtimeChipOk = liveEnabled ? liveTradingStatus?.ok === true : healthOk" in source
+    assert "liveEnabled ? apiItems : [...apiItems, ...runtimeItems]" in source
+    assert "checkpoint_fresh" in source
+    assert "events_fresh" in source
 
 
 def test_status_bar_surfaces_operator_next_action():
