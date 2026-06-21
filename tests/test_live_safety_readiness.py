@@ -175,6 +175,7 @@ def test_live_analytics_summarizes_pnl_drawdown_and_no_fill_hypothetical(monkeyp
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     checkpoint_dir.mkdir(parents=True)
     monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "_live_current_balance_value", lambda: (100.0, "test_balance"))
     _write_json(
         checkpoint_dir / "live_real_orders_current_next.json",
         [
@@ -235,7 +236,8 @@ def test_live_analytics_summarizes_pnl_drawdown_and_no_fill_hypothetical(monkeyp
     assert summary["summary"]["total_pnl_usdc"] == 0.0
     assert summary["summary"]["profit_factor"] == 1.0
     assert summary["summary"]["max_drawdown_usdc"] == 5.0
-    assert summary["equity"]["points"] == [500.0, 505.0, 503.0, 500.0]
+    assert summary["equity"]["points"] == [100.0, 105.0, 103.0, 100.0]
+    assert summary["equity"]["current_balance_source"] == "test_balance"
     price_tiers = {row["key"]: row for row in summary["breakdowns"]["price_tier"]}
     assert price_tiers["maker_049"]["count"] == 2
     assert price_tiers["maker_049"]["total_pnl_usdc"] == 2.0

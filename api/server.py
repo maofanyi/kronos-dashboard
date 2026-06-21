@@ -1661,6 +1661,46 @@ def _analytics_window(facts, *, now, days=None, today=False):
     return _analytics_metric_summary(filtered)
 
 
+def _live_current_balance_value():
+    allowance_path, allowance_report = _latest_json_report("polymarket_clob_*allowance*_audit*.json")
+    if not allowance_report:
+        allowance_path, allowance_report = _latest_json_report("polymarket_clob_account_read_audit*.json")
+    gate_path, gate_report = _latest_json_report("live_trade_gate*.json")
+    preflight_path, preflight_report = _latest_json_report("live_preflight_chain*.json")
+    preflight_components = preflight_report.get("components") if isinstance(preflight_report.get("components"), dict) else {}
+    preflight_gate_report = (
+        preflight_components.get("gate")
+        if isinstance(preflight_components.get("gate"), dict)
+        else {}
+    )
+    gate_mtime = gate_path.stat().st_mtime if gate_path else -1
+    preflight_mtime = preflight_path.stat().st_mtime if preflight_path else -1
+    use_preflight_gate = bool(preflight_gate_report) and preflight_mtime >= gate_mtime
+    effective_gate_path = preflight_path if use_preflight_gate else gate_path
+    effective_gate_report = preflight_gate_report if use_preflight_gate else gate_report
+    gate_account = effective_gate_report.get("account") if isinstance(effective_gate_report.get("account"), dict) else {}
+    network_calls = (allowance_report.get("network") or {}).get("calls") or []
+    balance_allowance_call = next(
+        (call for call in network_calls if call.get("name") == "get_balance_allowance"),
+        {},
+    )
+    balance_value = _num(gate_account.get("usdc_balance", balance_allowance_call.get("balance")))
+    balance_source = "live_gate_report" if gate_account.get("usdc_balance") is not None else "allowance_audit"
+    _, effective_gate_age_seconds = _path_age(effective_gate_path)
+    if (
+        effective_gate_path
+        and effective_gate_age_seconds is not None
+        and effective_gate_age_seconds > CLOB_READONLY_MAX_AGE_SECONDS
+    ):
+        account_refresh = _live_clob_account_snapshot()
+        refreshed_account = account_refresh.get("account") if isinstance(account_refresh, dict) else {}
+        if account_refresh.get("ok") and isinstance(refreshed_account, dict):
+            refreshed_balance = _num(refreshed_account.get("usdc_balance"))
+            if refreshed_balance is not None:
+                return refreshed_balance, str(account_refresh.get("source") or "live_clob_account_refresh")
+    return balance_value, balance_source if balance_value is not None else "unavailable"
+
+
 def _live_analytics_summary():
     ledger_path = _live_real_ledger_path()
     records = _rows_from_ledger_payload(_read_json(ledger_path))
@@ -1676,7 +1716,12 @@ def _live_analytics_summary():
         if fact is not None
     ]
     now = datetime.now(timezone.utc)
-    equity = _equity_summary_from_records(records, source="live_real_orders")
+    current_balance, current_balance_source = _live_current_balance_value()
+    equity = _equity_summary_from_records(
+        records,
+        current_balance=current_balance,
+        source="live_real_orders",
+    )
     labels = ["Start"] + [
         fact.get("ts_iso") or ""
         for fact in actual_facts
@@ -1709,6 +1754,7 @@ def _live_analytics_summary():
             "labels": labels,
             "drawdown_points": drawdown["points"],
             "drawdown": drawdown,
+            "current_balance_source": current_balance_source,
         },
         "pnl_composition": {
             "gross_profit_usdc": summary["gross_profit_usdc"],
