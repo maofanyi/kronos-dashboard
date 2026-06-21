@@ -35,7 +35,7 @@ KRONOS_LOG_DIR = KRONOS_CHECKPOINT_DIR.parent / "logs"
 KRONOS_FEATURE_DIR = KRONOS_CHECKPOINT_DIR.parent / "features"
 KRONOS_CONFIG_DIR = KRONOS_CHECKPOINT_DIR.parent / "config"
 KRONOS_REPORT_DIR = KRONOS_CHECKPOINT_DIR.parent / "reports"
-LOG_ERROR_PATTERNS = ("traceback", "poll error", "unexpected", "exception", "timeout", "network", "cuda", "oom")
+LOG_ERROR_PATTERNS = ("traceback", "poll error", "unexpected", "exception", "timeout", "network", "oom")
 RISK_LIMITS = {
     "max_daily_loss_usdc": float(os.environ.get("MAX_DAILY_LOSS_USDC", "10")),
     "max_daily_trades": int(os.environ.get("MAX_DAILY_TRADES", "20")),
@@ -1411,6 +1411,60 @@ def _equity_summary_from_records(records, *, current_balance=None, prefer_balanc
     }
 
 
+def _weekly_pnl_calendar_from_records(records, *, now=None):
+    current = now if isinstance(now, datetime) else datetime.now(timezone.utc)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=timezone.utc)
+    today = current.astimezone(timezone.utc).date()
+    start = today - timedelta(days=6)
+    days = {}
+    for offset in range(7):
+        day = start + timedelta(days=offset)
+        days[day.isoformat()] = {
+            "date": day.isoformat(),
+            "pnl_usdc": 0.0,
+            "settled": 0,
+            "wins": 0,
+            "losses": 0,
+        }
+
+    for record in records or []:
+        if not isinstance(record, dict) or not _is_equity_settled_record(record):
+            continue
+        ts = _record_ts(record)
+        if ts is None:
+            continue
+        day = ts.astimezone(timezone.utc).date()
+        key = day.isoformat()
+        if key not in days:
+            continue
+        item = days[key]
+        item["pnl_usdc"] = round(float(item["pnl_usdc"]) + _record_pnl(record), 8)
+        item["settled"] += 1
+        won = _record_won(record)
+        if won is True:
+            item["wins"] += 1
+        elif won is False:
+            item["losses"] += 1
+
+    ordered_days = list(days.values())
+    total_pnl = round(sum(float(day["pnl_usdc"]) for day in ordered_days), 8)
+    settled = sum(int(day["settled"]) for day in ordered_days)
+    wins = sum(int(day["wins"]) for day in ordered_days)
+    losses = sum(int(day["losses"]) for day in ordered_days)
+    return {
+        "start_date": start.isoformat(),
+        "end_date": today.isoformat(),
+        "days": ordered_days,
+        "total_pnl_usdc": total_pnl,
+        "settled": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / settled, 4) if settled else 0.0,
+        "source": "settled_ledger_utc",
+    }
+
+
 def _risk_records_from_payload(payload):
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -1608,26 +1662,93 @@ def _float_value(record, *keys):
     return None
 
 
+def _bool_value(record, *keys):
+    for key in keys:
+        value = record.get(key)
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)) and value in (0, 1):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "win", "won"}:
+                return True
+            if normalized in {"0", "false", "no", "loss", "lost"}:
+                return False
+    return None
+
+
+def _order_outcome_direction(record):
+    for key in ("token_outcome", "outcome", "direction", "side", "action"):
+        text = str(record.get(key) or "").strip().upper()
+        if not text:
+            continue
+        if text in {"UP", "BUY_UP", "LONG"} or text.endswith("_UP"):
+            return "UP"
+        if text in {"DOWN", "BUY_DOWN", "SHORT"} or text.endswith("_DOWN"):
+            return "DOWN"
+    return None
+
+
+def _hypothetical_order_result(record, *, status, filled_size, size, price, actual_pnl):
+    if actual_pnl is not None or filled_size > 0:
+        return None, None, None
+    execution_result = str(record.get("execution_result") or "").lower()
+    exchange_status = str(record.get("exchange_final_status") or "").upper()
+    closed_without_fill = (
+        status in {"NO_FILL", "CANCELLED", "CANCELED"}
+        or exchange_status in {"NO_FILL", "CANCELLED", "CANCELED"}
+        or execution_result == "no_fill"
+    )
+    if not closed_without_fill or size is None or price is None or size <= 0:
+        return None, None, None
+
+    won = _bool_value(record, "signal_would_have_won")
+    if won is None:
+        actual_up = _bool_value(record, "actual_up_chainlink", "actual_up")
+        outcome = _order_outcome_direction(record)
+        if actual_up is not None and outcome is not None:
+            won = actual_up if outcome == "UP" else not actual_up
+    if won is None:
+        return None, None, None
+
+    hypothetical_pnl = size * (1.0 - price) if won else -(size * price)
+    return round(hypothetical_pnl, 8), won, "unfilled_limit"
+
+
 def _live_order_record_summary(record):
     status = str(record.get("status") or "").upper() or "UNKNOWN"
     filled_size = _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size") or 0.0
-    size = _float_value(record, "size", "original_size", "target_size")
+    size = _float_value(record, "size", "original_size", "target_size", "requested_size", "order_size_shares")
     remaining = _float_value(record, "remaining_size")
     if remaining is None and size is not None:
         remaining = max(0.0, size - filled_size)
+    price = _float_value(record, "price", "limit_price")
+    pnl = _float_value(record, "pnl", "net_pnl", "realized_pnl", "pnl_usdc")
+    hypothetical_pnl, hypothetical_won, hypothetical_pnl_basis = _hypothetical_order_result(
+        record,
+        status=status,
+        filled_size=filled_size,
+        size=size,
+        price=price,
+        actual_pnl=pnl,
+    )
     return {
         "order_id": record.get("order_id"),
         "market_slug": record.get("market_slug"),
         "status": status,
         "direction": record.get("direction") or record.get("side") or record.get("action"),
         "token_outcome": record.get("token_outcome") or record.get("outcome"),
-        "price": _float_value(record, "price", "limit_price"),
+        "price": price,
         "average_fill_price": _float_value(record, "average_fill_price", "avg_fill_price"),
         "size": size,
         "filled_size": round(filled_size, 8),
         "remaining_size": round(remaining, 8) if remaining is not None else None,
-        "pnl": _float_value(record, "pnl", "net_pnl", "realized_pnl", "pnl_usdc"),
+        "pnl": pnl,
         "won": _record_won(record),
+        "hypothetical_pnl": hypothetical_pnl,
+        "hypothetical_won": hypothetical_won,
+        "hypothetical_pnl_basis": hypothetical_pnl_basis,
         "entry_ts": record.get("entry_ts"),
         "settle_ts": record.get("settle_ts"),
         "created_at": record.get("created_at"),
@@ -1716,7 +1837,7 @@ def _polymarket_position_summary(row):
     }
 
 
-def _polymarket_account_activity_summary(limit=30):
+def _polymarket_account_activity_summary(limit=30, cash_balance=None):
     path = _polymarket_account_activity_path()
     report = _read_json(path) or {}
     activity = report.get("activity") if isinstance(report.get("activity"), list) else []
@@ -1733,6 +1854,13 @@ def _polymarket_account_activity_summary(limit=30):
         key=lambda row: abs(_num(row.get("cashPnl") or row.get("cash_pnl")) or 0.0),
         reverse=True,
     )
+    position_summaries = [_polymarket_position_summary(row) for row in ordered_positions[:limit]]
+    positions_value = sum(
+        value
+        for value in (_num(row.get("currentValue") or row.get("current_value")) for row in positions if isinstance(row, dict))
+        if value is not None
+    )
+    cash_balance_usdc = _num(cash_balance) or 0.0
     return {
         "available": path.exists(),
         "ok": bool(report.get("ok")),
@@ -1749,8 +1877,15 @@ def _polymarket_account_activity_summary(limit=30):
             "trade_count": int(summary.get("trade_count", 0) or 0),
             "redeem_count": int(summary.get("redeem_count", 0) or 0),
         },
+        "portfolio": {
+            "cash_balance_usdc": round(cash_balance_usdc, 8),
+            "positions_value_usdc": round(positions_value, 8),
+            "total_value_usdc": round(cash_balance_usdc + positions_value, 8),
+            "positions_count": len(positions),
+            "source": "clob_cash_plus_polymarket_positions",
+        },
         "recent_activity": [_polymarket_activity_summary(row) for row in ordered_activity[:limit]],
-        "positions": [_polymarket_position_summary(row) for row in ordered_positions[:limit]],
+        "positions": position_summaries,
     }
 
 
@@ -1885,6 +2020,107 @@ def _extract_formal_supervisor_limits():
     return limits
 
 
+def _coerce_supervisor_value(value):
+    text = str(value or "").strip()
+    if text.lower() in {"true", "false"}:
+        return text.lower() == "true"
+    try:
+        if re.fullmatch(r"[+-]?\d+", text):
+            return int(text)
+        if re.fullmatch(r"[+-]?(?:\d+\.\d*|\d*\.\d+)", text):
+            return float(text)
+    except ValueError:
+        pass
+    return text
+
+
+def _extract_formal_supervisor_config():
+    line = _latest_formal_supervisor_line()
+    if not line:
+        return {}
+    return {
+        match.group(1): _coerce_supervisor_value(match.group(2))
+        for match in re.finditer(r"\b([A-Za-z_][A-Za-z0-9_]*)=([^\s]+)", line)
+    }
+
+
+def _risk_control_value(supervisor_config, formal_limits, supervisor_keys, formal_keys):
+    for key in supervisor_keys:
+        if key in supervisor_config and supervisor_config.get(key) is not None:
+            return supervisor_config.get(key)
+    for key in formal_keys:
+        if key in formal_limits and formal_limits.get(key) is not None:
+            return formal_limits.get(key)
+    return None
+
+
+def _live_risk_controls(formal_report=None, limits_override=None):
+    supervisor_config = _extract_formal_supervisor_config()
+    formal_report = formal_report if isinstance(formal_report, dict) else (_live_formal_report()[1] or {})
+    formal_limits = limits_override if isinstance(limits_override, dict) else _live_formal_risk_limits()
+    summary = {
+        "order_size_shares": _risk_control_value(supervisor_config, formal_limits, ("order_size_shares",), ("order_size_shares",)),
+        "min_price": _risk_control_value(supervisor_config, formal_limits, ("min_price",), ("min_price",)),
+        "active_max_price": _risk_control_value(supervisor_config, formal_limits, ("active_max_price",), ("active_max_price",)),
+        "hard_max_price": _risk_control_value(supervisor_config, formal_limits, ("max_price",), ("max_price", "hard_max_price")),
+        "max_notional_usdc": _risk_control_value(supervisor_config, formal_limits, ("max_notional", "max_notional_usdc"), ("max_notional_usdc", "max_notional")),
+        "max_daily_loss_usdc": _risk_control_value(supervisor_config, formal_limits, ("max_daily_loss", "max_daily_loss_usdc"), ("max_daily_loss_usdc", "max_daily_loss")),
+        "max_daily_trades": _risk_control_value(supervisor_config, formal_limits, ("max_daily_trades",), ("max_daily_trades",)),
+        "max_consecutive_losses": _risk_control_value(supervisor_config, formal_limits, ("max_consecutive_losses",), ("max_consecutive_losses",)),
+        "max_open_or_pending_orders": _risk_control_value(supervisor_config, formal_limits, ("max_open_or_pending", "max_open_or_pending_orders"), ("max_open_or_pending_orders", "max_open_or_pending")),
+        "max_smoke_drawdown_usdc": _risk_control_value(supervisor_config, formal_limits, ("max_smoke_drawdown", "max_smoke_drawdown_usdc"), ("max_smoke_drawdown_usdc", "max_smoke_drawdown")),
+        "same_direction_loss_cooldown_count": _risk_control_value(supervisor_config, formal_limits, ("same_direction_loss_cooldown_count",), ("same_direction_loss_cooldown_count",)),
+        "same_direction_loss_cooldown_minutes": _risk_control_value(supervisor_config, formal_limits, ("same_direction_loss_cooldown_minutes",), ("same_direction_loss_cooldown_minutes",)),
+        "signal_max_age_seconds": _risk_control_value(supervisor_config, formal_limits, ("signal_max_age", "signal_max_age_seconds"), ("signal_max_age_seconds", "signal_max_age")),
+        "reference_price_source": _risk_control_value(supervisor_config, formal_limits, ("reference_price_source",), ("reference_price_source",)),
+        "execution_market_shift": _risk_control_value(supervisor_config, formal_limits, ("execution_market_shift",), ("execution_market_shift",)),
+    }
+    prediction = formal_report.get("prediction") if isinstance(formal_report.get("prediction"), dict) else {}
+    if summary["execution_market_shift"] is None:
+        summary["execution_market_shift"] = prediction.get("execution_market_shift")
+    cooldown_count = summary["same_direction_loss_cooldown_count"]
+    cooldown_minutes = summary["same_direction_loss_cooldown_minutes"]
+    return {
+        "source": "supervisor_log" if supervisor_config else "formal_report" if formal_limits else "unavailable",
+        "summary": summary,
+        "groups": {
+            "order": {
+                "label": "Order limits",
+                "order_size_shares": summary["order_size_shares"],
+                "max_notional_usdc": summary["max_notional_usdc"],
+                "max_open_or_pending_orders": summary["max_open_or_pending_orders"],
+            },
+            "price": {
+                "label": "Price band",
+                "min_price": summary["min_price"],
+                "active_max_price": summary["active_max_price"],
+                "hard_max_price": summary["hard_max_price"],
+            },
+            "daily_stop": {
+                "label": "Daily stops",
+                "max_daily_loss_usdc": summary["max_daily_loss_usdc"],
+                "max_daily_trades": summary["max_daily_trades"],
+                "max_consecutive_losses": summary["max_consecutive_losses"],
+                "max_smoke_drawdown_usdc": summary["max_smoke_drawdown_usdc"],
+            },
+            "cooldown": {
+                "label": "Same-direction cooldown",
+                "count": cooldown_count,
+                "minutes": cooldown_minutes,
+                "value": f"{cooldown_count} losses -> {cooldown_minutes}m"
+                if cooldown_count is not None and cooldown_minutes is not None
+                else None,
+            },
+            "execution": {
+                "label": "Execution",
+                "signal_max_age_seconds": summary["signal_max_age_seconds"],
+                "reference_price_source": summary["reference_price_source"],
+                "execution_market_shift": summary["execution_market_shift"],
+            },
+        },
+    }
+
+
 def _live_formal_risk_limits(fallback=None):
     limits = dict(RISK_LIMITS)
     if isinstance(fallback, dict):
@@ -1910,6 +2146,7 @@ def _live_real_summary(limits_override=None, current_balance=None):
     ledger_path = _live_real_ledger_path()
     records = _rows_from_ledger_payload(_read_json(ledger_path))
     formal = _live_formal_summary()
+    _, formal_report = _live_formal_report()
     risk = _risk_summary_from_records(
         records,
         inputs={"ledger": str(ledger_path), "record_count": len(records)},
@@ -1931,14 +2168,16 @@ def _live_real_summary(limits_override=None, current_balance=None):
         "stats": _settled_stats_summary(records),
         "market_results": _market_result_stats_summary(records),
         "risk": risk,
+        "risk_controls": _live_risk_controls(formal_report, limits_override=limits_override),
         "equity": _equity_summary_from_records(
             records,
             current_balance=current_balance,
             source="live_real_orders",
         ),
+        "weekly_pnl_calendar": _weekly_pnl_calendar_from_records(records),
         "latest_order": _latest_record(records),
         "order_records": _live_order_records(records),
-        "account_activity": _polymarket_account_activity_summary(),
+        "account_activity": _polymarket_account_activity_summary(cash_balance=current_balance),
     }
 
 
@@ -2019,6 +2258,8 @@ def _is_decision_event(event):
 
 
 def _decision_passed(event):
+    if event.get("passed") is True or event.get("would_place_order") is True:
+        return True
     if event.get("filt") is True or event.get("filt_passed") in (1, True):
         return True
     action = str(event.get("action") or "").upper()
@@ -3191,15 +3432,21 @@ def _age_seconds(value):
     return max(0, (datetime.now() - ts).total_seconds())
 
 
-def _latest_log_report():
+def _latest_log_report(source=None):
     report = {"out_log": "", "err_log": "", "errors": []}
     if not KRONOS_LOG_DIR.exists():
         return report
-    source = _paper_run_source()
-    patterns = {
-        "out_log": [f"{source}_*.out.log", "paper_live_rest_*.out.log"],
-        "err_log": [f"{source}_*.err.log", "paper_live_rest_*.err.log"],
-    }
+    source = source or _paper_run_source()
+    if source == "live_real":
+        patterns = {
+            "out_log": ["prediction_bound_live_formal_latest.out.log", "prediction_bound_live_formal_*.out.log"],
+            "err_log": ["prediction_bound_live_formal_latest.err.log", "prediction_bound_live_formal_*.err.log"],
+        }
+    else:
+        patterns = {
+            "out_log": [f"{source}_*.out.log", "paper_live_rest_*.out.log"],
+            "err_log": [f"{source}_*.err.log", "paper_live_rest_*.err.log"],
+        }
     for key, candidates in patterns.items():
         files = []
         for pattern in candidates:
@@ -3785,17 +4032,38 @@ def api_trades():
 @app.route("/api/live-intel")
 def api_live_intel():
     limit = int(request.args.get("limit", 240))
-    checkpoint_path = _paper_checkpoint_path()
-    events_path = _events_checkpoint_path()
-    checkpoint = _read_json(checkpoint_path) or {}
-    events = _tail_jsonl(events_path, limit=limit)
-    audit_events = _tail_audit_events(limit=limit * 3)
+    formal_path, formal_report = _live_formal_report()
+    use_live_real = os.environ.get("KRONOS_ENABLE_REAL_ORDERS", "") == "YES" and formal_path.exists()
+    if use_live_real:
+        checkpoint_path = _live_real_ledger_path()
+        ledger_payload = _read_json(checkpoint_path)
+        ledger_rows = ledger_payload if isinstance(ledger_payload, list) else []
+        checkpoint = {
+            "timestamp": _iso_utc(datetime.fromtimestamp(checkpoint_path.stat().st_mtime, tz=timezone.utc)) if checkpoint_path.exists() else None,
+            "trades": [row for row in ledger_rows if isinstance(row, dict) and str(row.get("status") or "").upper() == "SETTLED"],
+            "pending_orders": [row for row in ledger_rows if isinstance(row, dict) and str(row.get("status") or "").upper() in {"PENDING", "SUBMITTED", "FILLED"}],
+            "open_orders": [row for row in ledger_rows if isinstance(row, dict) and str(row.get("status") or "").upper() == "OPEN"],
+            "bar_index": len(ledger_rows),
+        }
+        events = _live_formal_history_prediction_records(limit=limit)
+        audit_events = []
+        run_source = "live_real"
+    else:
+        checkpoint_path = _paper_checkpoint_path()
+        events_path = _events_checkpoint_path()
+        checkpoint = _read_json(checkpoint_path) or {}
+        events = _tail_jsonl(events_path, limit=limit)
+        audit_events = _tail_audit_events(limit=limit * 3)
+        run_source = _paper_run_source()
 
     trades = checkpoint.get("trades", []) or []
     pending = checkpoint.get("pending_orders", []) or []
     open_orders = checkpoint.get("open_orders", []) or []
     bar_index = int(checkpoint.get("bar_index", 0) or 0)
-    checkpoint_age = _age_seconds(checkpoint.get("timestamp") or checkpoint.get("updated_at"))
+    if use_live_real and formal_report.get("created_at"):
+        checkpoint_age = _age_seconds(formal_report.get("created_at"))
+    else:
+        checkpoint_age = _age_seconds(checkpoint.get("timestamp") or checkpoint.get("updated_at"))
     latest_event = events[-1] if events else {}
     latest_event_age = _age_seconds(
         latest_event.get("_t") or latest_event.get("ts") or latest_event.get("created_at")
@@ -3930,7 +4198,7 @@ def api_live_intel():
             "signal_time": decision.get("_t") or decision.get("ts"),
         })
 
-    log_report = _latest_log_report()
+    log_report = _latest_log_report("live_real" if use_live_real else None)
     warnings = []
     if checkpoint_age is None or checkpoint_age > 600:
         warnings.append("checkpoint_stale")
@@ -3956,7 +4224,7 @@ def api_live_intel():
     return jsonify(
         {
             "health": {
-                "run_source": _paper_run_source(),
+                "run_source": run_source,
                 "state": "warning" if warnings else "ok",
                 "warnings": warnings,
                 "checkpoint_age_seconds": checkpoint_age,

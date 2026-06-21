@@ -345,6 +345,15 @@ function readinessAction(key: string) {
   return actions[key] ?? "Review readiness check";
 }
 
+const LIVE_MODE_NON_OPERATIONAL_CHECKS = new Set([
+  "real_orders_locked",
+  "dryrun_no_submitted_orders",
+  "live_preflight_available",
+  "live_preflight_chain_ok",
+  "live_preflight_fresh",
+  "live_preflight_no_submission",
+]);
+
 export default function StatusBar() {
   const [open, setOpen] = useState(false);
   const { data, error } = usePolling<StatusData>("/api/status", 5000);
@@ -353,6 +362,7 @@ export default function StatusBar() {
   const now = new Date();
   const cooling = (data?.cooldown_left ?? 0) > 0;
   const liveEnabled = safety?.real_orders_enabled === true;
+  const orderModeOk = liveEnabled || (!liveEnabled && safety?.kill_switch?.state !== "armed");
   const health = intel?.health;
   const metrics = safety?.risk?.metrics;
   const limits = safety?.risk?.limits;
@@ -369,9 +379,10 @@ export default function StatusBar() {
   const todayActivityFresh = (today?.activity?.latest_signal_age_seconds ?? 9999) < 600;
   const latestDryrunFresh = (today?.activity?.latest_dryrun_age_seconds ?? 9999) < 600;
   const healthOk = !error && health?.state !== "warning";
-  const locked = !liveEnabled && safety?.kill_switch?.state !== "armed";
   const checklist = useMemo(() => {
-    const apiItems = safety?.checklist ?? [];
+    const apiItems = liveEnabled
+      ? (safety?.checklist ?? []).filter((item) => !LIVE_MODE_NON_OPERATIONAL_CHECKS.has(item.key))
+      : safety?.checklist ?? [];
     const runtimeItems: ChecklistItem[] = [
       {
         key: "checkpoint_fresh",
@@ -396,7 +407,7 @@ export default function StatusBar() {
       },
     ];
     return [...apiItems, ...runtimeItems];
-  }, [health?.checkpoint_age_seconds, health?.latest_event_age_seconds, intel?.issues?.log_errors?.length, safety?.checklist]);
+  }, [health?.checkpoint_age_seconds, health?.latest_event_age_seconds, intel?.issues?.log_errors?.length, liveEnabled, safety?.checklist]);
   const localReadiness = summarizeChecklistReadiness(checklist);
   const checksOk = localReadiness.ready;
   const criticalBlockers = localReadiness.critical_blockers;
@@ -412,10 +423,9 @@ export default function StatusBar() {
   const preflightFresh = safety?.preflight_chain?.fresh === true;
   const preflightSubmitted = safety?.preflight_chain?.submitted === true;
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
-  const preflightReady = preflightOk && preflightFresh && !preflightSubmitted;
+  const preflightReady = liveEnabled || (preflightOk && preflightFresh && !preflightSubmitted);
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
   const marketDataReady = safety?.market_data?.ready === true;
-  const marketDataAge = ageLabel(safety?.market_data?.price_age_seconds);
   const alertCritical = safety?.alerts?.critical_count ?? 0;
   const alertActive = safety?.alerts?.active_count ?? 0;
   const fundingReady = safety?.funding?.funding_ready === true;
@@ -424,13 +434,19 @@ export default function StatusBar() {
     safety?.funding?.allowance_shortfall_usdc ?? 0,
   );
   const fundingAllowanceLabel = compactAllowance(safety?.funding?.min_allowance, safety?.funding?.allowance_ok === true || fundingReady);
-  const needsReview = Boolean(error) || cooling || liveEnabled || alertCritical > 0 || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
-  const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? "aligned-prod";
+  const needsReview = Boolean(error) || cooling || alertCritical > 0 || !healthOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
   const operator = safety?.operator_summary;
   const operatorStage = operator?.current_stage_label ?? "Live safety";
   const operatorNextAction = operator?.next_action ?? "Review readiness";
   const operatorBlocked = operator?.status === "blocked";
   const operatorReady = operator?.ready === true;
+  const pnlOpenLabel =
+    metrics && limits
+      ? `PnL ${signedMoney(metrics.daily_pnl_usdc)} | ${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders} open`
+      : `PnL ${signedMoney(todayPnl)}`;
+  const riskLabel = riskOk ? "Risk OK" : "Risk review";
+  const alertLabel = alertCritical > 0 ? `Alerts ${alertCritical}` : "Alerts 0";
+  const runtimeLabel = healthOk ? "Runtime OK" : "Runtime review";
 
   return (
     <div className="border-b border-zinc-800 bg-[#090a0f] text-xs">
@@ -446,48 +462,13 @@ export default function StatusBar() {
             <Radio className="h-3.5 w-3.5" />
             Live
           </span>
-          <StatusChip ok={locked} label={liveEnabled ? "Real Enabled" : safety?.kill_switch?.state ?? "Locked"} icon="lock" />
-          <StatusChip ok={healthOk} label={healthOk ? "Health OK" : "Review"} icon="shield" />
-          <StatusChip ok={checksOk} label={`Checks ${readinessPassed}/${readinessTotal}`} />
-          <StatusChip ok={criticalBlockers === 0} label={`Critical ${criticalBlockers}`} />
-          <StatusChip ok={alertCritical === 0} label={`Alerts ${alertCritical}/${alertActive}`} />
-          <StatusChip ok={operatorBlocked ? false : operatorReady ? true : undefined} label={`Next ${operatorStage}`} />
-          <StatusChip ok={fundingBlockers === 0} label={`Funding ${fundingBlockers}`} />
-          <StatusChip ok={riskBlockers === 0} label={`Risk ${riskBlockers}`} />
-          <StatusChip
-            ok={riskOk}
-            label={
-              metrics && limits
-                ? `PnL ${signedMoney(metrics.daily_pnl_usdc)} | ${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders} open`
-                : "Risk -"
-            }
-          />
-          <StatusChip ok={todayPnl >= 0} label={`Paper Today ${signedMoney(todayPnl)}`} />
-          <StatusChip ok={todaySignalsOk} label={`Signal ${todaySignalsPassed}/${todaySignalsTotal}`} />
-          <StatusChip ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} label={`W/L ${todayWins}/${todayLosses}`} />
-          <StatusChip ok={todayActivityFresh} label={`Activity ${latestSignalAge}`} />
-          <StatusChip
-            ok={dryrunOk}
-            label={`Dry-run ${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
-          />
-          <StatusChip
-            ok={marketDataReady}
-            label={`Market ${marketDataReady ? marketDataAge : safety?.market_data?.status ?? "-"}`}
-          />
-          <StatusChip
-            ok={fundingReady}
-            label={fundingReady ? "Funding ready" : `Funding gap ${money(fundingGap)}`}
-            icon="wallet"
-          />
-          <StatusChip
-            ok={liveGateReady}
-            label={liveGateReady ? "Gate ready" : `Gate ${safety?.live_gate?.blockers?.length ?? 0}`}
-          />
-          <StatusChip
-            ok={preflightReady}
-            label={preflightReady ? `Preflight ${preflightAge}` : `Preflight ${preflightBlockers}`}
-          />
-          <span className="min-w-0 max-w-[220px] truncate font-mono text-zinc-600 md:max-w-[360px]">{source}</span>
+          <StatusChip ok={orderModeOk} label={liveEnabled ? "Real Enabled" : safety?.kill_switch?.state ?? "Locked"} icon="lock" />
+          <StatusChip ok={healthOk} label={runtimeLabel} icon="shield" />
+          <StatusChip ok={riskOk} label={pnlOpenLabel} />
+          <StatusChip ok={riskOk && riskBlockers === 0} label={riskLabel} />
+          <StatusChip ok={alertCritical === 0} label={alertLabel} />
+          {!checksOk && <StatusChip ok={false} label={`Checks ${readinessPassed}/${readinessTotal}`} />}
+          {!fundingReady && <StatusChip ok={false} label={`Funding gap ${money(fundingGap)}`} icon="wallet" />}
           <ChevronDown className={`h-4 w-4 shrink-0 text-zinc-600 transition-transform ${open ? "rotate-180" : ""}`} />
         </button>
 
@@ -504,7 +485,7 @@ export default function StatusBar() {
         <div className="border-t border-zinc-800 px-4 py-3">
           <div className="grid gap-3 lg:grid-cols-[minmax(260px,0.8fr)_minmax(360px,1.2fr)]">
             <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-              <DetailTile label="Mode" value={`${safety?.mode?.toUpperCase() ?? "PAPER"} / ${safety?.kill_switch?.state ?? "locked"}`} ok={locked} />
+              <DetailTile label="Mode" value={`${safety?.mode?.toUpperCase() ?? "PAPER"} / ${safety?.kill_switch?.state ?? "locked"}`} ok={orderModeOk} />
               <DetailTile label="CLOB Auth" value={safety?.clob?.authenticated ? "OK" : "-"} ok={safety?.clob?.authenticated} />
               <DetailTile label="Balance" value={money(safety?.funding?.balance)} ok={safety?.funding?.balance_ok} />
               <DetailTile label="Allowance" value={fundingAllowanceLabel} ok={safety?.funding?.allowance_ok} />
@@ -513,9 +494,9 @@ export default function StatusBar() {
               <DetailTile label="Operator Stage" value={operatorStage} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
               <DetailTile label="Next Action" value={operatorNextAction} ok={operatorBlocked ? false : operatorReady ? true : undefined} />
               <DetailTile label="Alerts" value={`${alertCritical}/${alertActive}`} ok={alertCritical === 0} />
-              <DetailTile label="Paper Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />
-              <DetailTile label="Paper Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />
-              <DetailTile label="Paper Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />
+              {!liveEnabled && <DetailTile label="Paper Today PnL" value={signedMoney(todayPnl)} ok={todayPnl >= 0} />}
+              {!liveEnabled && <DetailTile label="Paper Today Signals" value={`${todaySignalsPassed}/${todaySignalsTotal}`} ok={todaySignalsOk} />}
+              {!liveEnabled && <DetailTile label="Paper Today W/L" value={`${todayWins}/${todayLosses}`} ok={todaySettled === 0 ? undefined : todayWins >= todayLosses} />}
               <DetailTile label="Latest Signal" value={latestSignalAge} ok={todayActivityFresh} />
               <DetailTile label="Latest Dry-run" value={latestDryrunAge} ok={latestDryrunFresh} />
               <DetailTile
@@ -536,21 +517,25 @@ export default function StatusBar() {
                 value={`${safety?.market_data?.status ?? "-"} / ${safety?.market_data?.source ?? "-"}`}
                 ok={marketDataReady}
               />
-              <DetailTile
-                label="Dry-run Ledger"
-                value={`${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
-                ok={dryrunOk}
-              />
+              {!liveEnabled && (
+                <DetailTile
+                  label="Dry-run Ledger"
+                  value={`${safety?.dryrun?.would_place_count ?? 0}/${safety?.dryrun?.ledger_count ?? 0}`}
+                  ok={dryrunOk}
+                />
+              )}
               <DetailTile
                 label="Live Gate"
                 value={liveGateReady ? "ready" : `${safety?.live_gate?.blockers?.length ?? 0} blockers`}
                 ok={liveGateReady}
               />
-              <DetailTile
-                label="Preflight"
-                value={preflightSubmitted ? "submitted" : preflightReady ? preflightAge : `${preflightBlockers} blockers`}
-                ok={preflightReady}
-              />
+              {!liveEnabled && (
+                <DetailTile
+                  label="Preflight"
+                  value={preflightSubmitted ? "submitted" : preflightReady ? preflightAge : `${preflightBlockers} blockers`}
+                  ok={preflightReady}
+                />
+              )}
             </div>
 
             <div className="rounded-md border border-zinc-800 bg-black/20">

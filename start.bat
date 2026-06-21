@@ -5,7 +5,7 @@ echo === Kronos Dashboard ===
 echo.
 
 REM Start sync service
-start "Kronos Sync" python sync_service\main.py
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Start-Process -FilePath python -ArgumentList 'sync_service\main.py' -WorkingDirectory '%~dp0' -WindowStyle Hidden"
 
 REM Wait for SQLite init
 timeout /t 2 >nul

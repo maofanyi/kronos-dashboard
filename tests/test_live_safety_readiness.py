@@ -117,9 +117,12 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
         checkpoint_dir / "live_real_orders_current_next.json",
         [
             {
+                "order_id": "0xnofill",
+                "market_slug": "btc-updown-5m-test",
                 "status": "NO_FILL",
                 "created_at": now,
                 "updated_at": now,
+                "size": 5,
                 "filled_size": 0,
                 "price": 0.50,
                 "direction": "UP",
@@ -161,6 +164,11 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
     settled_record = next(record for record in summary["live_real"]["order_records"] if record["order_id"] == "0xsettled")
     assert settled_record["market_slug"] == "btc-updown-5m-test"
     assert settled_record["pnl"] == -0.5
+    no_fill_record = next(record for record in summary["live_real"]["order_records"] if record["order_id"] == "0xnofill")
+    assert no_fill_record["pnl"] is None
+    assert no_fill_record["hypothetical_won"] is True
+    assert no_fill_record["hypothetical_pnl"] == 2.5
+    assert no_fill_record["hypothetical_pnl_basis"] == "unfilled_limit"
 
 
 def test_paper_monitor_exposes_total_win_rate_from_checkpoint():
@@ -332,7 +340,7 @@ def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, t
         config_dir / "aligned_prod_current_next_chainlink_30d30d_m049_shares5_live_params.json",
         {
             "live_restart_contract": {
-                "max_daily_loss_usdc": 30.0,
+                "max_daily_loss_usdc": 60.0,
                 "max_open_or_pending_orders": 1,
             }
         },
@@ -340,7 +348,13 @@ def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, t
     (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
         "\n".join(
             [
-                "2026-06-16T23:50:58+08:00 formal_live_supervisor started max_daily_loss=30 max_daily_trades=100 max_consecutive_losses=10 max_open_or_pending=1",
+                "2026-06-16T23:50:58+08:00 formal_live_supervisor started "
+                "order_size_shares=10 min_price=0.49 active_max_price=0.50 "
+                "max_price=0.52 max_notional=5.2 max_daily_loss=60 "
+                "max_daily_trades=100 max_consecutive_losses=10 max_open_or_pending=1 "
+                "max_smoke_drawdown=50 same_direction_loss_cooldown_count=4 "
+                "same_direction_loss_cooldown_minutes=30 signal_max_age=360 "
+                "reference_price_source=chainlink",
                 "2026-06-16T23:50:58+08:00 run_start stamp=20260616T155058Z",
             ]
         ),
@@ -369,9 +383,22 @@ def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, t
     summary = server._safety_report_summary()
     live_real = summary["live_real"]
 
-    assert live_real["risk"]["limits"]["max_daily_loss_usdc"] == 30.0
+    assert live_real["risk"]["limits"]["max_daily_loss_usdc"] == 60.0
     assert live_real["risk"]["limits"]["max_daily_trades"] == 100
     assert live_real["risk"]["limits"]["max_consecutive_losses"] == 10
+    assert live_real["risk_controls"]["source"] == "supervisor_log"
+    assert live_real["risk_controls"]["summary"]["order_size_shares"] == 10
+    assert live_real["risk_controls"]["summary"]["min_price"] == 0.49
+    assert live_real["risk_controls"]["summary"]["active_max_price"] == 0.50
+    assert live_real["risk_controls"]["summary"]["hard_max_price"] == 0.52
+    assert live_real["risk_controls"]["summary"]["max_notional_usdc"] == 5.2
+    assert live_real["risk_controls"]["summary"]["max_daily_loss_usdc"] == 60.0
+    assert live_real["risk_controls"]["summary"]["max_smoke_drawdown_usdc"] == 50.0
+    assert live_real["risk_controls"]["summary"]["same_direction_loss_cooldown_count"] == 4
+    assert live_real["risk_controls"]["summary"]["same_direction_loss_cooldown_minutes"] == 30
+    assert live_real["risk_controls"]["summary"]["signal_max_age_seconds"] == 360
+    assert live_real["risk_controls"]["summary"]["reference_price_source"] == "chainlink"
+    assert live_real["risk_controls"]["summary"]["execution_market_shift"] == "next_period"
     assert live_real["runtime"]["running"] is True
     assert live_real["runtime"]["role"] == "formal_supervisor"
     assert live_real["runtime"]["started_at"] == "2026-06-16T15:50:00Z"
@@ -461,6 +488,69 @@ def test_live_safety_summaries_include_source_scoped_equity_curves(monkeypatch, 
     assert summary["live_real"]["equity"]["points"] == [49.0, 48.5]
     assert summary["live_real"]["equity"]["pnl_usdc"] == -0.5
     assert summary["live_real"]["equity"]["settled"] == 1
+
+
+def test_live_real_summary_includes_recent_week_pnl_calendar(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "_live_formal_summary", lambda: {"available": False})
+    monkeypatch.setattr(server, "_live_formal_report", lambda: (tmp_path / "missing_formal.json", {}))
+    monkeypatch.setattr(server, "_live_soak_summary", lambda: {"available": False})
+    monkeypatch.setattr(
+        server,
+        "_live_process_runtime",
+        lambda **_kwargs: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None},
+    )
+    monkeypatch.setattr(server, "_polymarket_account_activity_summary", lambda cash_balance=None: {"available": False})
+    today = datetime.now(timezone.utc).date()
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "order_id": "old",
+                "status": "SETTLED",
+                "settled_at": (today - timedelta(days=8)).isoformat() + "T01:00:00Z",
+                "pnl": 99.0,
+                "won": True,
+            },
+            {
+                "order_id": "win",
+                "status": "SETTLED",
+                "settled_at": (today - timedelta(days=1)).isoformat() + "T01:00:00Z",
+                "pnl": 2.5,
+                "won": True,
+            },
+            {
+                "order_id": "loss",
+                "status": "SETTLED",
+                "settled_at": today.isoformat() + "T02:00:00Z",
+                "pnl": -5.2,
+                "won": False,
+            },
+            {
+                "order_id": "open",
+                "status": "OPEN",
+                "created_at": today.isoformat() + "T03:00:00Z",
+                "pnl": 1000.0,
+            },
+        ],
+    )
+
+    summary = server._live_real_summary(current_balance=50.0)
+
+    calendar = summary["live_real"]["weekly_pnl_calendar"] if "live_real" in summary else summary["weekly_pnl_calendar"]
+    assert len(calendar["days"]) == 7
+    assert calendar["total_pnl_usdc"] == -2.7
+    assert calendar["settled"] == 2
+    assert calendar["wins"] == 1
+    assert calendar["losses"] == 1
+    assert calendar["days"][-1]["date"] == today.isoformat()
+    assert calendar["days"][-1]["pnl_usdc"] == -5.2
+    assert calendar["days"][-1]["settled"] == 1
+    assert calendar["days"][-1]["losses"] == 1
+    assert calendar["days"][-2]["pnl_usdc"] == 2.5
+    assert calendar["days"][0]["pnl_usdc"] == 0.0
 
 
 def test_live_safety_readiness_uses_live_real_risk_not_paper_risk(monkeypatch, tmp_path):
@@ -1720,6 +1810,7 @@ def test_live_safety_includes_polymarket_account_activity_report(tmp_path, monke
                     "outcome": "Down",
                     "size": 5,
                     "avgPrice": 0.49,
+                    "currentValue": 1.05,
                     "cashPnl": -2.45,
                     "redeemable": True,
                 }
@@ -1734,8 +1825,12 @@ def test_live_safety_includes_polymarket_account_activity_report(tmp_path, monke
     assert account["ok"] is True
     assert account["user"] == "0xfunder"
     assert account["summary"]["trade_count"] == 2
+    assert account["portfolio"]["cash_balance_usdc"] == 0.0
+    assert account["portfolio"]["positions_value_usdc"] == 1.05
+    assert account["portfolio"]["total_value_usdc"] == 1.05
     assert account["recent_activity"][0]["slug"] == "btc-updown-5m-1781692200"
     assert account["recent_activity"][0]["usdc_size"] == 1.4553
+    assert account["positions"][0]["current_value"] == 1.05
     assert account["positions"][0]["cash_pnl"] == -2.45
 
 
@@ -2665,7 +2760,6 @@ def test_status_bar_uses_source_label_and_configured_status_source():
 
     assert 'usePolling<StatusData>("/api/status", 5000)' in source
     assert "source_label?: string" in source
-    assert "const source = safety?.source_label ?? safety?.run_source ?? health?.run_source ?? \"aligned-prod\"" in source
     assert "source=live" not in source
 
 
@@ -2676,7 +2770,9 @@ def test_status_bar_surfaces_live_alert_counts():
     assert "const alertCritical = safety?.alerts?.critical_count ?? 0" in source
     assert "const alertActive = safety?.alerts?.active_count ?? 0" in source
     assert "alertCritical > 0" in source
-    assert "label={`Alerts ${alertCritical}/${alertActive}`}" in source
+    assert 'const alertLabel = alertCritical > 0 ? `Alerts ${alertCritical}` : "Alerts 0"' in source
+    assert "label={alertLabel}" in source
+    assert 'DetailTile label="Alerts" value={`${alertCritical}/${alertActive}`}' in source
 
 
 def test_live_page_surfaces_preflight_chain_status():
@@ -2783,7 +2879,8 @@ def test_live_page_defaults_to_trading_console_layout():
     assert "Trading Console" not in source
     assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
     assert 'StatCard label="CLOB Balance"' in source
-    assert 'StatCard label="Open/Pending"' in source
+    assert 'StatCard label="Total PnL"' in source
+    assert 'sub={`${liveEquity?.settled ?? 0} settled total`}' in source
     assert 'StatCard label="Realized PnL"' in source
     assert 'StatCard label="Total Win Rate"' in source
     assert 'StatCard label="Today Win Rate"' in source
@@ -2791,19 +2888,30 @@ def test_live_page_defaults_to_trading_console_layout():
     assert 'StatCard label="Today Pass Rate"' in source
     assert 'StatCard label="Settled Win Rate"' in source
     assert 'StatCard label="Orders"' in source
-    assert 'StatCard label="Signal Result"' in source
+    assert 'StatCard label="Signal Pass Rate"' in source
+    assert 'sub={`${liveSignalPassed} / ${liveSignalTotal} signals passed`}' in source
     assert 'StatCard label="Mode"' not in source
     assert 'StatCard label="Readiness"' not in source
     assert 'StatCard label="Health"' not in source
 
 
+def test_live_page_mounts_risk_rules_card():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "risk_controls?:" in source
+    assert "function RiskRulesPanel" in source
+    assert "<RiskRulesPanel controls={liveReal?.risk_controls} />" in source
+    assert 'title="Risk Rules"' in source
+    assert "active_max_price" in source
+    assert "same_direction_loss_cooldown_minutes" in source
+
+
 def test_live_page_scopes_real_order_lock_badge_to_live_real_mode():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
-    assert 'const modeLabel = isPaperMonitorTab ? "Paper Monitor" : "Live Real";' in source
     assert 'const modeStatus = isPaperMonitorTab ? "Simulation only" : safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked";' in source
     assert "const modeStatusOk = isPaperMonitorTab ? true : !safety?.real_orders_enabled;" in source
-    assert '<span className="rounded border border-zinc-800 px-2 py-1 text-xs text-zinc-400">{modeLabel}</span>' in source
+    assert '{key === "live-real" ? "Live Real" : "Paper Monitor"}' in source
     assert "<StatusPill ok={modeStatusOk} label={modeStatus} />" in source
     assert '<StatusPill ok={!safety?.real_orders_enabled} label={safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked"} />' not in source
 
@@ -2841,6 +2949,33 @@ def test_live_page_groups_equity_curve_with_btc_market_chart_on_main_console():
     assert '<div className="min-w-0 space-y-5">' not in source
 
 
+def test_live_page_places_weekly_pnl_calendar_below_live_equity_curve():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+
+    assert "weekly_pnl_calendar?: WeeklyPnlCalendar" in source
+    assert "function WeeklyPnlCalendarPanel" in source
+    assert "<WeeklyPnlCalendarPanel calendar={liveReal?.weekly_pnl_calendar} />" in live_section
+    assert live_section.index('EquityPanel title="Equity Curve" sub="real settled ledger"') < live_section.index("<WeeklyPnlCalendarPanel")
+    assert 'className="grid min-w-0 gap-5 live-main-console"' in live_section
+    assert live_section.index('className="grid min-w-0 gap-5 live-main-console"') < live_section.index("<WeeklyPnlCalendarPanel")
+
+
+def test_live_weekly_pnl_calendar_uses_horizontal_strip_below_main_console():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    panel = source[source.index("function WeeklyPnlCalendarPanel"):source.index("function CollapsiblePanel")]
+
+    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
+    main_console_start = live_section.index('className="grid min-w-0 gap-5 live-main-console"')
+    main_console_end = live_section.index('className="space-y-5 live-side-console"', main_console_start)
+    main_console = live_section[main_console_start:main_console_end]
+
+    assert "<WeeklyPnlCalendarPanel calendar={liveReal?.weekly_pnl_calendar} />" in main_console
+    assert 'className="grid grid-cols-2 gap-2 md:grid-cols-4 2xl:grid-cols-7"' in panel
+    assert "HealthTile label=\"Week PnL\"" not in panel
+    assert "break-words" not in panel
+
+
 def test_live_page_uses_source_scoped_equity_summaries():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -2876,11 +3011,13 @@ def test_live_page_surfaces_dryrun_safety_in_diagnostics():
     assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
 
 
-def test_live_page_uses_clob_funding_for_top_balance_kpi():
+def test_live_page_uses_clob_portfolio_for_top_balance_kpi():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert "const funding = safety?.funding" in source
-    assert "const fundingBalance = funding?.balance ?? status?.balance ?? INITIAL_BALANCE" in source
+    assert "const portfolio = liveReal?.account_activity?.portfolio" in source
+    assert "const clobPortfolioValue = portfolio?.total_value_usdc ?? fundingBalance" in source
+    assert "const clobPortfolioSub = portfolio ? `cash ${money(portfolio.cash_balance_usdc ?? 0)} | positions ${money(portfolio.positions_value_usdc ?? 0)}` : fundingBalanceSub" in source
     assert "const fundingBalanceGap = funding?.balance_shortfall_usdc ?? 0" in source
     assert "const fundingAllowanceGap = funding?.allowance_shortfall_usdc ?? 0" in source
     assert "const fundingLargestGap = Math.max(fundingBalanceGap, fundingAllowanceGap)" in source
@@ -2888,8 +3025,8 @@ def test_live_page_uses_clob_funding_for_top_balance_kpi():
     assert "`Balance gap ${money(fundingBalanceGap)}`" in source
     assert "`Allowance gap ${money(fundingAllowanceGap)}`" in source
     assert "const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? \"text-emerald-300\" : fundingLargestGap > 0 ? \"text-rose-300\" : \"text-zinc-100\"" in source
-    assert "value={money(fundingBalance)}" in source
-    assert "sub={fundingBalanceSub}" in source
+    assert "value={money(clobPortfolioValue)}" in source
+    assert "sub={clobPortfolioSub}" in source
     assert "tone={fundingBalanceTone}" in source
 
 
@@ -3168,6 +3305,8 @@ def test_live_page_surfaces_live_ledger_order_records_panel():
     assert "positions and settled real orders" in source
     assert "order.settle_ts || order.settled_at" in source
     assert "order.settlement_source" in source
+    assert "hypothetical_pnl" in source
+    assert "Would" in source
 
 
 def test_live_page_surfaces_polymarket_account_activity_panel():
@@ -3191,28 +3330,40 @@ def test_live_page_separates_live_real_and_paper_monitor_tabs():
     assert "paper_monitor?:" in source
     assert 'type TradingTab = "live-real" | "paper-monitor";' in source
     assert "activeTradingTab: TradingTab" in source
-    assert "const setActiveTradingTab = (next: TradingTab) => setTab(next)" in app_source
+    assert 'const [activeTradingTab, setActiveTradingTab] = useState<TradingTab>("live-real");' in app_source
     assert '"live-real"' in source
     assert '"paper-monitor"' in source
-    assert "Live Real" in app_source
-    assert "Paper Monitor" in app_source
-    assert "<Live activeTradingTab={activeTradingTab}" in app_source
+    assert "Live Real" in source
+    assert "Paper Monitor" in source
+    assert "<Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab}" in app_source
     assert "const liveReal = safety?.live_real" in source
     assert "const paperMonitor = safety?.paper_monitor" in source
     assert "<LiveSoakPanel liveReal={liveReal}" in source
     assert "<PaperRuntimePanel paperMonitor={paperMonitor}" in source
 
 
-def test_app_replaces_live_monitor_nav_with_live_real_and_paper_monitor():
+def test_live_formal_process_shows_total_and_child_runtime():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert '<HealthTile label="Total Runtime" value={runtime.label} ok={runtime.ok} />' in source
+    assert "const childRuntimeState = runtimeState(childRuntime)" in source
+    assert '<HealthTile label="Child Runtime" value={childRuntimeState.label} ok={childRuntimeState.ok} />' in source
+    assert '<HealthTile label="Total Started"' in source
+    assert '<HealthTile label="Child Started"' in source
+
+
+def test_app_collapses_top_nav_to_live_and_research():
     source = Path("web/src/App.tsx").read_text(encoding="utf-8")
 
     assert 'import Live, { type TradingTab } from "./pages/Live";' in source
-    assert 'type Tab = TradingTab | "backtest" | "compare";' in source
-    assert '["live-real", "Live Real", Activity]' in source
-    assert '["paper-monitor", "Paper Monitor", Activity]' in source
-    assert 'const activeTradingTab = tab === "paper-monitor" ? "paper-monitor" : "live-real";' in source
+    assert 'type Tab = "live" | "research";' in source
+    assert '["live", "Live", Activity]' in source
+    assert '["research", "Research", BarChart3]' in source
+    assert '["live-real", "Live Real", Activity]' not in source
+    assert '["paper-monitor", "Paper Monitor", Activity]' not in source
+    assert "Compare" not in source
     assert "setActiveTradingTab" in source
-    assert "<Live activeTradingTab={activeTradingTab}" in source
+    assert "<Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab}" in source
 
 
 def test_live_page_keeps_paper_trade_tables_out_of_live_real_tab():
@@ -3337,9 +3488,7 @@ def test_status_bar_surfaces_market_data_status():
 
     assert "market_data?: {" in source
     assert "const marketDataReady = safety?.market_data?.ready === true" in source
-    assert "const marketDataAge = ageLabel(safety?.market_data?.price_age_seconds)" in source
     assert "Market Data" in source
-    assert "Market ${marketDataReady ? marketDataAge : safety?.market_data?.status ?? \"-\"}" in source
     assert "safety?.market_data?.source" in source
 
 
@@ -3350,7 +3499,6 @@ def test_status_bar_surfaces_operator_next_action():
     assert "const operator = safety?.operator_summary" in source
     assert "const operatorNextAction = operator?.next_action" in source
     assert "const operatorStage = operator?.current_stage_label" in source
-    assert "Next ${operatorStage}" in source
     assert 'DetailTile label="Operator Stage"' in source
     assert 'DetailTile label="Next Action"' in source
 
@@ -3381,9 +3529,6 @@ def test_status_bar_surfaces_today_summary():
 
     assert "today?: {" in source
     assert "const today = safety?.today" in source
-    assert "Paper Today ${signedMoney(todayPnl)}" in source
-    assert "Signal ${todaySignalsPassed}/${todaySignalsTotal}" in source
-    assert "W/L ${todayWins}/${todayLosses}" in source
     assert "Paper Today PnL" in source
     assert "Paper Today Signals" in source
     assert "Paper Today W/L" in source
@@ -3398,7 +3543,6 @@ def test_status_bar_surfaces_today_activity_freshness():
     assert "const latestSignalAge = ageLabel(today?.activity?.latest_signal_age_seconds)" in source
     assert "const latestDryrunAge = ageLabel(today?.activity?.latest_dryrun_age_seconds)" in source
     assert "const todayActivityFresh = (today?.activity?.latest_signal_age_seconds ?? 9999) < 600" in source
-    assert "Activity ${latestSignalAge}" in source
     assert 'DetailTile label="Latest Signal"' in source
     assert 'DetailTile label="Latest Dry-run"' in source
 

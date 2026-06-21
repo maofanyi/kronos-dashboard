@@ -1,24 +1,20 @@
-import { Activity, BarChart3, GitCompare } from "lucide-react";
+import { Activity, BarChart3 } from "lucide-react";
 import { useState } from "react";
 import BTCPriceBar from "./components/BTCPriceBar";
 import StatusBar from "./components/StatusBar";
 import Backtest from "./pages/Backtest";
-import Compare from "./pages/Compare";
 import Live, { type TradingTab } from "./pages/Live";
 
-type Tab = TradingTab | "backtest" | "compare";
+type Tab = "live" | "research";
 
 const tabs: Array<[Tab, string, typeof Activity]> = [
-  ["live-real", "Live Real", Activity],
-  ["paper-monitor", "Paper Monitor", Activity],
-  ["backtest", "Backtest", BarChart3],
-  ["compare", "Compare", GitCompare],
+  ["live", "Live", Activity],
+  ["research", "Research", BarChart3],
 ];
 
 export default function App() {
-  const [tab, setTab] = useState<Tab>("live-real");
-  const activeTradingTab = tab === "paper-monitor" ? "paper-monitor" : "live-real";
-  const setActiveTradingTab = (next: TradingTab) => setTab(next);
+  const [tab, setTab] = useState<Tab>("live");
+  const [activeTradingTab, setActiveTradingTab] = useState<TradingTab>("live-real");
 
   return (
     <div className="min-h-screen bg-[#090a0f] text-zinc-100">
@@ -29,13 +25,7 @@ export default function App() {
         {tabs.map(([key, label, Icon]) => (
           <button
             key={key}
-            onClick={() => {
-              if (key === "live-real" || key === "paper-monitor") {
-                setActiveTradingTab(key);
-              } else {
-                setTab(key);
-              }
-            }}
+            onClick={() => setTab(key)}
             className={`flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-medium transition-colors ${
               tab === key
                 ? "border-emerald-400 text-emerald-300"
@@ -49,9 +39,8 @@ export default function App() {
       </div>
 
       <div className="p-4 lg:p-5">
-        {(tab === "live-real" || tab === "paper-monitor") && <Live activeTradingTab={activeTradingTab} />}
-        {tab === "backtest" && <Backtest />}
-        {tab === "compare" && <Compare />}
+        {tab === "live" && <Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab} />}
+        {tab === "research" && <Backtest />}
       </div>
     </div>
   );

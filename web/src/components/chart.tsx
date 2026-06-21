@@ -61,6 +61,12 @@ export interface ChartProps {
   color?: string;
   /** Maximum chart width in px. The chart preserves a 640:220 aspect ratio. Default `640`. */
   width?: number;
+  /** CSS max-width for the root container. Defaults to `width`; use `"none"` to fill the parent. */
+  maxWidth?: number | string;
+  /** CSS aspect-ratio for the plot area. Default `"640 / 220"`. */
+  aspectRatio?: string;
+  /** SVG preserveAspectRatio mode. Use `"none"` when a chart should fill a fixed plot area. */
+  preserveAspectRatio?: string;
   /** Format the tooltip value. Receives the value and its index. */
   formatValue?: (value: number, index: number) => React.ReactNode;
   /** Index of the active point on initial render. Defaults to the last point. */
@@ -79,6 +85,10 @@ export interface ChartProps {
   tickCount?: number;
   /** Additional class names on the root container. */
   className?: string;
+  /** Show subtle plot grid lines. Default `false`. */
+  showGrid?: boolean;
+  /** Keep zero in the Y range and draw a zero reference line when it is inside the plot. Default `false`. */
+  showZeroLine?: boolean;
 }
 
 export function Chart({
@@ -87,6 +97,9 @@ export function Chart({
   name,
   color = "#0090FD",
   width = 640,
+  maxWidth,
+  aspectRatio = "640 / 220",
+  preserveAspectRatio = "xMidYMid meet",
   formatValue = (v) => v.toLocaleString(),
   defaultIndex,
   showXAxis = true,
@@ -96,6 +109,8 @@ export function Chart({
   showDot = true,
   animated = true,
   className,
+  showGrid = false,
+  showZeroLine = false,
 }: ChartProps) {
   const transition = animated ? TRANSITION : "0ms";
   const reactId = React.useId();
@@ -107,12 +122,18 @@ export function Chart({
     defaultIndex ?? Math.max(0, data.length - 1),
   );
   const [containerWidth, setContainerWidth] = React.useState<number>(width);
+  const [containerHeight, setContainerHeight] = React.useState<number>(
+    (width * VIEWBOX_H) / VIEWBOX_W,
+  );
 
   React.useEffect(() => {
     if (!root.current) return;
     const ro = new ResizeObserver((entries) => {
-      const w = entries[0]?.contentRect.width;
+      const rect = entries[0]?.contentRect;
+      const w = rect?.width;
+      const h = rect?.height;
       if (w) setContainerWidth(w);
+      if (h) setContainerHeight(h);
     });
     ro.observe(root.current);
     return () => ro.disconnect();
@@ -121,8 +142,10 @@ export function Chart({
   const points = React.useMemo(() => {
     const n = data.length;
     if (n === 0) return [];
-    const minV = Math.min(...data);
-    const maxV = Math.max(...data);
+    const rawMinV = Math.min(...data);
+    const rawMaxV = Math.max(...data);
+    const minV = showZeroLine ? Math.min(rawMinV, 0) : rawMinV;
+    const maxV = showZeroLine ? Math.max(rawMaxV, 0) : rawMaxV;
     const range = maxV - minV || 1;
     const innerW = VIEWBOX_W - 2 * PAD_X;
     const innerH = VIEWBOX_H - PAD_Y_TOP - PAD_Y_BOTTOM;
@@ -132,7 +155,7 @@ export function Chart({
       x: PAD_X + (n === 1 ? innerW / 2 : (i / (n - 1)) * innerW),
       y: PAD_Y_TOP + (1 - (value - minV) / range) * innerH,
     }));
-  }, [data]);
+  }, [data, showZeroLine]);
 
   const { strokePath, fillPath } = React.useMemo(() => {
     if (points.length === 0) return { strokePath: "", fillPath: "" };
@@ -147,6 +170,13 @@ export function Chart({
   const active = points[Math.min(activeIndex, points.length - 1)] ?? points[0];
   const activeXPct = active ? active.x / VIEWBOX_W : 0;
   const activeYPct = active ? active.y / VIEWBOX_H : 0;
+  const valueMin = showZeroLine && data.length ? Math.min(Math.min(...data), 0) : data.length ? Math.min(...data) : 0;
+  const valueMax = showZeroLine && data.length ? Math.max(Math.max(...data), 0) : data.length ? Math.max(...data) : 1;
+  const valueRange = valueMax - valueMin || 1;
+  const zeroYPct =
+    showZeroLine && valueMin <= 0 && valueMax >= 0
+      ? (PAD_Y_TOP + (1 - (0 - valueMin) / valueRange) * (VIEWBOX_H - PAD_Y_TOP - PAD_Y_BOTTOM)) / VIEWBOX_H
+      : null;
 
   function onMove(e: React.MouseEvent<HTMLDivElement>) {
     if (!root.current || points.length === 0) return;
@@ -178,7 +208,7 @@ export function Chart({
     <div
       style={
         {
-          maxWidth: width,
+          maxWidth: maxWidth ?? width,
           "--spell-color": color,
         } as React.CSSProperties
       }
@@ -192,14 +222,15 @@ export function Chart({
       <div
         ref={root}
         onMouseMove={onMove}
-        className="relative w-full aspect-[640/220] touch-none"
+        className="relative w-full touch-none"
+        style={{ aspectRatio }}
       >
       <svg
         width="100%"
         height="100%"
         viewBox={`0 0 ${VIEWBOX_W} ${VIEWBOX_H}`}
         fill="none"
-        preserveAspectRatio="xMidYMid meet"
+        preserveAspectRatio={preserveAspectRatio}
         style={{ overflow: "visible" }}
       >
         <defs>
@@ -230,6 +261,56 @@ export function Chart({
         </defs>
 
         {showFill && <path d={fillPath} fill={`url(#${grayFillId})`} />}
+
+        {showGrid && (
+          <g opacity="0.8">
+            {[0.25, 0.5, 0.75].map((t) => {
+              const y = PAD_Y_TOP + t * (VIEWBOX_H - PAD_Y_TOP - PAD_Y_BOTTOM);
+              return (
+                <line
+                  key={`h-${t}`}
+                  x1={PAD_X}
+                  x2={VIEWBOX_W - PAD_X}
+                  y1={y}
+                  y2={y}
+                  stroke="var(--spell-line)"
+                  strokeWidth="1"
+                  strokeDasharray="3 8"
+                  opacity="0.35"
+                />
+              );
+            })}
+            {[0.25, 0.5, 0.75].map((t) => {
+              const x = PAD_X + t * (VIEWBOX_W - 2 * PAD_X);
+              return (
+                <line
+                  key={`v-${t}`}
+                  x1={x}
+                  x2={x}
+                  y1={PAD_Y_TOP}
+                  y2={VIEWBOX_H - PAD_Y_BOTTOM}
+                  stroke="var(--spell-line)"
+                  strokeWidth="1"
+                  strokeDasharray="3 10"
+                  opacity="0.22"
+                />
+              );
+            })}
+          </g>
+        )}
+
+        {zeroYPct !== null && (
+          <line
+            x1={PAD_X}
+            x2={VIEWBOX_W - PAD_X}
+            y1={zeroYPct * VIEWBOX_H}
+            y2={zeroYPct * VIEWBOX_H}
+            stroke="var(--spell-color)"
+            strokeWidth="1.2"
+            strokeDasharray="4 8"
+            opacity="0.45"
+          />
+        )}
 
         {reveal ? (
           <>
@@ -263,7 +344,6 @@ export function Chart({
 
       {(() => {
         const cursorPx = activeXPct * containerWidth;
-        const containerHeight = (containerWidth * VIEWBOX_H) / VIEWBOX_W;
         const cursorYpx = activeYPct * containerHeight;
         const tooltipOnLeft = activeXPct > 0.5;
         return (
