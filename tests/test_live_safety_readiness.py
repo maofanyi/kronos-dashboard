@@ -3464,6 +3464,23 @@ def test_analytics_page_surfaces_trade_performance_sections():
     assert "Drawdown" in source
 
 
+def test_chart_pointer_uses_responsive_percent_positioning():
+    source = Path("web/src/components/chart.tsx").read_text(encoding="utf-8")
+
+    assert "left: `${activeXPct * 100}%`" in source
+    assert "top: `${activeYPct * 100}%`" in source
+    assert "cursorPx" not in source
+    assert "cursorYpx" not in source
+
+
+def test_chart_moves_default_pointer_to_latest_after_async_data_load():
+    source = Path("web/src/components/chart.tsx").read_text(encoding="utf-8")
+
+    assert "hasPointerInteracted" in source
+    assert "if (!hasPointerInteracted.current" in source
+    assert "Math.max(0, data.length - 1)" in source
+
+
 def test_live_page_keeps_paper_trade_tables_out_of_live_real_tab():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 

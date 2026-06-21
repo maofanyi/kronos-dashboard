@@ -118,26 +118,39 @@ export function Chart({
   const clipId = `${reactId}-clip`;
 
   const root = React.useRef<HTMLDivElement>(null);
+  const hasPointerInteracted = React.useRef(false);
   const [activeIndex, setActiveIndex] = React.useState<number>(
     defaultIndex ?? Math.max(0, data.length - 1),
   );
   const [containerWidth, setContainerWidth] = React.useState<number>(width);
-  const [containerHeight, setContainerHeight] = React.useState<number>(
-    (width * VIEWBOX_H) / VIEWBOX_W,
-  );
 
   React.useEffect(() => {
     if (!root.current) return;
     const ro = new ResizeObserver((entries) => {
       const rect = entries[0]?.contentRect;
       const w = rect?.width;
-      const h = rect?.height;
       if (w) setContainerWidth(w);
-      if (h) setContainerHeight(h);
     });
     ro.observe(root.current);
     return () => ro.disconnect();
   }, []);
+
+  React.useEffect(() => {
+    if (data.length === 0) {
+      setActiveIndex(0);
+      return;
+    }
+    setActiveIndex((current) => {
+      const latest = Math.max(0, data.length - 1);
+      if (defaultIndex != null) {
+        return Math.max(0, Math.min(latest, defaultIndex));
+      }
+      if (!hasPointerInteracted.current || current > latest) {
+        return latest;
+      }
+      return current;
+    });
+  }, [data.length, defaultIndex]);
 
   const points = React.useMemo(() => {
     const n = data.length;
@@ -180,6 +193,7 @@ export function Chart({
 
   function onMove(e: React.MouseEvent<HTMLDivElement>) {
     if (!root.current || points.length === 0) return;
+    hasPointerInteracted.current = true;
     const rect = root.current.getBoundingClientRect();
     const rel = (e.clientX - rect.left) / rect.width;
     const innerLeft = PAD_X / VIEWBOX_W;
@@ -343,18 +357,17 @@ export function Chart({
       </svg>
 
       {(() => {
-        const cursorPx = activeXPct * containerWidth;
-        const cursorYpx = activeYPct * containerHeight;
         const tooltipOnLeft = activeXPct > 0.5;
         return (
           <>
             <div
-              className="absolute pointer-events-none rounded-full bg-[var(--spell-line)] left-0"
+              className="absolute pointer-events-none rounded-full bg-[var(--spell-line)]"
               style={{
                 width: LINE_WIDTH,
+                left: `${activeXPct * 100}%`,
                 top: `${(PAD_Y_TOP / VIEWBOX_H) * 100}%`,
                 height: `${((VIEWBOX_H - PAD_Y_TOP - PAD_Y_BOTTOM / 2) / VIEWBOX_H) * 100}%`,
-                transform: `translate3d(${cursorPx - LINE_WIDTH / 2}px, 0, 0)`,
+                transform: `translateX(-${LINE_WIDTH / 2}px)`,
                 transition: `transform ${transition}`,
                 willChange: "transform",
               }}
@@ -362,9 +375,11 @@ export function Chart({
 
             {showDot && (
               <div
-                className="absolute pointer-events-none w-3 h-3 rounded-full bg-[var(--spell-color)] z-10 left-0 top-0"
+                className="absolute pointer-events-none w-3 h-3 rounded-full bg-[var(--spell-color)] z-10"
                 style={{
-                  transform: `translate3d(${cursorPx - 6}px, ${cursorYpx - 6}px, 0)`,
+                  left: `${activeXPct * 100}%`,
+                  top: `${activeYPct * 100}%`,
+                  transform: "translate(-50%, -50%)",
                   boxShadow: DOT_SHADOW,
                   transition: `transform ${transition}`,
                   willChange: "transform",
@@ -373,11 +388,13 @@ export function Chart({
             )}
 
             <div
-              className="absolute pointer-events-none z-20 grid min-w-32 items-start gap-1.5 rounded-lg bg-background px-2.5 py-1.5 text-xs left-0 top-0"
+              className="absolute pointer-events-none z-20 grid min-w-32 items-start gap-1.5 rounded-lg bg-background px-2.5 py-1.5 text-xs"
               style={{
+                left: `${activeXPct * 100}%`,
+                top: `${activeYPct * 100}%`,
                 transform: tooltipOnLeft
-                  ? `translate3d(calc(${cursorPx}px - 100% - 12px), calc(${cursorYpx}px - 50%), 0)`
-                  : `translate3d(${cursorPx + 12}px, calc(${cursorYpx}px - 50%), 0)`,
+                  ? "translate(calc(-100% - 12px), -50%)"
+                  : "translate(12px, -50%)",
                 transition: `transform ${transition}`,
                 willChange: "transform",
                 boxShadow: TOOLTIP_SHADOW,
