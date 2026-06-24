@@ -115,6 +115,26 @@ type SignalDetails = {
   settle_ts?: string;
   market_slug?: string;
   maker_price?: number;
+  max_price?: number;
+  execution_price?: number;
+  execution_price_tier?: string;
+  execution_status?: string;
+  execution_order_id?: string;
+  execution_filled_size?: number;
+  order_chain_count?: number;
+  order_chain?: {
+    order_id?: string;
+    repost_parent_order_id?: string;
+    status?: string;
+    execution_result?: string;
+    price?: number;
+    price_tier?: string;
+    size?: number;
+    filled_size?: number;
+    remaining_size?: number;
+    created_at?: string;
+    updated_at?: string;
+  }[];
   entry_close?: number;
   settle_close?: number;
 };
@@ -215,6 +235,8 @@ interface PolymarketAccountActivity {
   summary: {
     activity_count: number;
     positions_count: number;
+    active_positions_count?: number;
+    redeemable_positions_count?: number;
     trade_count: number;
     redeem_count: number;
   };
@@ -227,6 +249,7 @@ interface PolymarketAccountActivity {
   };
   recent_activity: PolymarketAccountActivityRow[];
   positions: PolymarketAccountPosition[];
+  redeemable_positions?: PolymarketAccountPosition[];
 }
 
 interface LiveSafety {
@@ -698,6 +721,8 @@ type LiveOrderRecord = {
   order_id?: string | null;
   market_slug?: string | null;
   status?: string;
+  exchange_final_status?: string | null;
+  risk_excluded?: boolean;
   direction?: string | null;
   token_outcome?: string | null;
   price?: number | null;
@@ -720,6 +745,25 @@ type LiveOrderRecord = {
   market_result_source?: string | null;
   execution_result?: string | null;
   signal_id?: string | null;
+  attempts?: number;
+  order_chain_count?: number;
+  order_chain?: Array<{
+    order_id?: string | null;
+    repost_parent_order_id?: string | null;
+    status?: string | null;
+    execution_result?: string | null;
+    market_slug?: string | null;
+    direction?: string | null;
+    side?: string | null;
+    price?: number | null;
+    price_tier?: string | null;
+    size?: number | null;
+    filled_size?: number | null;
+    remaining_size?: number | null;
+    created_at?: string | null;
+    entry_ts?: string | null;
+    settle_ts?: string | null;
+  }>;
 };
 
 type RiskControls = {
@@ -1315,8 +1359,21 @@ function conditionRows(details: SignalDetails | null) {
   ];
 }
 
+function signalDirection(details: SignalDetails | null) {
+  const raw = `${details?.side ?? ""} ${details?.action ?? ""}`.toUpperCase();
+  if (raw.includes("SHORT") || raw.includes("DOWN")) return "DOWN";
+  if (raw.includes("LONG") || raw.includes("UP")) return "UP";
+  return "";
+}
+
+function signalProb(details: SignalDetails | null, upProbability?: number) {
+  if (upProbability == null) return undefined;
+  return signalDirection(details) === "DOWN" ? 1 - upProbability : upProbability;
+}
+
 function SignalCard({ event, expanded, onToggle }: { event: EventItem; expanded: boolean; onToggle: () => void }) {
   const details = parseJson<SignalDetails>(event.details);
+  const signalArrow = signalDirection(details) === "DOWN" ? "↓" : signalDirection(details) === "UP" ? "↑" : "";
   return (
     <button type="button" onClick={onToggle} className="block w-full border-b border-zinc-900 px-4 py-3 text-left last:border-b-0 hover:bg-zinc-900/50">
       <div className="flex items-center justify-between gap-3">
@@ -1329,9 +1386,9 @@ function SignalCard({ event, expanded, onToggle }: { event: EventItem; expanded:
       </div>
 
       <div className="mt-2 grid grid-cols-4 gap-2 text-xs">
-        <MetricChip label="5m" value={percent(details?.p5_up)} />
-        <MetricChip label="1h" value={percent(details?.p1_up)} />
-        <MetricChip label="4h" value={percent(details?.p4_up)} />
+        <MetricChip label={`5m${signalArrow}`} value={percent(signalProb(details, details?.p5_up))} />
+        <MetricChip label={`1h${signalArrow}`} value={percent(signalProb(details, details?.p1_up))} />
+        <MetricChip label={`4h${signalArrow}`} value={percent(signalProb(details, details?.p4_up))} />
         <span className={event.filt_passed ? "text-emerald-300" : "text-rose-300"}>{event.filt_passed ? "passed" : "blocked"}</span>
       </div>
 
@@ -1346,7 +1403,26 @@ function SignalCard({ event, expanded, onToggle }: { event: EventItem; expanded:
             <div>side <span className="font-mono text-zinc-300">{details?.side ?? "-"}</span></div>
             <div>entry <span className="font-mono text-zinc-300">{shortDateTime(details?.entry_ts)}</span></div>
             <div>settle <span className="font-mono text-zinc-300">{shortDateTime(details?.settle_ts)}</span></div>
+            <div>cap <span className="font-mono text-zinc-300">{details?.max_price?.toFixed(2) ?? "-"}</span></div>
+            <div>exec <span className="font-mono text-zinc-300">{details?.execution_price?.toFixed(2) ?? "-"}</span></div>
+            <div>tier <span className="font-mono text-zinc-300">{details?.execution_price_tier ?? "-"}</span></div>
+            <div>orders <span className="font-mono text-zinc-300">{details?.order_chain_count ?? details?.order_chain?.length ?? 0}</span></div>
           </div>
+          {(details?.order_chain?.length ?? 0) > 0 && (
+            <div>
+              <div className="mb-1.5 text-[11px] uppercase tracking-[0.14em] text-zinc-600">Order Chain</div>
+              <div className="space-y-1.5">
+                {(details?.order_chain ?? []).map((order) => (
+                  <div key={order.order_id ?? `${order.created_at}-${order.price_tier}`} className="grid grid-cols-[68px_64px_58px_1fr] items-center gap-2 rounded border border-zinc-900 bg-zinc-950/70 px-2.5 py-1.5 text-[11px]">
+                    <span className="font-mono text-zinc-300">{order.price == null ? "-" : order.price.toFixed(2)}</span>
+                    <span className="font-mono text-zinc-500">{order.price_tier ?? "-"}</span>
+                    <span className="font-mono text-zinc-400">{order.status ?? "-"}</span>
+                    <span className="truncate font-mono text-zinc-600">{order.execution_result || order.order_id || "-"}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
           <div className="grid gap-1.5">
             {conditionRows(details).map((row) => (
               <div key={`${row.side}-${row.label}`} className="flex items-center justify-between gap-3 rounded border border-zinc-900 bg-zinc-950/70 px-2.5 py-1.5">
@@ -1866,7 +1942,7 @@ function RiskPanel({ intel, safety }: { intel?: LiveIntel | null; safety?: LiveS
         <HealthTile
           label="Open/Pending"
           value={metrics && limits ? `${metrics.open_or_pending_orders}/${limits.max_open_or_pending_orders}` : `${(maker?.open_orders.length ?? 0) + (maker?.pending_positions.length ?? 0)}`}
-          ok={metrics && limits ? metrics.open_or_pending_orders < limits.max_open_or_pending_orders : undefined}
+          ok={metrics && limits ? metrics.open_or_pending_orders <= limits.max_open_or_pending_orders : undefined}
         />
         <HealthTile
           label="Smoke Drawdown"
@@ -2118,19 +2194,21 @@ function CurrentClobOrdersPanel({ audit }: { audit?: LiveSafety["clob_readonly"]
 function PolymarketAccountActivityPanel({ account }: { account?: PolymarketAccountActivity | null }) {
   const activity = account?.recent_activity ?? [];
   const positions = account?.positions ?? [];
+  const redeemablePositions = account?.redeemable_positions ?? [];
   const summary = account?.summary;
   const fresh = (account?.report_age_seconds ?? 9999) < 180;
   return (
     <Panel
       title="PM Account Activity"
-      sub="Data API trades, redeems, positions"
+      sub="Data API trades, active positions, redeemable"
       right={<StatusPill ok={account?.ok === true && fresh} label={account?.available ? ageLabel(account?.report_age_seconds) : "missing"} />}
     >
       <div className="border-b border-zinc-900 px-4 py-3">
         <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
           <HealthTile label="Trades" value={`${summary?.trade_count ?? 0}`} ok={(summary?.trade_count ?? 0) >= 0} />
           <HealthTile label="Redeems" value={`${summary?.redeem_count ?? 0}`} />
-          <HealthTile label="Positions" value={`${summary?.positions_count ?? positions.length}`} />
+          <HealthTile label="Active" value={`${summary?.active_positions_count ?? positions.length}`} ok={(summary?.active_positions_count ?? positions.length) === positions.length} />
+          <HealthTile label="Redeemable" value={`${summary?.redeemable_positions_count ?? redeemablePositions.length}`} />
           <HealthTile label="Report Age" value={ageLabel(account?.report_age_seconds)} ok={fresh} />
         </div>
         {account?.reason && <div className="mt-2 truncate text-xs text-amber-300">{account.reason}</div>}
@@ -2177,11 +2255,11 @@ function PolymarketAccountActivityPanel({ account }: { account?: PolymarketAccou
           </table>
         )}
 
-        <div className="border-y border-zinc-900 px-4 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-600">Positions</div>
+        <div className="border-y border-zinc-900 px-4 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-600">Active Positions</div>
         {positions.length === 0 ? (
           <div className="px-4 py-6 text-center">
-            <div className="text-sm text-zinc-400">No PM account positions</div>
-            <div className="mt-1 text-xs text-zinc-600">Filled positions will appear here after Data API sync</div>
+            <div className="text-sm text-zinc-400">No active PM positions</div>
+            <div className="mt-1 text-xs text-zinc-600">Open account positions will appear here after Data API sync</div>
           </div>
         ) : (
           <table className="min-w-[760px] text-left text-xs">
@@ -2214,6 +2292,44 @@ function PolymarketAccountActivityPanel({ account }: { account?: PolymarketAccou
             </tbody>
           </table>
         )}
+
+        <div className="border-y border-zinc-900 px-4 py-2 text-[11px] uppercase tracking-[0.12em] text-zinc-600">Redeemable Positions</div>
+        {redeemablePositions.length === 0 ? (
+          <div className="px-4 py-6 text-center">
+            <div className="text-sm text-zinc-400">No redeemable positions</div>
+            <div className="mt-1 text-xs text-zinc-600">Settled PM positions will appear here until redeemed</div>
+          </div>
+        ) : (
+          <table className="min-w-[760px] text-left text-xs">
+            <thead className="sticky top-0 bg-zinc-950 text-[11px] uppercase tracking-[0.12em] text-zinc-600">
+              <tr>
+                <th className="px-4 py-2 font-medium">Market</th>
+                <th className="px-3 py-2 font-medium">Outcome</th>
+                <th className="px-3 py-2 font-medium">Size</th>
+                <th className="px-3 py-2 font-medium">Avg</th>
+                <th className="px-3 py-2 font-medium">Cash PnL</th>
+                <th className="px-3 py-2 font-medium">Redeem</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-900">
+              {redeemablePositions.slice(0, 8).map((position, index) => (
+                <tr key={`${position.slug || "redeemable"}-${position.outcome || ""}-${index}`} className="hover:bg-zinc-900/40">
+                  <td className="max-w-[280px] truncate px-4 py-2 font-mono text-zinc-400" title={position.title || position.slug || ""}>{position.slug || position.event_slug || "-"}</td>
+                  <td className="px-3 py-2">
+                    <span className="inline-flex items-center gap-1 font-mono text-zinc-200">
+                      {directionIcon(position.outcome)}
+                      {directionLabel(position.outcome || "-")}
+                    </span>
+                  </td>
+                  <td className="px-3 py-2 font-mono text-zinc-300">{orderSize(position.size)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-100">{orderPrice(position.avg_price)}</td>
+                  <td className={`px-3 py-2 font-mono font-semibold ${position.cash_pnl == null ? "text-zinc-500" : position.cash_pnl >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{orderValue(position.cash_pnl)}</td>
+                  <td className="px-3 py-2 font-mono text-zinc-400">{position.redeemable ? "yes" : "no"}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
       </div>
     </Panel>
   );
@@ -2225,17 +2341,19 @@ function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"
   const positions = records.filter((record) => liveOrderGroup(record) === "Position").length;
   const settled = records.filter((record) => liveOrderGroup(record) === "Settled").length;
   const closed = records.filter((record) => liveOrderGroup(record) === "Closed").length;
+  const attempts = records.reduce((total, record) => total + (record.attempts ?? record.order_chain_count ?? 1), 0);
   return (
     <Panel
       title="Live Ledger Orders"
-      sub="positions and settled real orders"
-      right={<span className="font-mono text-xs text-zinc-500">{records.length} latest</span>}
+      sub="signal executions with grouped order attempts"
+      right={<span className="font-mono text-xs text-zinc-500">{records.length} signals</span>}
     >
       <div className="border-b border-zinc-900 px-4 py-3">
-        <div className="grid grid-cols-3 gap-2">
+        <div className="grid grid-cols-4 gap-2">
           <HealthTile label="Position" value={`${positions}`} ok={positions === 0 ? true : undefined} />
           <HealthTile label="Settled" value={`${settled}`} />
           <HealthTile label="Closed" value={`${closed}`} />
+          <HealthTile label="Attempts" value={`${attempts}`} />
         </div>
       </div>
       <div className="max-h-[420px] overflow-auto">
@@ -2245,11 +2363,12 @@ function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"
             <div className="mt-1 text-xs text-zinc-600">Filled and settled real orders will appear here</div>
           </div>
         ) : (
-          <table className="min-w-[900px] text-left text-xs">
+          <table className="min-w-[980px] text-left text-xs">
             <thead className="sticky top-0 bg-zinc-950 text-[11px] uppercase tracking-[0.12em] text-zinc-600">
               <tr>
-                <th className="px-4 py-2 font-medium">Order</th>
+                <th className="px-4 py-2 font-medium">Signal</th>
                 <th className="px-3 py-2 font-medium">Group</th>
+                <th className="px-3 py-2 font-medium">Attempts</th>
                 <th className="px-3 py-2 font-medium">Market</th>
                 <th className="px-3 py-2 font-medium">Dir</th>
                 <th className="px-3 py-2 font-medium">Price</th>
@@ -2264,16 +2383,20 @@ function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"
               {visible.map((order, index) => {
                 const status = String(order.status || "-");
                 const group = liveOrderGroup(order);
+                const attemptCount = order.attempts ?? order.order_chain_count ?? 1;
                 const pnl = order.pnl ?? null;
                 const hypotheticalPnl = order.hypothetical_pnl ?? null;
                 const showHypothetical = pnl == null && hypotheticalPnl != null;
                 const pnlTone = pnl == null ? "text-zinc-500" : pnl >= 0 ? "text-emerald-300" : "text-rose-300";
                 const hypotheticalTone = hypotheticalPnl == null ? "text-zinc-500" : hypotheticalPnl >= 0 ? "text-emerald-300" : "text-rose-300";
                 return (
-                  <tr key={order.order_id || `${order.market_slug}-${index}`} className="hover:bg-zinc-900/40">
-                    <td className="px-4 py-2 font-mono text-zinc-300" title={order.order_id || ""}>{compactId(order.order_id || undefined)}</td>
+                  <tr key={order.signal_id || order.order_id || `${order.market_slug}-${index}`} className="hover:bg-zinc-900/40">
+                    <td className="px-4 py-2 font-mono text-zinc-300" title={order.signal_id || order.order_id || ""}>{compactId(order.signal_id || order.order_id || undefined)}</td>
                     <td className="px-3 py-2">
                       <span className={`inline-flex items-center rounded border px-2 py-0.5 font-mono text-[11px] ${liveOrderStatusTone(status)}`}>{group}</span>
+                    </td>
+                    <td className="px-3 py-2 font-mono text-zinc-300" title={(order.order_chain ?? []).map((item) => `${compactId(item.order_id || undefined)} ${item.status || ""} ${orderPrice(item.price)}`).join(" | ")}>
+                      {attemptCount}
                     </td>
                     <td className="max-w-[230px] truncate px-3 py-2 font-mono text-zinc-400" title={order.market_slug || ""}>{order.market_slug || "-"}</td>
                     <td className="px-3 py-2">
@@ -2393,8 +2516,13 @@ export default function Live({
   const readinessTone = readinessReady ? "text-emerald-300" : readinessCritical > 0 ? "text-rose-300" : "text-amber-300";
   const riskResilience = safety?.risk?.resilience ?? liveReal?.risk_resilience;
   const riskBlockerItems = (safety?.checklist ?? []).filter((item) => item.severity === "risk" && !item.ok);
-  const riskControlTriggered = riskBlockerItems.length > 0 || riskResilience?.ok === false;
-  const riskControlReason = riskResilience?.reason || riskBlockerItems.map((item) => item.label).join(", ");
+  const riskLimits = safety?.risk?.limits;
+  const riskOpenPendingHardBlocked = riskBlockerItems.some(
+    (item) => item.key === "risk_open_or_pending" && Number(item.value ?? 0) > Number(riskLimits?.max_open_or_pending_orders ?? Number.POSITIVE_INFINITY),
+  );
+  const riskHardBlockerItems = riskBlockerItems.filter((item) => item.key !== "risk_open_or_pending" || riskOpenPendingHardBlocked);
+  const riskControlTriggered = riskHardBlockerItems.length > 0 || riskResilience?.ok === false;
+  const riskControlReason = riskResilience?.ok === false ? riskResilience?.reason : riskHardBlockerItems.map((item) => item.label).join(", ");
   const dryrun = safety?.dryrun;
   const dryrunSubmitted = dryrun?.submitted_count ?? 0;
   const dryrunValue = `${dryrun?.would_place_count ?? 0}/${dryrun?.ledger_count ?? 0}`;
@@ -2419,13 +2547,12 @@ export default function Live({
         : "CLOB account";
   const clobPortfolioSub = portfolio ? `cash ${money(portfolio.cash_balance_usdc ?? 0)} | positions ${money(portfolio.positions_value_usdc ?? 0)}` : fundingBalanceSub;
   const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? "text-emerald-300" : fundingLargestGap > 0 ? "text-rose-300" : "text-zinc-100";
-  const riskLimits = safety?.risk?.limits;
   const pendingCount = pending.length;
   const openPendingUsed = todayOpen + pendingCount;
   const openPendingLimit = riskLimits?.max_open_or_pending_orders;
   const openPendingValue = `${todayOpen}/${pendingCount}`;
   const openPendingSub = openPendingLimit == null ? "open / pending" : `open / pending | risk limit ${openPendingLimit}`;
-  const openPendingTone = openPendingLimit == null ? "text-zinc-100" : openPendingUsed < openPendingLimit ? "text-emerald-300" : "text-rose-300";
+  const openPendingTone = openPendingLimit == null ? "text-zinc-100" : openPendingUsed <= openPendingLimit ? "text-emerald-300" : "text-rose-300";
   const checkpointAge = health?.checkpoint_age_seconds;
   const latestEventAge = health?.latest_event_age_seconds;
   const checkpointFresh = (checkpointAge ?? 9999) < 600;

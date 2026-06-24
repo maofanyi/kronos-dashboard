@@ -455,13 +455,14 @@ def _prediction_record_match_key(record: dict):
     )
 
 
-def _live_ledger_prediction_records():
+def _live_ledger_rows():
     payload = _read_json(_live_real_ledger_path())
-    rows = payload if isinstance(payload, list) else []
+    return [row for row in (payload if isinstance(payload, list) else []) if isinstance(row, dict)]
+
+
+def _live_ledger_prediction_records():
     records = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
+    for row in _live_ledger_rows():
         action = str(row.get("action") or "").upper()
         if not action or action == "HOLD":
             continue
@@ -504,9 +505,91 @@ def _live_ledger_prediction_records():
     return records
 
 
+def _order_chain_key_values(row: dict):
+    values = [
+        row.get("signal_id"),
+        row.get("order_key"),
+        row.get("decision_id"),
+        row.get("prediction_artifact_decision_id"),
+        _prediction_record_match_key(row),
+    ]
+    return [str(value) for value in values if value]
+
+
+def _order_chain_item(row: dict):
+    keys = (
+        "order_id",
+        "repost_parent_order_id",
+        "status",
+        "execution_result",
+        "market_slug",
+        "market_id",
+        "direction",
+        "side",
+        "price",
+        "price_tier",
+        "size",
+        "filled_size",
+        "remaining_size",
+        "created_at",
+        "updated_at",
+        "entry_ts",
+        "settle_ts",
+        "signal_id",
+        "order_key",
+    )
+    return {key: row.get(key) for key in keys if row.get(key) not in (None, "")}
+
+
+def _order_chain_sort_value(row: dict):
+    return (
+        _parse_dt(row.get("created_at"))
+        or _parse_dt(row.get("updated_at"))
+        or _parse_dt(row.get("entry_ts"))
+        or datetime.min.replace(tzinfo=timezone.utc)
+    )
+
+
+def _best_execution_order(chain: list[dict]):
+    filled = [
+        order
+        for order in chain
+        if _num(order.get("filled_size")) and _num(order.get("filled_size")) > 0
+    ]
+    candidates = filled or [
+        order
+        for order in chain
+        if str(order.get("status") or "").upper() in {"FILLED", "SETTLED", "OPEN", "SUBMITTED"}
+    ] or chain
+    if not candidates:
+        return None
+    return sorted(candidates, key=_order_chain_sort_value)[-1]
+
+
+def _dedupe_order_chain_rows(rows: list[dict]):
+    deduped = []
+    seen = set()
+    for row in rows:
+        key = (
+            row.get("order_id"),
+            row.get("created_at"),
+            row.get("price_tier"),
+            row.get("price"),
+            row.get("status"),
+        )
+        fallback_key = tuple(sorted((str(k), str(v)) for k, v in row.items()))
+        marker = key if any(value not in (None, "") for value in key) else fallback_key
+        if marker in seen:
+            continue
+        seen.add(marker)
+        deduped.append(row)
+    return deduped
+
+
 def _enrich_prediction_records_from_live_ledger(records: list[dict]):
     ledger_records = _live_ledger_prediction_records()
-    if not ledger_records:
+    ledger_rows = _live_ledger_rows()
+    if not ledger_records and not ledger_rows:
         return records
     by_key = {}
     for row in ledger_records:
@@ -538,6 +621,10 @@ def _enrich_prediction_records_from_live_ledger(records: list[dict]):
         "submitted",
         "would_place_order",
     )
+    chains_by_key: dict[str, list[dict]] = {}
+    for row in ledger_rows:
+        for key in _order_chain_key_values(row):
+            chains_by_key.setdefault(key, []).append(row)
     for record in records:
         match = None
         for key in (
@@ -559,6 +646,34 @@ def _enrich_prediction_records_from_live_ledger(records: list[dict]):
                 record["reason_code"] = match.get("reason_code")
             if record.get("passed") is not True:
                 record["passed"] = bool(match.get("passed"))
+        chain_rows = []
+        for key in (
+            record.get("decision_id"),
+            record.get("order_key"),
+            record.get("signal_id"),
+            _prediction_record_match_key(record),
+        ):
+            if key and str(key) in chains_by_key:
+                chain_rows = chains_by_key[str(key)]
+                break
+        if chain_rows:
+            record = dict(record)
+            chain = [
+                _order_chain_item(row)
+                for row in sorted(_dedupe_order_chain_rows(chain_rows), key=_order_chain_sort_value)
+            ]
+            execution_order = _best_execution_order(chain)
+            record["order_chain"] = chain
+            record["order_chain_count"] = len(chain)
+            if record.get("max_price") in (None, "") and record.get("price") not in (None, ""):
+                record["max_price"] = record.get("price")
+            if execution_order:
+                record["execution_order_id"] = execution_order.get("order_id")
+                record["execution_status"] = execution_order.get("status")
+                record["execution_price"] = execution_order.get("price")
+                record["execution_price_tier"] = execution_order.get("price_tier")
+                record["execution_filled_size"] = execution_order.get("filled_size")
+                record["execution_remaining_size"] = execution_order.get("remaining_size")
         enriched.append(record)
     return enriched
 
@@ -1216,6 +1331,7 @@ Get-CimInstance Win32_Process |
                 "name": row.get("Name"),
                 "started_at": started_at,
                 "command": command_line[:260],
+                "command_full": command_line,
             }
         )
     started_values = [_parse_dt(item.get("started_at")) for item in matches]
@@ -2148,9 +2264,9 @@ def _risk_summary_from_records(records, inputs=None, limits_override=None, *, no
         {
             "key": "risk_open_or_pending",
             "label": "Open or pending",
-            "ok": open_or_pending < limits["max_open_or_pending_orders"],
+            "ok": open_or_pending <= limits["max_open_or_pending_orders"],
             "value": open_or_pending,
-            "expected": f"< {limits['max_open_or_pending_orders']}",
+            "expected": f"<= {limits['max_open_or_pending_orders']}",
             "severity": "risk",
         },
     ]
@@ -2321,8 +2437,19 @@ def _hypothetical_order_result(record, *, status, filled_size, size, price, actu
     return round(hypothetical_pnl, 8), won, "unfilled_limit"
 
 
-def _live_order_record_summary(record):
-    status = str(record.get("status") or "").upper() or "UNKNOWN"
+def _live_order_has_final_settlement(record):
+    if record.get("settled_at"):
+        return True
+    settlement_source = str(record.get("settlement_source") or "").strip().lower()
+    if settlement_source in {"chainlink_candlestick", "polymarket_gamma_outcome"}:
+        return True
+    if record.get("market_result_source") or record.get("market_result"):
+        return True
+    return False
+
+
+def _live_order_record_summary(record, *, order_chain=None):
+    raw_status = str(record.get("status") or "").upper() or "UNKNOWN"
     filled_size = _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size") or 0.0
     size = _float_value(record, "size", "original_size", "target_size", "requested_size", "order_size_shares")
     remaining = _float_value(record, "remaining_size")
@@ -2330,6 +2457,11 @@ def _live_order_record_summary(record):
         remaining = max(0.0, size - filled_size)
     price = _float_value(record, "price", "limit_price")
     pnl = _float_value(record, "pnl", "net_pnl", "realized_pnl", "pnl_usdc")
+    status = raw_status
+    exchange_final_status = record.get("exchange_final_status")
+    if filled_size > 0 and raw_status != "SETTLED" and _live_order_has_final_settlement(record):
+        status = "SETTLED"
+        exchange_final_status = exchange_final_status or raw_status
     hypothetical_pnl, hypothetical_won, hypothetical_pnl_basis = _hypothetical_order_result(
         record,
         status=status,
@@ -2338,10 +2470,13 @@ def _live_order_record_summary(record):
         price=price,
         actual_pnl=pnl,
     )
-    return {
+    chain = list(order_chain or [])
+    summary = {
         "order_id": record.get("order_id"),
         "market_slug": record.get("market_slug"),
         "status": status,
+        "exchange_final_status": exchange_final_status,
+        "risk_excluded": _risk_excluded(record),
         "direction": record.get("direction") or record.get("side") or record.get("action"),
         "token_outcome": record.get("token_outcome") or record.get("outcome"),
         "price": price,
@@ -2365,6 +2500,11 @@ def _live_order_record_summary(record):
         "execution_result": record.get("execution_result"),
         "signal_id": record.get("signal_id") or record.get("order_key"),
     }
+    if chain:
+        summary["attempts"] = len(chain)
+        summary["order_chain_count"] = len(chain)
+        summary["order_chain"] = chain
+    return summary
 
 
 def _live_order_timeline_ts(record):
@@ -2376,12 +2516,34 @@ def _live_order_timeline_ts(record):
 
 
 def _live_order_records(records, *, limit=60):
-    ordered = sorted(
-        [record for record in records if isinstance(record, dict)],
+    grouped = {}
+    standalone = []
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        signal_key = record.get("signal_id") or record.get("order_key")
+        if signal_key:
+            grouped.setdefault(str(signal_key), []).append(record)
+        else:
+            standalone.append(record)
+
+    representatives = []
+    for rows in grouped.values():
+        chain_rows = sorted(_dedupe_order_chain_rows(rows), key=_order_chain_sort_value)
+        representative = _best_execution_order(chain_rows) or chain_rows[-1]
+        representatives.append(
+            _live_order_record_summary(
+                representative,
+                order_chain=[_order_chain_item(row) for row in chain_rows],
+            )
+        )
+    representatives.extend(_live_order_record_summary(record) for record in standalone)
+
+    return sorted(
+        representatives,
         key=lambda item: _live_order_timeline_ts(item) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
-    )
-    return [_live_order_record_summary(record) for record in ordered[:limit]]
+    )[:limit]
 
 
 def _unix_timestamp_iso(value):
@@ -2454,12 +2616,23 @@ def _polymarket_account_activity_summary(limit=30, cash_balance=None):
         key=lambda row: _polymarket_activity_ts(row) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )
+    position_rows = [row for row in positions if isinstance(row, dict)]
+    active_position_rows = [row for row in position_rows if not bool(row.get("redeemable"))]
+    redeemable_position_rows = [row for row in position_rows if bool(row.get("redeemable"))]
     ordered_positions = sorted(
-        [row for row in positions if isinstance(row, dict)],
+        active_position_rows,
+        key=lambda row: abs(_num(row.get("cashPnl") or row.get("cash_pnl")) or 0.0),
+        reverse=True,
+    )
+    ordered_redeemable_positions = sorted(
+        redeemable_position_rows,
         key=lambda row: abs(_num(row.get("cashPnl") or row.get("cash_pnl")) or 0.0),
         reverse=True,
     )
     position_summaries = [_polymarket_position_summary(row) for row in ordered_positions[:limit]]
+    redeemable_position_summaries = [
+        _polymarket_position_summary(row) for row in ordered_redeemable_positions[:limit]
+    ]
     positions_value = sum(
         value
         for value in (_num(row.get("currentValue") or row.get("current_value")) for row in positions if isinstance(row, dict))
@@ -2479,6 +2652,8 @@ def _polymarket_account_activity_summary(limit=30, cash_balance=None):
         "summary": {
             "activity_count": int(summary.get("activity_count", len(activity)) or 0),
             "positions_count": int(summary.get("positions_count", len(positions)) or 0),
+            "active_positions_count": len(active_position_rows),
+            "redeemable_positions_count": len(redeemable_position_rows),
             "trade_count": int(summary.get("trade_count", 0) or 0),
             "redeem_count": int(summary.get("redeem_count", 0) or 0),
         },
@@ -2491,6 +2666,7 @@ def _polymarket_account_activity_summary(limit=30, cash_balance=None):
         },
         "recent_activity": [_polymarket_activity_summary(row) for row in ordered_activity[:limit]],
         "positions": position_summaries,
+        "redeemable_positions": redeemable_position_summaries,
     }
 
 
@@ -2543,6 +2719,63 @@ def _live_formal_summary():
         "target_market_entry_ts": prediction.get("target_market_entry_ts"),
         "target_market_settle_ts": prediction.get("target_market_settle_ts"),
         "execution_market_shift": prediction.get("execution_market_shift"),
+    }
+
+
+def _command_has_flag(command: str, flag: str) -> bool:
+    tokens = str(command or "").split()
+    return flag in tokens
+
+
+def _command_option_value(command: str, option: str) -> str:
+    tokens = str(command or "").split()
+    for index, token in enumerate(tokens):
+        if token == option and index + 1 < len(tokens):
+            return tokens[index + 1]
+        prefix = f"{option}="
+        if token.startswith(prefix):
+            return token[len(prefix):]
+    return ""
+
+
+def _live_real_order_mode(live_real_summary=None):
+    live_real_summary = live_real_summary if isinstance(live_real_summary, dict) else {}
+    runtime = live_real_summary.get("runtime") if isinstance(live_real_summary.get("runtime"), dict) else {}
+    child_runtime = runtime.get("child_runtime") if isinstance(runtime.get("child_runtime"), dict) else {}
+    matches = child_runtime.get("matches") if isinstance(child_runtime.get("matches"), list) else []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        command = str(match.get("command_full") or match.get("command") or "")
+        if "run_prediction_bound_live_order.py" not in command:
+            continue
+        submit_enabled = _command_has_flag(command, "--submit")
+        environment_enabled = _command_option_value(command, "--environment-enabled").upper() == "YES"
+        if submit_enabled or environment_enabled:
+            return {
+                "enabled": submit_enabled and environment_enabled,
+                "source": "formal_process",
+                "submit": submit_enabled,
+                "environment_enabled": environment_enabled,
+            }
+
+    formal = live_real_summary.get("formal") if isinstance(live_real_summary.get("formal"), dict) else {}
+    submit_enabled = bool(formal.get("submit_enabled"))
+    submitted = bool(formal.get("submitted"))
+    if submit_enabled or submitted:
+        return {
+            "enabled": submit_enabled or submitted,
+            "source": "formal_report",
+            "submit": submit_enabled,
+            "submitted": submitted,
+        }
+
+    env_enabled = os.environ.get("KRONOS_ENABLE_REAL_ORDERS", "").strip().upper() == "YES"
+    return {
+        "enabled": env_enabled,
+        "source": "environment",
+        "submit": env_enabled,
+        "environment_enabled": env_enabled,
     }
 
 
@@ -3678,10 +3911,7 @@ def _safety_report_summary():
     )
     orders_call = next((call for call in network_calls if call.get("name") == "get_orders"), {})
 
-    real_orders_env = os.environ.get("KRONOS_ENABLE_REAL_ORDERS", "")
-    run_source = _paper_run_source()
-    source_label = _source_label(run_source)
-    mode = "dry-run" if "dryrun" in run_source else "live" if run_source.startswith("live_") else "paper"
+    paper_run_source = _paper_run_source()
     clob_open_orders = _clob_open_order_summaries(
         gate_account.get("open_orders")
         if isinstance(gate_account.get("open_orders"), list)
@@ -3723,13 +3953,17 @@ def _safety_report_summary():
         open_orders_read_ok = bool(refreshed_account.get("orders_read_ok"))
         balance_ok = gate_funding.get("balance_shortfall_usdc") == 0.0
         allowance_ok = gate_funding.get("allowance_shortfall_usdc") == 0.0
-    real_orders_enabled = real_orders_env == "YES"
     paper_risk_summary = _live_risk_summary(checkpoint)
     today_summary = _live_today_summary(checkpoint, paper_risk_summary, dryrun_summary)
     live_real_summary = _live_real_summary(
         limits_override=_live_formal_risk_limits(preflight_risk_limits),
         current_balance=balance_value,
     )
+    real_order_mode = _live_real_order_mode(live_real_summary)
+    real_orders_enabled = bool(real_order_mode.get("enabled"))
+    run_source = "live_real" if real_orders_enabled else paper_run_source
+    source_label = _source_label(run_source)
+    mode = "dry-run" if "dryrun" in run_source else "live" if run_source.startswith("live_") else "paper"
     live_real_risk_summary = live_real_summary["risk"]
     live_order_sync_summary = _live_order_sync_summary()
     live_trading_status = _live_trading_status(live_real_summary, live_order_sync_summary)
@@ -4127,7 +4361,10 @@ def _safety_report_summary():
         "real_orders_enabled": real_orders_enabled,
         "kill_switch": {
             "state": "armed" if real_orders_enabled else "locked",
-            "env": "YES" if real_orders_enabled else "",
+            "env": "YES" if real_order_mode.get("environment_enabled") else "",
+            "source": real_order_mode.get("source"),
+            "submit": bool(real_order_mode.get("submit")),
+            "environment_enabled": bool(real_order_mode.get("environment_enabled")),
         },
         "clob": {
             "authenticated": clob_authenticated,

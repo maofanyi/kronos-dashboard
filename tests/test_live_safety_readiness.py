@@ -44,6 +44,25 @@ def test_dashboard_today_risk_uses_configured_trading_day_timezone(monkeypatch):
     assert summary["metrics"]["daily_pnl_usdc"] == 1.0
 
 
+def test_dashboard_risk_summary_allows_managed_open_order_at_limit():
+    summary = server._risk_summary_from_records(
+        [{"status": "OPEN", "created_at": "2026-06-24T19:30:00Z"}],
+        limits_override={
+            "max_daily_loss_usdc": 60,
+            "max_daily_trades": 100,
+            "max_consecutive_losses": 10,
+            "max_open_or_pending_orders": 1,
+        },
+        now=datetime(2026, 6, 24, 19, 31, tzinfo=timezone.utc),
+    )
+
+    open_pending = next(check for check in summary["checks"] if check["key"] == "risk_open_or_pending")
+    assert open_pending["ok"] is True
+    assert open_pending["value"] == 1
+    assert open_pending["expected"] == "<= 1"
+    assert summary["ok"] is True
+
+
 def test_dashboard_today_db_fallback_filters_by_trading_day_window(monkeypatch, tmp_path):
     monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
     db_path = tmp_path / "dashboard.db"
@@ -131,14 +150,72 @@ def test_live_analytics_daily_series_uses_dashboard_trading_day(monkeypatch):
     assert rows[1]["total_pnl_usdc"] == 1.0
 
 
-def test_live_safety_labels_paper_source_without_calling_it_real_live(monkeypatch):
+def test_live_safety_labels_paper_source_without_calling_it_real_live(monkeypatch, tmp_path):
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir.mkdir(parents=True)
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
     monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": False, "matches": [], "started_at": None, "uptime_seconds": None, "patterns": patterns},
+    )
     payload = server._safety_report_summary()
 
     assert payload["run_source"] == "paper_aligned_prod_shift1"
     assert payload["mode"] == "paper"
     assert payload["source_label"] == "Paper"
     assert payload["real_orders_enabled"] is False
+
+
+def test_live_safety_detects_real_orders_from_formal_child_process(monkeypatch, tmp_path):
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir.mkdir(parents=True)
+    checkpoint_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.delenv("KRONOS_ENABLE_REAL_ORDERS", raising=False)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+
+    def fake_process_summary(patterns):
+        command = (
+            "python scripts\\run_prediction_bound_live_order.py "
+            "--watch --submit --environment-enabled YES "
+            "--output data\\reports\\prediction_bound_live_formal_latest.json"
+        )
+        running = "run_prediction_bound_live_order.py" in patterns
+        return {
+            "running": running,
+            "matches": [{"pid": 111, "command": command, "command_full": command}] if running else [],
+            "started_at": "2026-06-21T16:00:00Z" if running else None,
+            "uptime_seconds": 300,
+            "patterns": patterns,
+        }
+
+    monkeypatch.setattr(server, "_process_summary", fake_process_summary)
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": False,
+            "reason": "latest prediction did not produce a would_place_order intent",
+            "submitted": False,
+        },
+    )
+
+    payload = server._safety_report_summary()
+
+    assert payload["real_orders_enabled"] is True
+    assert payload["run_source"] == "live_real"
+    assert payload["mode"] == "live"
+    assert payload["source_label"] == "Live Real"
+    assert payload["kill_switch"]["state"] == "armed"
+    assert payload["kill_switch"]["source"] == "formal_process"
 
 
 def test_status_legacy_live_query_reads_paper_source_and_labels(tmp_path, monkeypatch):
@@ -408,6 +485,86 @@ def test_live_order_records_sort_by_market_settle_time_not_reconcile_time():
     )
 
     assert [record["order_id"] for record in records] == ["newer-market", "older-market"]
+
+
+def test_live_order_records_display_final_filled_rows_as_settled():
+    records = server._live_order_records(
+        [
+            {
+                "order_id": "chainlink-final-fill",
+                "status": "FILLED",
+                "risk_excluded": True,
+                "filled_size": 10,
+                "settle_ts": "2026-06-20T21:00:00Z",
+                "settled_at": "2026-06-20T21:04:01Z",
+                "settlement_source": "chainlink_candlestick",
+                "pnl": -4.9,
+            }
+        ]
+    )
+
+    assert records[0]["status"] == "SETTLED"
+    assert records[0]["exchange_final_status"] == "FILLED"
+    assert records[0]["risk_excluded"] is True
+
+
+def test_live_order_records_group_multiple_attempts_by_signal():
+    records = server._live_order_records(
+        [
+            {
+                "order_id": "maker-049",
+                "signal_id": "aligned_prod_current_next:20260622T093500Z:SHORT",
+                "status": "CANCELLED",
+                "execution_result": "no_fill",
+                "direction": "DOWN",
+                "price": 0.49,
+                "size": 5,
+                "filled_size": 0,
+                "remaining_size": 5,
+                "created_at": "2026-06-22T09:30:10Z",
+                "entry_ts": "2026-06-22T09:35:00Z",
+                "settle_ts": "2026-06-22T09:40:00Z",
+            },
+            {
+                "order_id": "taker-050",
+                "signal_id": "aligned_prod_current_next:20260622T093500Z:SHORT",
+                "repost_parent_order_id": "maker-049",
+                "status": "SETTLED",
+                "direction": "DOWN",
+                "price": 0.50,
+                "size": 5,
+                "filled_size": 5,
+                "remaining_size": 0,
+                "pnl": 2.5,
+                "settled_at": "2026-06-22T09:45:00Z",
+                "settlement_source": "chainlink_candlestick",
+                "created_at": "2026-06-22T09:34:20Z",
+                "entry_ts": "2026-06-22T09:35:00Z",
+                "settle_ts": "2026-06-22T09:40:00Z",
+            },
+            {
+                "order_id": "standalone",
+                "status": "NO_FILL",
+                "direction": "UP",
+                "price": 0.49,
+                "size": 5,
+                "created_at": "2026-06-22T09:20:00Z",
+                "entry_ts": "2026-06-22T09:25:00Z",
+                "settle_ts": "2026-06-22T09:30:00Z",
+            },
+        ]
+    )
+
+    assert [record["order_id"] for record in records] == ["taker-050", "standalone"]
+    grouped = records[0]
+    assert grouped["status"] == "SETTLED"
+    assert grouped["signal_id"] == "aligned_prod_current_next:20260622T093500Z:SHORT"
+    assert grouped["attempts"] == 2
+    assert grouped["order_chain_count"] == 2
+    assert [order["order_id"] for order in grouped["order_chain"]] == ["maker-049", "taker-050"]
+    assert grouped["filled_size"] == 5
+    assert grouped["remaining_size"] == 0
+    assert grouped["pnl"] == 2.5
 
 
 def test_paper_monitor_exposes_total_signal_pass_rate_from_checkpoint_events(monkeypatch, tmp_path):
@@ -1443,7 +1600,10 @@ def test_live_safety_includes_readiness_blocker_summary(tmp_path, monkeypatch):
     )
     _write_json(
         checkpoint_dir / "live_real_orders_current_next.json",
-        [{"status": "OPEN", "created_at": datetime.now(timezone.utc).isoformat()}],
+        [
+            {"status": "OPEN", "created_at": datetime.now(timezone.utc).isoformat()},
+            {"status": "PENDING", "created_at": datetime.now(timezone.utc).isoformat()},
+        ],
     )
 
     summary = server._safety_report_summary()
@@ -2285,13 +2445,16 @@ def test_live_safety_includes_polymarket_account_activity_report(tmp_path, monke
     assert account["ok"] is True
     assert account["user"] == "0xfunder"
     assert account["summary"]["trade_count"] == 2
+    assert account["summary"]["active_positions_count"] == 0
+    assert account["summary"]["redeemable_positions_count"] == 1
     assert account["portfolio"]["cash_balance_usdc"] == 0.0
     assert account["portfolio"]["positions_value_usdc"] == 1.05
     assert account["portfolio"]["total_value_usdc"] == 1.05
     assert account["recent_activity"][0]["slug"] == "btc-updown-5m-1781692200"
     assert account["recent_activity"][0]["usdc_size"] == 1.4553
-    assert account["positions"][0]["current_value"] == 1.05
-    assert account["positions"][0]["cash_pnl"] == -2.45
+    assert account["positions"] == []
+    assert account["redeemable_positions"][0]["current_value"] == 1.05
+    assert account["redeemable_positions"][0]["cash_pnl"] == -2.45
 
 
 def test_live_safety_includes_preflight_chain_summary(tmp_path, monkeypatch):
@@ -3259,6 +3422,101 @@ def test_api_events_live_real_enriches_formal_log_signal_from_ledger(tmp_path, m
     assert details["market_slug"] == "btc-updown-5m-1781628900"
 
 
+def test_api_events_live_real_attaches_order_chain_and_execution_price(tmp_path, monkeypatch):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+
+    (report_dir / "prediction_bound_live_formal_predictions.jsonl").write_text(
+        json.dumps(
+            {
+                "created_at": "2026-06-21T18:15:09.293885Z",
+                "decision_bar_ts": "2026-06-21T18:10:00Z",
+                "entry_ts": "2026-06-21T18:20:00Z",
+                "settle_ts": "2026-06-21T18:25:00Z",
+                "execution_market_shift": "next_period",
+                "action": "BUY_DOWN",
+                "passed": True,
+                "would_place_order": True,
+                "submitted": True,
+                "reason_code": "short_passed",
+                "reason": "SHORT passed",
+                "side": "SHORT",
+                "direction": "DOWN",
+                "market_slug": "btc-updown-5m-1782066000",
+                "order_key": "aligned_prod_current_next:20260621T182000Z:SHORT",
+                "price": 0.52,
+                "p5_up": 0.4,
+                "p1_up": 0.9666666667,
+                "p4_up": 0.1666666667,
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "order_id": "0xmaker",
+                "signal_id": "aligned_prod_current_next:20260621T182000Z:SHORT",
+                "order_key": "aligned_prod_current_next:20260621T182000Z:SHORT",
+                "status": "CANCELLED",
+                "execution_result": "no_fill",
+                "market_slug": "btc-updown-5m-1782066000",
+                "direction": "DOWN",
+                "side": "SHORT",
+                "price": 0.49,
+                "price_tier": "maker_049",
+                "size": 10,
+                "filled_size": 0,
+                "remaining_size": 10,
+                "created_at": "2026-06-21T18:18:09.413151Z",
+                "updated_at": "2026-06-21T18:19:26.202872Z",
+                "entry_ts": "2026-06-21T18:20:00Z",
+                "settle_ts": "2026-06-21T18:25:00Z",
+            },
+            {
+                "order_id": "0xfill",
+                "signal_id": "aligned_prod_current_next:20260621T182000Z:SHORT",
+                "order_key": "aligned_prod_current_next:20260621T182000Z:SHORT",
+                "repost_parent_order_id": "0xmaker",
+                "status": "SETTLED",
+                "market_slug": "btc-updown-5m-1782066000",
+                "direction": "DOWN",
+                "side": "SHORT",
+                "price": 0.50,
+                "price_tier": "taker_050",
+                "size": 10,
+                "filled_size": 10,
+                "remaining_size": 0,
+                "created_at": "2026-06-21T18:19:26.809374Z",
+                "updated_at": "2026-06-21T18:25:26.567100Z",
+                "entry_ts": "2026-06-21T18:20:00Z",
+                "settle_ts": "2026-06-21T18:25:00Z",
+            },
+        ],
+    )
+
+    with server.app.test_client() as client:
+        events = client.get("/api/events?source=live_real&limit=10").get_json()
+
+    details = json.loads(events[0]["details"])
+    assert details["price"] == 0.52
+    assert details["execution_price"] == 0.50
+    assert details["execution_price_tier"] == "taker_050"
+    assert details["execution_order_id"] == "0xfill"
+    assert details["execution_status"] == "SETTLED"
+    assert details["order_chain_count"] == 2
+    assert [order["price_tier"] for order in details["order_chain"]] == ["maker_049", "taker_050"]
+    assert [order["status"] for order in details["order_chain"]] == ["CANCELLED", "SETTLED"]
+
+
 def test_status_bar_uses_source_label_and_configured_status_source():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
@@ -3426,6 +3684,18 @@ def test_live_page_surfaces_risk_resilience_alert_banner():
     assert "riskBlockerItems" in source
 
 
+def test_live_page_does_not_treat_full_open_order_slot_as_risk_control_trigger():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "riskHardBlockerItems" in source
+    assert 'item.key !== "risk_open_or_pending"' in source
+    assert "riskOpenPendingHardBlocked" in source
+    assert "riskResilience?.ok === false" in source
+    assert "riskResilience?.ok === false ? riskResilience?.reason : riskHardBlockerItems" in source
+    assert "metrics.open_or_pending_orders <= limits.max_open_or_pending_orders" in source
+    assert "openPendingUsed <= openPendingLimit" in source
+
+
 def test_live_page_scopes_real_order_lock_badge_to_live_real_mode():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
@@ -3567,7 +3837,7 @@ def test_live_page_uses_trade_queue_for_top_pending_kpi():
     assert "const openPendingLimit = riskLimits?.max_open_or_pending_orders" in source
     assert "const openPendingValue = `${todayOpen}/${pendingCount}`" in source
     assert "const openPendingSub = openPendingLimit == null ? \"open / pending\" : `open / pending | risk limit ${openPendingLimit}`" in source
-    assert "const openPendingTone = openPendingLimit == null ? \"text-zinc-100\" : openPendingUsed < openPendingLimit ? \"text-emerald-300\" : \"text-rose-300\"" in source
+    assert "const openPendingTone = openPendingLimit == null ? \"text-zinc-100\" : openPendingUsed <= openPendingLimit ? \"text-emerald-300\" : \"text-rose-300\"" in source
     assert 'StatCard label="Open/Pending" value={openPendingValue} sub={openPendingSub}' in source
     assert "tone={openPendingTone}" in source
 
@@ -3846,7 +4116,9 @@ def test_live_page_surfaces_live_ledger_order_records_panel():
     assert "<LiveLedgerOrdersPanel liveReal={liveReal}" in live_section
     assert "Live Ledger Orders" in source
     assert "liveReal?.order_records" in source
-    assert "positions and settled real orders" in source
+    assert "signal executions with grouped order attempts" in source
+    assert "order_chain_count" in source
+    assert "<th className=\"px-3 py-2 font-medium\">Attempts</th>" in source
     assert "order.settle_ts || order.settled_at" in source
     assert "order.settlement_source" in source
     assert "hypothetical_pnl" in source
@@ -3861,7 +4133,8 @@ def test_live_page_surfaces_polymarket_account_activity_panel():
     assert "function PolymarketAccountActivityPanel" in source
     assert "<PolymarketAccountActivityPanel account={liveReal?.account_activity}" in live_section
     assert "PM Account Activity" in source
-    assert "Data API trades, redeems, positions" in source
+    assert "Data API trades, active positions, redeemable" in source
+    assert "Redeemable Positions" in source
     assert "account?.recent_activity" in source
     assert "account?.positions" in source
 
@@ -3967,6 +4240,19 @@ def test_live_page_shows_live_real_recent_prediction_signals():
     assert 'Panel title="Recent Signals" sub="formal live prediction artifacts"' in live_section
     assert "Waiting for formal live decisions" in live_section
     assert "(events ?? []).slice(0, 14).map((event)" in live_section
+
+
+def test_live_page_recent_signals_show_directional_probs_and_order_chain():
+    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+
+    assert "function signalDirection" in source
+    assert "function signalProb" in source
+    assert 'MetricChip label={`5m${signalArrow}`}' in source
+    assert 'MetricChip label={`1h${signalArrow}`}' in source
+    assert 'MetricChip label={`4h${signalArrow}`}' in source
+    assert "details?.execution_price" in source
+    assert "details?.order_chain" in source
+    assert "Order Chain" in source
 
 
 def test_live_page_surfaces_report_freshness_panel():
