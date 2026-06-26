@@ -365,6 +365,68 @@ def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_pat
     assert no_fill_record["hypothetical_pnl_basis"] == "unfilled_limit"
 
 
+def test_live_safety_today_uses_live_real_metrics_when_real_orders_enabled(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setenv("DASHBOARD_RUN_SOURCE", "paper_aligned_prod_shift1")
+
+    def fake_process_summary(patterns):
+        command = (
+            "python scripts\\run_prediction_bound_live_order.py "
+            "--watch --submit --environment-enabled YES "
+            "--output data\\reports\\prediction_bound_live_formal_latest.json"
+        )
+        running = "run_prediction_bound_live_order.py" in patterns
+        return {
+            "running": running,
+            "matches": [{"pid": 111, "command": command, "command_full": command}] if running else [],
+            "started_at": "2026-06-26T00:00:00Z" if running else None,
+            "uptime_seconds": 300,
+            "patterns": patterns,
+        }
+
+    day_info = server._dashboard_day_info()
+    start_utc = day_info["start_utc"]
+    settle_win = (start_utc + timedelta(hours=1)).isoformat().replace("+00:00", "Z")
+    settle_loss = (start_utc + timedelta(hours=2)).isoformat().replace("+00:00", "Z")
+
+    monkeypatch.setattr(server, "_process_summary", fake_process_summary)
+    _write_json(
+        checkpoint_dir / "paper_aligned_prod_shift1.json",
+        {"balance": 503.0, "pending_orders": [], "open_orders": [], "trades": []},
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {"order_id": "real-win", "status": "SETTLED", "settled_at": settle_win, "pnl": 2.0, "won": True},
+            {"order_id": "real-loss", "status": "SETTLED", "settled_at": settle_loss, "pnl": -0.5, "won": False},
+        ],
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+        },
+    )
+
+    summary = server._safety_report_summary()
+
+    assert summary["real_orders_enabled"] is True
+    assert summary["run_source"] == "live_real"
+    assert summary["live_real"]["risk"]["metrics"]["daily_pnl_usdc"] == 1.5
+    assert summary["today"]["trades"]["settled"] == 2
+    assert summary["today"]["trades"]["wins"] == 1
+    assert summary["today"]["trades"]["losses"] == 1
+    assert summary["today"]["trades"]["win_rate"] == 0.5
+    assert summary["today"]["trades"]["pnl_usdc"] == 1.5
+
+
 def test_live_analytics_summarizes_pnl_drawdown_and_no_fill_hypothetical(monkeypatch, tmp_path):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     checkpoint_dir.mkdir(parents=True)
@@ -762,6 +824,69 @@ def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, t
     assert live_real["formal"]["available"] is True
     assert live_real["formal"]["latest_action"] == "HOLD"
     assert live_real["formal"]["latest_reason"] == "no_side_passed"
+
+
+def test_live_real_direct_profile_limits_override_stale_supervisor_log(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {
+            "running": "run_prediction_bound_live_order.py" in patterns,
+            "matches": [{"pid": 111, "started_at": "2026-06-24T22:00:00Z"}]
+            if "run_prediction_bound_live_order.py" in patterns
+            else [],
+            "started_at": "2026-06-24T22:00:00Z"
+            if "run_prediction_bound_live_order.py" in patterns
+            else None,
+            "uptime_seconds": 60 if "run_prediction_bound_live_order.py" in patterns else None,
+            "patterns": patterns,
+        },
+    )
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
+        (
+            "2026-06-16T23:50:58+08:00 formal_live_supervisor started "
+            "max_daily_loss=60 max_daily_trades=100 max_consecutive_losses=10 "
+            "max_open_or_pending=1"
+        ),
+        encoding="utf-8",
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": "2026-06-24T22:00:10Z",
+            "ok": False,
+            "submitted": False,
+            "reason": "latest prediction did not produce a would_place_order intent",
+            "effective_trade_config": {
+                "max_daily_loss_usdc": 60.0,
+                "max_daily_trades": 200,
+                "max_consecutive_losses": 10,
+                "max_open_or_pending_orders": 1,
+                "max_smoke_drawdown_usdc": 80.0,
+                "same_direction_loss_cooldown_count": 8,
+                "same_direction_loss_cooldown_minutes": 30,
+            },
+            "prediction": {"action": "HOLD", "reason_code": "no_side_passed"},
+        },
+    )
+
+    summary = server._safety_report_summary()
+    live_real = summary["live_real"]
+
+    assert live_real["risk"]["limits"]["max_daily_trades"] == 200
+    assert live_real["risk_controls"]["summary"]["max_daily_trades"] == 200
+    assert live_real["risk_controls"]["source"] == "formal_report"
+    assert live_real["runtime"]["role"] == "formal_child"
 
 
 def test_live_safety_surfaces_smoke_drawdown_resilience_blocker(monkeypatch, tmp_path):

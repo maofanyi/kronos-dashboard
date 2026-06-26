@@ -3043,7 +3043,13 @@ def _latest_formal_supervisor_line():
     return lines[-1] if lines else ""
 
 
+def _formal_supervisor_running():
+    return bool(_process_summary(["run_prediction_bound_live_formal_supervisor.ps1"]).get("running"))
+
+
 def _extract_formal_supervisor_limits():
+    if not _formal_supervisor_running():
+        return {}
     line = _latest_formal_supervisor_line()
     if not line:
         return {}
@@ -3080,6 +3086,8 @@ def _coerce_supervisor_value(value):
 
 
 def _extract_formal_supervisor_config():
+    if not _formal_supervisor_running():
+        return {}
     line = _latest_formal_supervisor_line()
     if not line:
         return {}
@@ -3173,6 +3181,7 @@ def _live_formal_risk_limits(fallback=None):
     formal_path, _ = _live_formal_report()
     if not formal_path.exists():
         return limits
+    formal_report = _read_json(formal_path) or {}
     contract = _live_restart_contract()
     contract_mapping = {
         "max_daily_loss_usdc": "max_daily_loss_usdc",
@@ -3183,6 +3192,31 @@ def _live_formal_risk_limits(fallback=None):
     for source_key, target_key in contract_mapping.items():
         if source_key in contract:
             limits[target_key] = contract[source_key]
+    effective = (
+        formal_report.get("effective_trade_config")
+        if isinstance(formal_report.get("effective_trade_config"), dict)
+        else {}
+    )
+    effective_keys = (
+        "order_size_shares",
+        "min_price",
+        "active_max_price",
+        "max_price",
+        "max_notional_usdc",
+        "max_daily_loss_usdc",
+        "max_daily_trades",
+        "max_consecutive_losses",
+        "max_open_or_pending_orders",
+        "max_smoke_drawdown_usdc",
+        "same_direction_loss_cooldown_count",
+        "same_direction_loss_cooldown_minutes",
+        "signal_max_age_seconds",
+        "reference_price_source",
+        "execution_market_shift",
+    )
+    for key in effective_keys:
+        if key in effective and effective.get(key) is not None:
+            limits[key] = effective[key]
     limits.update(_extract_formal_supervisor_limits())
     return limits
 
@@ -3587,6 +3621,63 @@ def _live_today_summary(checkpoint=None, risk_summary=None, dryrun_summary=None,
     }
 
 
+def _live_real_today_summary(live_real_summary, base_today=None, *, now=None):
+    base = dict(base_today) if isinstance(base_today, dict) else _live_today_summary(now=now)
+    now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+    day_info = _dashboard_day_info(now=now_dt)
+    today = day_info["day"]
+    risk = live_real_summary.get("risk") if isinstance(live_real_summary, dict) else {}
+    risk = risk if isinstance(risk, dict) else {}
+    metrics = risk.get("metrics") if isinstance(risk.get("metrics"), dict) else {}
+    limits = risk.get("limits") if isinstance(risk.get("limits"), dict) else {}
+    orders = live_real_summary.get("orders") if isinstance(live_real_summary, dict) else {}
+    orders = orders if isinstance(orders, dict) else {}
+    records = live_real_summary.get("order_records") if isinstance(live_real_summary, dict) else []
+    records = [record for record in records or [] if isinstance(record, dict)]
+    todays_settled = [
+        record for record in records
+        if _is_settled_record(record) and _is_today_record(record, today)
+    ]
+    wins = int(metrics.get("wins", sum(1 for record in todays_settled if _record_won(record) is True)) or 0)
+    losses = int(metrics.get("losses", sum(1 for record in todays_settled if _record_won(record) is False)) or 0)
+    settled = int(metrics.get("daily_trades", len(todays_settled)) or 0)
+    win_rate = metrics.get("win_rate")
+    if win_rate is None:
+        win_rate = round(wins / settled, 4) if settled else 0.0
+    daily_pnl = metrics.get("daily_pnl_usdc")
+    if daily_pnl is None:
+        daily_pnl = round(sum(_record_pnl(record) for record in todays_settled), 8)
+    open_or_pending = int(metrics.get("open_or_pending_orders", orders.get("open_or_pending", 0)) or 0)
+    latest_trade_at, latest_trade_age_seconds = _latest_timestamp_summary(
+        [_record_ts(record) for record in todays_settled],
+        now_dt,
+    )
+
+    base["trades"] = {
+        "settled": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(float(win_rate or 0.0), 4),
+        "pnl_usdc": round(float(daily_pnl or 0.0), 8),
+        "pending": 0,
+        "open": open_or_pending,
+    }
+    max_daily_loss = abs(float(limits.get("max_daily_loss_usdc", 0) or 0))
+    base["risk_usage"] = {
+        "daily_loss": _usage(max(0.0, -float(metrics.get("daily_pnl_usdc", daily_pnl) or 0)), max_daily_loss),
+        "daily_trades": _usage(metrics.get("daily_trades", settled), limits.get("max_daily_trades")),
+        "loss_streak": _usage(metrics.get("consecutive_losses", 0), limits.get("max_consecutive_losses")),
+        "open_or_pending": _usage(open_or_pending, limits.get("max_open_or_pending_orders")),
+    }
+    activity = dict(base.get("activity") or {})
+    activity.update({
+        "latest_trade_at": latest_trade_at,
+        "latest_trade_age_seconds": latest_trade_age_seconds,
+    })
+    base["activity"] = activity
+    return base
+
+
 def _readiness_summary(checklist):
     total = len(checklist)
     passed = sum(1 for item in checklist if item.get("ok"))
@@ -3954,20 +4045,25 @@ def _safety_report_summary():
         balance_ok = gate_funding.get("balance_shortfall_usdc") == 0.0
         allowance_ok = gate_funding.get("allowance_shortfall_usdc") == 0.0
     paper_risk_summary = _live_risk_summary(checkpoint)
-    today_summary = _live_today_summary(checkpoint, paper_risk_summary, dryrun_summary)
+    paper_today_summary = _live_today_summary(checkpoint, paper_risk_summary, dryrun_summary)
     live_real_summary = _live_real_summary(
         limits_override=_live_formal_risk_limits(preflight_risk_limits),
         current_balance=balance_value,
     )
     real_order_mode = _live_real_order_mode(live_real_summary)
     real_orders_enabled = bool(real_order_mode.get("enabled"))
+    today_summary = (
+        _live_real_today_summary(live_real_summary, paper_today_summary)
+        if real_orders_enabled
+        else paper_today_summary
+    )
     run_source = "live_real" if real_orders_enabled else paper_run_source
     source_label = _source_label(run_source)
     mode = "dry-run" if "dryrun" in run_source else "live" if run_source.startswith("live_") else "paper"
     live_real_risk_summary = live_real_summary["risk"]
     live_order_sync_summary = _live_order_sync_summary()
     live_trading_status = _live_trading_status(live_real_summary, live_order_sync_summary)
-    paper_monitor_summary = _paper_monitor_summary(checkpoint, paper_risk_summary, today_summary)
+    paper_monitor_summary = _paper_monitor_summary(checkpoint, paper_risk_summary, paper_today_summary)
     market_data_summary = _btc_live_market_data_summary()
     alert_summary = _live_alert_summary()
 
