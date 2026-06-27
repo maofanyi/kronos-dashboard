@@ -950,6 +950,75 @@ def test_live_safety_surfaces_smoke_drawdown_resilience_blocker(monkeypatch, tmp
     assert summary["readiness_summary"]["risk_blockers"] >= 1
 
 
+def test_live_safety_treats_zero_smoke_drawdown_limit_as_disabled(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {"running": True, "matches": [], "started_at": "2026-06-21T00:00:00Z", "uptime_seconds": 3600, "patterns": patterns},
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "order_id": "drawdown-loss-1",
+                "status": "SETTLED",
+                "direction": "DOWN",
+                "pnl": -87.14,
+                "entry_ts": "2026-06-21T20:55:00Z",
+                "settled_at": "2026-06-21T21:00:00Z",
+            }
+        ],
+    )
+    (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
+        (
+            "2026-06-21T00:00:00+00:00 formal_live_supervisor started "
+            "max_daily_loss=120 max_daily_trades=200 max_consecutive_losses=10 "
+            "max_open_or_pending=1 max_smoke_drawdown=0 "
+            "same_direction_loss_cooldown_count=8 same_direction_loss_cooldown_minutes=30"
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    _write_json(
+        report_dir / "prediction_bound_live_formal_latest.json",
+        {
+            "created_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "ok": True,
+            "submitted": False,
+            "effective_trade_config": {
+                "max_daily_loss_usdc": 120.0,
+                "max_daily_trades": 200,
+                "max_consecutive_losses": 10,
+                "max_open_or_pending_orders": 1,
+                "max_smoke_drawdown_usdc": 0.0,
+                "same_direction_loss_cooldown_count": 8,
+                "same_direction_loss_cooldown_minutes": 30,
+            },
+            "prediction": {"action": "HOLD", "reason_code": "no_side_passed"},
+        },
+    )
+
+    summary = server._safety_report_summary()
+    risk = summary["live_real"]["risk"]
+    readiness_keys = {item["key"]: item for item in summary["checklist"]}
+
+    assert risk["resilience"]["ok"] is True
+    assert "max_smoke_drawdown_usdc" not in risk["resilience"]["failures"]
+    assert risk["resilience"]["metrics"]["limits"]["max_smoke_drawdown_usdc"] == 0.0
+    assert readiness_keys["risk_smoke_drawdown"]["ok"] is True
+    assert readiness_keys["risk_smoke_drawdown"]["expected"] == "disabled"
+    assert summary["readiness_summary"]["risk_blockers"] == 0
+
+
 def test_live_trading_status_uses_formal_sync_risk_not_stale_preflight(monkeypatch, tmp_path):
     checkpoint_dir = tmp_path / "data" / "checkpoints"
     report_dir = tmp_path / "data" / "reports"

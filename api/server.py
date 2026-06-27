@@ -2126,7 +2126,7 @@ def _risk_resilience_summary_from_records(records, controls=None):
         if maker_price is not None and fill_price is not None and fill_price - maker_price > 0.02 + 1e-12:
             warnings.append("fill_quality_drift")
             break
-    if max_drawdown >= abs(float(max_smoke_drawdown)):
+    if float(max_smoke_drawdown) > 0 and max_drawdown >= abs(float(max_smoke_drawdown)):
         failures.append("max_smoke_drawdown_usdc")
     for direction, state in cooldowns.items():
         if state.get("active"):
@@ -2165,15 +2165,16 @@ def _risk_resilience_checks(resilience):
     failures = set(str(item) for item in resilience.get("failures", []) or [])
     max_drawdown = round(float(metrics.get("max_drawdown_usdc") or 0.0), 2)
     max_drawdown_limit = float(limits.get("max_smoke_drawdown_usdc") or 0.0)
+    smoke_drawdown_disabled = max_drawdown_limit <= 0.0
     cooldown_failures = sorted(item for item in failures if item.startswith("same_direction_loss_cooldown:"))
     lifecycle_failures = failures.intersection({"manual_cancel_required", "uncertain_order_lifecycle"})
     return [
         {
             "key": "risk_smoke_drawdown",
             "label": "Smoke drawdown",
-            "ok": "max_smoke_drawdown_usdc" not in failures,
+            "ok": smoke_drawdown_disabled or "max_smoke_drawdown_usdc" not in failures,
             "value": max_drawdown,
-            "expected": f"< {max_drawdown_limit}",
+            "expected": "disabled" if smoke_drawdown_disabled else f"< {max_drawdown_limit}",
             "severity": "risk",
         },
         {
