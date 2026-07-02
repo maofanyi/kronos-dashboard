@@ -308,6 +308,61 @@ def _live_formal_prediction_history_path():
     return KRONOS_REPORT_DIR / "prediction_bound_live_formal_predictions.jsonl"
 
 
+STRATEGY_COMPARE_MIN_DAYS = 7
+STRATEGY_COMPARE_PREFERRED_DAYS = 14
+STRATEGY_COMPARE_MIN_PASSED = 400
+STRATEGY_COMPARE_PREFERRED_PASSED = 800
+STRATEGY_COMPARE_CANDIDATES = [
+    {
+        "candidate_id": "round2_drawdown_density",
+        "label": "Round2 Current Baseline",
+        "config_path": "data/config/research_candidates/aligned_prod_current_next_chainlink_research_round2_drawdown_density_m049_shares5.json",
+    },
+    {
+        "candidate_id": "official_truth_14d14d_latest",
+        "label": "Official 14d/14d",
+        "config_path": "data/config/research_candidates/aligned_prod_current_next_official_truth_research_14d14d_latest_m049_shares5.json",
+    },
+    {
+        "candidate_id": "official_truth_7d7d_latest",
+        "label": "Official 7d/7d",
+        "config_path": "data/config/research_candidates/aligned_prod_current_next_official_truth_research_7d7d_latest_m049_shares5.json",
+    },
+]
+
+
+def _candidate_no_submit_official_truth_signals_path():
+    configured = (os.environ.get("DASHBOARD_CANDIDATE_NO_SUBMIT_SIGNALS") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_REPORT_DIR / path
+    return KRONOS_REPORT_DIR / "candidate_no_submit_official_truth_signals.jsonl"
+
+
+def _candidate_no_submit_official_truth_latest_path():
+    configured = (os.environ.get("DASHBOARD_CANDIDATE_NO_SUBMIT_LATEST") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_REPORT_DIR / path
+    return KRONOS_REPORT_DIR / "candidate_no_submit_official_truth_latest.json"
+
+
+def _candidate_no_submit_official_truth_daily_summary_path():
+    configured = (os.environ.get("DASHBOARD_CANDIDATE_NO_SUBMIT_DAILY_SUMMARY") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_REPORT_DIR / path
+    return KRONOS_REPORT_DIR / "candidate_no_submit_official_truth_daily_summary.json"
+
+
+def _candidate_no_submit_official_truth_scored_summary_path():
+    configured = (os.environ.get("DASHBOARD_CANDIDATE_NO_SUBMIT_SCORED_SUMMARY") or "").strip()
+    if configured:
+        path = Path(configured)
+        return path if path.is_absolute() else KRONOS_REPORT_DIR / path
+    return KRONOS_REPORT_DIR / "candidate_no_submit_official_truth_scored_summary.json"
+
+
 def _live_formal_report():
     path = _live_formal_report_path()
     return path, _read_json(path) or {}
@@ -2838,6 +2893,302 @@ def _live_order_sync_summary():
         "trade_reconciled": int(_num(summary.get("trade_reconciled")) or 0),
         "settlement_source": summary.get("settlement_source"),
         "summary": summary,
+    }
+
+
+def _strategy_record_ts(record):
+    for key in ("created_at", "source_prediction_created_at", "report_created_at", "entry_ts", "settle_ts"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _candidate_passed(record):
+    candidate = record.get("candidate") if isinstance(record.get("candidate"), dict) else {}
+    return bool(candidate.get("passed"))
+
+
+def _candidate_side(record):
+    candidate = record.get("candidate") if isinstance(record.get("candidate"), dict) else {}
+    side = str(candidate.get("side") or "").upper()
+    return side if side in {"LONG", "SHORT"} else ""
+
+
+def _strategy_scored_summary_by_candidate(path=None):
+    path = path or _candidate_no_submit_official_truth_scored_summary_path()
+    payload = _read_json(path) or {}
+    rows = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
+    return {
+        str(row.get("candidate_id") or ""): row
+        for row in rows
+        if isinstance(row, dict) and row.get("candidate_id")
+    }
+
+
+def _strategy_compare_filters(args):
+    window = str(args.get("window") or "7d").strip().lower()
+    if window not in {"24h", "7d", "14d", "all"}:
+        window = "7d"
+    bucket = str(args.get("bucket") or "day").strip().lower()
+    if bucket not in {"hour", "day"}:
+        bucket = "day"
+    metric = str(args.get("metric") or "signals").strip().lower()
+    if metric not in {"signals", "pnl", "win_rate", "overlap"}:
+        metric = "signals"
+    raw_candidates = str(args.get("candidates") or "").strip()
+    allowed = {spec["candidate_id"] for spec in STRATEGY_COMPARE_CANDIDATES}
+    if raw_candidates:
+        candidates = [item.strip() for item in raw_candidates.split(",") if item.strip() in allowed]
+    else:
+        candidates = [spec["candidate_id"] for spec in STRATEGY_COMPARE_CANDIDATES]
+    if not candidates:
+        candidates = [spec["candidate_id"] for spec in STRATEGY_COMPARE_CANDIDATES]
+    return {
+        "window": window,
+        "bucket": bucket,
+        "metric": metric,
+        "candidates": candidates,
+        "available_metrics": ["signals", "pnl", "win_rate", "overlap"],
+    }
+
+
+def _strategy_window_start(now_dt, window):
+    if window == "24h":
+        return now_dt - timedelta(hours=24)
+    if window == "7d":
+        return now_dt - timedelta(days=7)
+    if window == "14d":
+        return now_dt - timedelta(days=14)
+    return None
+
+
+def _strategy_bucket_key(ts, bucket):
+    ts = ts.astimezone(timezone.utc)
+    if bucket == "hour":
+        return ts.replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
+    return ts.date().isoformat()
+
+
+def _scored_daily_by_candidate(scored_by_candidate):
+    out = {}
+    for candidate_id, scored in scored_by_candidate.items():
+        rows = scored.get("daily") if isinstance(scored, dict) and isinstance(scored.get("daily"), list) else []
+        out[candidate_id] = {
+            str(row.get("bucket") or row.get("date") or ""): row
+            for row in rows
+            if isinstance(row, dict) and (row.get("bucket") or row.get("date"))
+        }
+    return out
+
+
+def _strategy_timeseries(records, *, now_dt, filters, scored_by_candidate):
+    start = _strategy_window_start(now_dt, filters["window"])
+    selected = set(filters["candidates"])
+    buckets = {}
+    for record in records:
+        candidate_id = str(record.get("candidate_id") or "")
+        if candidate_id not in selected:
+            continue
+        ts = _strategy_record_ts(record)
+        if ts is None:
+            continue
+        ts = ts.astimezone(timezone.utc)
+        if start is not None and ts < start:
+            continue
+        key = (candidate_id, _strategy_bucket_key(ts, filters["bucket"]))
+        bucket = buckets.setdefault(
+            key,
+            {
+                "bucket": key[1],
+                "candidate_id": candidate_id,
+                "evaluated": 0,
+                "passed": 0,
+                "pass_rate": 0.0,
+                "candidate_only": 0,
+                "same_side_overlap": 0,
+                "live_signal_filtered": 0,
+                "wins": None,
+                "losses": None,
+                "win_rate": None,
+                "pnl_usdc": None,
+                "scored": False,
+            },
+        )
+        bucket["evaluated"] += 1
+        if _candidate_passed(record):
+            bucket["passed"] += 1
+        if record.get("candidate_only"):
+            bucket["candidate_only"] += 1
+        if record.get("same_side_overlap"):
+            bucket["same_side_overlap"] += 1
+        if record.get("live_signal_filtered"):
+            bucket["live_signal_filtered"] += 1
+    scored_daily = _scored_daily_by_candidate(scored_by_candidate)
+    for bucket in buckets.values():
+        if bucket["evaluated"]:
+            bucket["pass_rate"] = round(bucket["passed"] / bucket["evaluated"], 4)
+        scored_row = scored_daily.get(bucket["candidate_id"], {}).get(bucket["bucket"])
+        if isinstance(scored_row, dict):
+            bucket["wins"] = scored_row.get("wins")
+            bucket["losses"] = scored_row.get("losses")
+            bucket["win_rate"] = scored_row.get("win_rate")
+            bucket["pnl_usdc"] = scored_row.get("pnl_usdc", scored_row.get("total_pnl"))
+            bucket["scored"] = True
+    return sorted(buckets.values(), key=lambda row: (row["bucket"], row["candidate_id"]))
+
+
+def _summarize_strategy_candidate(candidate_spec, records, *, now_dt, scored_by_candidate):
+    candidate_id = candidate_spec["candidate_id"]
+    candidate_records = [
+        record for record in records
+        if isinstance(record, dict) and str(record.get("candidate_id") or "") == candidate_id
+    ]
+    passed_records = [record for record in candidate_records if _candidate_passed(record)]
+    long_count = sum(1 for record in passed_records if _candidate_side(record) == "LONG")
+    short_count = sum(1 for record in passed_records if _candidate_side(record) == "SHORT")
+    timestamps = [_strategy_record_ts(record) for record in candidate_records]
+    latest_at, latest_age_seconds = _latest_timestamp_summary(timestamps, now_dt)
+    passed = len(passed_records)
+    evaluated = len(candidate_records)
+    scored = scored_by_candidate.get(candidate_id)
+    return {
+        "candidate_id": candidate_id,
+        "label": candidate_spec["label"],
+        "config_path": candidate_spec["config_path"],
+        "evaluated": evaluated,
+        "passed": passed,
+        "hold": max(0, evaluated - passed),
+        "pass_rate": round(passed / evaluated, 4) if evaluated else 0.0,
+        "long": long_count,
+        "short": short_count,
+        "candidate_only": sum(1 for record in candidate_records if record.get("candidate_only")),
+        "same_side_overlap": sum(1 for record in candidate_records if record.get("same_side_overlap")),
+        "live_signal_filtered": sum(1 for record in candidate_records if record.get("live_signal_filtered")),
+        "latest_signal_at": latest_at,
+        "latest_signal_age_seconds": latest_age_seconds,
+        "minimum_ready": passed >= STRATEGY_COMPARE_MIN_PASSED,
+        "preferred_ready": passed >= STRATEGY_COMPARE_PREFERRED_PASSED,
+        "minimum_passed_signal_target": STRATEGY_COMPARE_MIN_PASSED,
+        "preferred_passed_signal_target": STRATEGY_COMPARE_PREFERRED_PASSED,
+        "scoring_status": "scored" if isinstance(scored, dict) else "pending_official_scoring",
+        "scored": scored if isinstance(scored, dict) else None,
+    }
+
+
+def _strategy_live_prediction_summary(now_dt):
+    records = [
+        record for record in _tail_jsonl(_live_formal_prediction_history_path(), limit=5000)
+        if isinstance(record, dict)
+    ]
+    timestamps = [_strategy_record_ts(record) for record in records]
+    latest_at, latest_age_seconds = _latest_timestamp_summary(timestamps, now_dt)
+    would_place = sum(1 for record in records if bool(record.get("would_place_order")))
+    submitted = sum(1 for record in records if bool(record.get("submitted")))
+    sync = _live_order_sync_summary()
+    return {
+        "strategy_id": "round2_current_formal",
+        "label": "Round2 Current Live Baseline",
+        "params_path": "data/config/aligned_prod_current_next_chainlink_round2_drawdown_density_live_params.json",
+        "prediction_rows": len(records),
+        "would_place": would_place,
+        "submitted": submitted,
+        "pass_rate": round(would_place / len(records), 4) if records else 0.0,
+        "latest_prediction_at": latest_at,
+        "latest_prediction_age_seconds": latest_age_seconds,
+        "order_sync_ok": bool(sync.get("ok")),
+        "order_sync_fresh": bool(sync.get("fresh")),
+        "order_sync_age_seconds": sync.get("age_seconds"),
+        "notes": ["preview/no-submit mode"] if submitted == 0 else ["real submitted rows detected"],
+    }
+
+
+def _strategy_recent_signal(record):
+    candidate = record.get("candidate") if isinstance(record.get("candidate"), dict) else {}
+    return {
+        "created_at": record.get("created_at"),
+        "entry_ts": record.get("entry_ts"),
+        "settle_ts": record.get("settle_ts"),
+        "market_slug": record.get("market_slug"),
+        "candidate_id": record.get("candidate_id"),
+        "submitted": bool(record.get("submitted")),
+        "no_submit": bool(record.get("no_submit")),
+        "passed": bool(candidate.get("passed")),
+        "side": candidate.get("side"),
+        "action": candidate.get("action"),
+        "same_side_overlap": bool(record.get("same_side_overlap")),
+        "candidate_only": bool(record.get("candidate_only")),
+        "live_signal_filtered": bool(record.get("live_signal_filtered")),
+        "p5_up": record.get("p5_up"),
+        "p1_up": record.get("p1_up"),
+        "p4_up": record.get("p4_up"),
+        "reason_code": candidate.get("reason_code"),
+    }
+
+
+def _strategy_comparison_payload(*, now=None, args=None):
+    now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+    filters = _strategy_compare_filters(args or {})
+    signals_path = _candidate_no_submit_official_truth_signals_path()
+    latest_path = _candidate_no_submit_official_truth_latest_path()
+    daily_summary_path = _candidate_no_submit_official_truth_daily_summary_path()
+    scored_path = _candidate_no_submit_official_truth_scored_summary_path()
+    records = [
+        record for record in _tail_jsonl(signals_path, limit=20000)
+        if isinstance(record, dict) and record.get("type") == "candidate_no_submit_signal"
+    ]
+    warnings = []
+    if not signals_path.exists():
+        warnings.append("candidate_no_submit_official_truth_signals.jsonl missing")
+    if not latest_path.exists():
+        warnings.append("candidate_no_submit_official_truth_latest.json missing")
+    timestamps = [_strategy_record_ts(record) for record in records]
+    first_signal = min((ts for ts in timestamps if ts is not None), default=None)
+    latest_signal_at, latest_signal_age_seconds = _latest_timestamp_summary(timestamps, now_dt)
+    latest_signal = _parse_dt(latest_signal_at) if latest_signal_at else None
+    collection_days = 0.0
+    if first_signal is not None and latest_signal is not None:
+        collection_days = round(max(0.0, (latest_signal - first_signal).total_seconds() / 86400.0), 4)
+    scored_by_candidate = _strategy_scored_summary_by_candidate(scored_path)
+    candidates = [
+        _summarize_strategy_candidate(spec, records, now_dt=now_dt, scored_by_candidate=scored_by_candidate)
+        for spec in STRATEGY_COMPARE_CANDIDATES
+    ]
+    min_passed = min((row["passed"] for row in candidates), default=0)
+    recent_records = sorted(
+        records,
+        key=lambda record: _strategy_record_ts(record) or datetime.min.replace(tzinfo=timezone.utc),
+        reverse=True,
+    )[:50]
+    return {
+        "generated_at": _iso_utc(now_dt),
+        "ok": bool(records) and not warnings,
+        "warnings": warnings,
+        "collection": {
+            "signals_path": signals_path.as_posix(),
+            "latest_path": latest_path.as_posix(),
+            "daily_summary_path": daily_summary_path.as_posix(),
+            "scored_summary_path": scored_path.as_posix(),
+            "signals_file_exists": signals_path.exists(),
+            "latest_file_exists": latest_path.exists(),
+            "daily_summary_exists": daily_summary_path.exists(),
+            "scored_summary_exists": scored_path.exists(),
+            "first_signal_at": _iso_utc(first_signal),
+            "latest_signal_at": latest_signal_at,
+            "latest_signal_age_seconds": latest_signal_age_seconds,
+            "collection_days": collection_days,
+            "minimum_days_target": STRATEGY_COMPARE_MIN_DAYS,
+            "preferred_days_target": STRATEGY_COMPARE_PREFERRED_DAYS,
+            "minimum_passed_signal_target": STRATEGY_COMPARE_MIN_PASSED,
+            "preferred_passed_signal_target": STRATEGY_COMPARE_PREFERRED_PASSED,
+            "minimum_ready": collection_days >= STRATEGY_COMPARE_MIN_DAYS and min_passed >= STRATEGY_COMPARE_MIN_PASSED,
+            "preferred_ready": collection_days >= STRATEGY_COMPARE_PREFERRED_DAYS and min_passed >= STRATEGY_COMPARE_PREFERRED_PASSED,
+        },
+        "live": _strategy_live_prediction_summary(now_dt),
+        "candidates": candidates,
+        "filters": filters,
+        "timeseries": _strategy_timeseries(records, now_dt=now_dt, filters=filters, scored_by_candidate=scored_by_candidate),
+        "recent_signals": [_strategy_recent_signal(record) for record in recent_records],
     }
 
 
@@ -6216,6 +6567,11 @@ def api_btc_klines():
 # ---------------------------------------------------------------------------
 # Compare
 # ---------------------------------------------------------------------------
+
+@app.route("/api/strategy-comparison")
+def api_strategy_comparison():
+    return jsonify(_strategy_comparison_payload(args=request.args))
+
 
 @app.route("/api/compare")
 def api_compare():
