@@ -4363,21 +4363,23 @@ def test_live_formal_process_shows_total_and_child_runtime():
     assert '<HealthTile label="Child Started"' in source
 
 
-def test_app_keeps_top_nav_to_live_analytics_and_research():
+def test_app_keeps_top_nav_to_live_analytics_strategies_and_research():
     source = Path("web/src/App.tsx").read_text(encoding="utf-8")
 
     assert 'import Live, { type TradingTab } from "./pages/Live";' in source
     assert 'import Analytics from "./pages/Analytics";' in source
-    assert 'type Tab = "live" | "analytics" | "research";' in source
+    assert 'import Compare from "./pages/Compare";' in source
+    assert 'type Tab = "live" | "analytics" | "strategies" | "research";' in source
     assert '["live", "Live", Activity]' in source
     assert '["analytics", "Analytics", PieChart]' in source
+    assert '["strategies", "Strategies", GitCompareArrows]' in source
     assert '["research", "Research", BarChart3]' in source
     assert '["live-real", "Live Real", Activity]' not in source
     assert '["paper-monitor", "Paper Monitor", Activity]' not in source
-    assert "Compare" not in source
     assert "setActiveTradingTab" in source
     assert "<Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab}" in source
     assert 'tab === "analytics" && <Analytics />' in source
+    assert 'tab === "strategies" && <Compare />' in source
 
 
 def test_analytics_page_surfaces_trade_performance_sections():
