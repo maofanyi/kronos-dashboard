@@ -176,3 +176,72 @@ def test_strategy_comparison_uses_scored_summary_for_pnl_chart(monkeypatch, tmp_
     assert series[0]["losses"] == 9
     assert series[0]["win_rate"] == 0.55
     assert series[0]["scored"] is True
+
+
+def test_strategy_comparison_uses_hourly_scored_summary_when_bucket_is_hour(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="LONG",
+                created_at="2026-07-02T00:02:00Z",
+            )
+        ],
+    )
+    _write_json(
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json",
+        {
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "total_pnl": 2.55,
+                    "win_rate": 1.0,
+                    "daily": [
+                        {
+                            "bucket": "2026-07-02",
+                            "pnl_usdc": 2.55,
+                            "wins": 1,
+                            "losses": 0,
+                            "win_rate": 1.0,
+                        }
+                    ],
+                    "hourly": [
+                        {
+                            "bucket": "2026-07-02T00:00:00Z",
+                            "pnl_usdc": 2.55,
+                            "wins": 1,
+                            "losses": 0,
+                            "win_rate": 1.0,
+                        }
+                    ],
+                }
+            ]
+        },
+    )
+
+    with server.app.test_client() as client:
+        payload = client.get("/api/strategy-comparison?metric=pnl&bucket=hour&window=24h").get_json()
+
+    series = [
+        row for row in payload["timeseries"]
+        if row["candidate_id"] == "official_truth_14d14d_latest"
+    ]
+    assert series[0]["bucket"] == "2026-07-02T00:00:00Z"
+    assert series[0]["pnl_usdc"] == 2.55
+    assert series[0]["wins"] == 1
+    assert series[0]["losses"] == 0
+    assert series[0]["win_rate"] == 1.0
+    assert series[0]["scored"] is True

@@ -2970,10 +2970,11 @@ def _strategy_bucket_key(ts, bucket):
     return ts.date().isoformat()
 
 
-def _scored_daily_by_candidate(scored_by_candidate):
+def _scored_buckets_by_candidate(scored_by_candidate, bucket="day"):
     out = {}
     for candidate_id, scored in scored_by_candidate.items():
-        rows = scored.get("daily") if isinstance(scored, dict) and isinstance(scored.get("daily"), list) else []
+        key = "hourly" if bucket == "hour" else "daily"
+        rows = scored.get(key) if isinstance(scored, dict) and isinstance(scored.get(key), list) else []
         out[candidate_id] = {
             str(row.get("bucket") or row.get("date") or ""): row
             for row in rows
@@ -3024,7 +3025,7 @@ def _strategy_timeseries(records, *, now_dt, filters, scored_by_candidate):
             bucket["same_side_overlap"] += 1
         if record.get("live_signal_filtered"):
             bucket["live_signal_filtered"] += 1
-    scored_daily = _scored_daily_by_candidate(scored_by_candidate)
+    scored_daily = _scored_buckets_by_candidate(scored_by_candidate, filters["bucket"])
     for bucket in buckets.values():
         if bucket["evaluated"]:
             bucket["pass_rate"] = round(bucket["passed"] / bucket["evaluated"], 4)
