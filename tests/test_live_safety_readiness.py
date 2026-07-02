@@ -825,6 +825,106 @@ def test_live_real_prefers_formal_current_next_limits_and_runtime(monkeypatch, t
     assert live_real["formal"]["latest_action"] == "HOLD"
     assert live_real["formal"]["latest_reason"] == "no_side_passed"
 
+def test_live_real_risk_limits_follow_supervisor_controls_without_explicit_override(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    log_dir = tmp_path / "data" / "logs"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    log_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_LOG_DIR", log_dir)
+    monkeypatch.setattr(
+        server,
+        "RISK_LIMITS",
+        {
+            "max_daily_loss_usdc": 30.0,
+            "max_daily_trades": 20,
+            "max_consecutive_losses": 3,
+            "max_open_or_pending_orders": 1,
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {
+            "running": "run_prediction_bound_live_formal_supervisor.ps1" in patterns,
+            "matches": [],
+            "started_at": None,
+            "uptime_seconds": None,
+        },
+    )
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    (log_dir / "prediction_bound_live_formal_supervisor_latest.log").write_text(
+        "2026-06-30T21:51:28+08:00 formal_live_supervisor started "
+        "max_daily_loss=120 max_daily_trades=200 max_consecutive_losses=12 "
+        "max_open_or_pending=1 max_smoke_drawdown=0 "
+        "same_direction_loss_cooldown_count=8 same_direction_loss_cooldown_minutes=30",
+        encoding="utf-8",
+    )
+
+    live_real = server._live_real_summary()
+
+    assert live_real["risk_controls"]["summary"]["max_daily_loss_usdc"] == 120.0
+    assert live_real["risk_controls"]["summary"]["max_consecutive_losses"] == 12
+    assert live_real["risk"]["limits"]["max_daily_loss_usdc"] == 120.0
+    assert live_real["risk"]["limits"]["max_daily_trades"] == 200
+    assert live_real["risk"]["limits"]["max_consecutive_losses"] == 12
+
+
+def test_live_real_uses_live_formal_risk_config_when_supervisor_stopped(monkeypatch, tmp_path):
+    checkpoint_dir = tmp_path / "data" / "checkpoints"
+    report_dir = tmp_path / "data" / "reports"
+    config_dir = tmp_path / "data" / "config"
+    checkpoint_dir.mkdir(parents=True)
+    report_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(
+        server,
+        "RISK_LIMITS",
+        {
+            "max_daily_loss_usdc": 30.0,
+            "max_daily_trades": 20,
+            "max_consecutive_losses": 3,
+            "max_open_or_pending_orders": 1,
+        },
+    )
+    monkeypatch.setattr(
+        server,
+        "_process_summary",
+        lambda patterns: {
+            "running": False,
+            "matches": [],
+            "started_at": None,
+            "uptime_seconds": None,
+        },
+    )
+    _write_json(checkpoint_dir / "live_real_orders_current_next.json", [])
+    _write_json(
+        config_dir / "live_formal_risk_limits.json",
+        {
+            "max_daily_loss_usdc": 120,
+            "max_daily_trades": 200,
+            "max_consecutive_losses": 12,
+            "max_open_or_pending_orders": 1,
+            "max_smoke_drawdown_usdc": 0,
+            "same_direction_loss_cooldown_count": 8,
+            "same_direction_loss_cooldown_minutes": 30,
+        },
+    )
+
+    live_real = server._live_real_summary()
+
+    assert live_real["risk_controls"]["summary"]["max_daily_loss_usdc"] == 120
+    assert live_real["risk_controls"]["summary"]["max_consecutive_losses"] == 12
+    assert live_real["risk"]["limits"]["max_daily_loss_usdc"] == 120.0
+    assert live_real["risk"]["limits"]["max_daily_trades"] == 200
+    assert live_real["risk"]["limits"]["max_consecutive_losses"] == 12
+
 
 def test_live_real_direct_profile_limits_override_stale_supervisor_log(monkeypatch, tmp_path):
     checkpoint_dir = tmp_path / "data" / "checkpoints"

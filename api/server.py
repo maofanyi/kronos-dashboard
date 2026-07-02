@@ -3531,25 +3531,6 @@ def _live_formal_risk_limits(fallback=None):
     limits = dict(RISK_LIMITS)
     if isinstance(fallback, dict):
         limits.update({key: fallback[key] for key in limits if key in fallback})
-    formal_path, _ = _live_formal_report()
-    if not formal_path.exists():
-        return limits
-    formal_report = _read_json(formal_path) or {}
-    contract = _live_restart_contract()
-    contract_mapping = {
-        "max_daily_loss_usdc": "max_daily_loss_usdc",
-        "max_daily_trades": "max_daily_trades",
-        "max_consecutive_losses": "max_consecutive_losses",
-        "max_open_or_pending_orders": "max_open_or_pending_orders",
-    }
-    for source_key, target_key in contract_mapping.items():
-        if source_key in contract:
-            limits[target_key] = contract[source_key]
-    effective = (
-        formal_report.get("effective_trade_config")
-        if isinstance(formal_report.get("effective_trade_config"), dict)
-        else {}
-    )
     effective_keys = (
         "order_size_shares",
         "min_price",
@@ -3567,9 +3548,32 @@ def _live_formal_risk_limits(fallback=None):
         "reference_price_source",
         "execution_market_shift",
     )
-    for key in effective_keys:
-        if key in effective and effective.get(key) is not None:
-            limits[key] = effective[key]
+    risk_config = _read_json(KRONOS_CONFIG_DIR / "live_formal_risk_limits.json") or {}
+    if isinstance(risk_config, dict):
+        for key in effective_keys:
+            if key in risk_config and risk_config.get(key) is not None:
+                limits[key] = risk_config[key]
+    formal_path, _ = _live_formal_report()
+    if formal_path.exists():
+        formal_report = _read_json(formal_path) or {}
+        contract = _live_restart_contract()
+        contract_mapping = {
+            "max_daily_loss_usdc": "max_daily_loss_usdc",
+            "max_daily_trades": "max_daily_trades",
+            "max_consecutive_losses": "max_consecutive_losses",
+            "max_open_or_pending_orders": "max_open_or_pending_orders",
+        }
+        for source_key, target_key in contract_mapping.items():
+            if source_key in contract:
+                limits[target_key] = contract[source_key]
+        effective = (
+            formal_report.get("effective_trade_config")
+            if isinstance(formal_report.get("effective_trade_config"), dict)
+            else {}
+        )
+        for key in effective_keys:
+            if key in effective and effective.get(key) is not None:
+                limits[key] = effective[key]
     limits.update(_extract_formal_supervisor_limits())
     return limits
 
@@ -3580,11 +3584,20 @@ def _live_real_summary(limits_override=None, current_balance=None):
     formal = _live_formal_summary()
     _, formal_report = _live_formal_report()
     risk_controls = _live_risk_controls(formal_report, limits_override=limits_override)
+    risk_limits_override = dict(limits_override) if isinstance(limits_override, dict) else {}
+    control_summary = (
+        risk_controls.get("summary")
+        if isinstance(risk_controls.get("summary"), dict)
+        else {}
+    )
+    for key in RISK_LIMITS:
+        if control_summary.get(key) is not None:
+            risk_limits_override[key] = control_summary.get(key)
     risk_resilience = _risk_resilience_summary_from_records(records, controls=risk_controls)
     risk = _attach_risk_resilience(_risk_summary_from_records(
         records,
         inputs={"ledger": str(ledger_path), "record_count": len(records)},
-        limits_override=limits_override,
+        limits_override=risk_limits_override,
     ), risk_resilience)
     soak = _live_soak_summary()
     runtime = _live_process_runtime(
