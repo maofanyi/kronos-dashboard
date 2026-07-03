@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 from api import server
@@ -129,6 +130,38 @@ def test_strategy_comparison_reports_missing_no_submit_file(monkeypatch, tmp_pat
     assert payload["timeseries"] == []
 
 
+def test_strategy_comparison_limits_recent_signals(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    rows = [
+        _candidate_record(
+            "official_truth_14d14d_latest",
+            passed=True,
+            side="LONG",
+            created_at=f"2026-07-02T00:{minute:02d}:00Z",
+        )
+        for minute in range(12)
+    ]
+    _append_jsonl(report_dir / "candidate_no_submit_official_truth_signals.jsonl", rows)
+    _write_json(report_dir / "candidate_no_submit_official_truth_latest.json", {"ok": True, "total_records": len(rows)})
+
+    with server.app.test_client() as client:
+        payload = client.get("/api/strategy-comparison").get_json()
+
+    assert len(payload["recent_signals"]) == 10
+    assert payload["recent_signals"][0]["created_at"] == "2026-07-02T00:11:00Z"
+    assert payload["recent_signals"][-1]["created_at"] == "2026-07-02T00:02:00Z"
+
+
 def test_strategy_comparison_uses_scored_summary_for_pnl_chart(monkeypatch, tmp_path):
     report_dir = tmp_path / "reports"
     checkpoint_dir = tmp_path / "checkpoints"
@@ -176,6 +209,129 @@ def test_strategy_comparison_uses_scored_summary_for_pnl_chart(monkeypatch, tmp_
     assert series[0]["losses"] == 9
     assert series[0]["win_rate"] == 0.55
     assert series[0]["scored"] is True
+
+
+def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record("official_truth_14d14d_latest", passed=True, side="LONG", created_at="2026-07-02T00:00:00Z"),
+            _candidate_record("official_truth_14d14d_latest", passed=True, side="SHORT", created_at="2026-07-02T00:05:00Z"),
+        ],
+    )
+    _write_json(report_dir / "candidate_no_submit_official_truth_latest.json", {"ok": True, "total_records": 2})
+    _write_json(
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json",
+        {
+            "default_maker_price": 0.49,
+            "size_shares": 5.0,
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "trades": [
+                        {
+                            "entry_ts": "2026-07-02T00:05:00Z",
+                            "settle_ts": "2026-07-02T00:10:00Z",
+                            "side": "LONG",
+                            "won": True,
+                            "pnl_usdc": 2.55,
+                            "maker_price": 0.49,
+                            "size_shares": 5.0,
+                        },
+                        {
+                            "entry_ts": "2026-07-02T00:05:00Z",
+                            "settle_ts": "2026-07-02T00:10:00Z",
+                            "side": "LONG",
+                            "won": True,
+                            "pnl_usdc": 2.55,
+                            "maker_price": 0.49,
+                            "size_shares": 5.0,
+                        },
+                        {
+                            "entry_ts": "2026-07-02T00:10:00Z",
+                            "settle_ts": "2026-07-02T00:15:00Z",
+                            "side": "SHORT",
+                            "won": False,
+                            "pnl_usdc": -2.45,
+                            "maker_price": 0.49,
+                            "size_shares": 5.0,
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "status": "SETTLED",
+                "entry_ts": "2026-07-02T00:05:00Z",
+                "settle_ts": "2026-07-02T00:10:00Z",
+                "side": "LONG",
+                "won": True,
+                "fill_size": 10.0,
+                "average_fill_price": 0.5,
+                "reference_price_source": "chainlink_datastreams_pending",
+            },
+            {
+                "status": "SETTLED",
+                "entry_ts": "2026-07-02T00:15:00Z",
+                "settle_ts": "2026-07-02T00:20:00Z",
+                "side": "SHORT",
+                "won": False,
+                "fill_size": 10.0,
+                "average_fill_price": 0.51,
+                "reference_price_source": "chainlink_datastreams_pending",
+            },
+            {
+                "status": "SETTLED",
+                "entry_ts": "2026-07-02T00:20:00Z",
+                "settle_ts": "2026-07-02T00:25:00Z",
+                "side": "LONG",
+                "won": True,
+                "fill_size": 10.0,
+                "average_fill_price": 0.49,
+                "reference_price_source": "binance_kline",
+            },
+        ],
+    )
+
+    with server.app.test_client() as client:
+        payload = client.get("/api/strategy-comparison?window=all").get_json()
+
+    live_matched = payload["live_matched"]
+    assert live_matched["available"] is True
+    by_id = {row["candidate_id"]: row for row in live_matched["candidates"]}
+    official = by_id["official_truth_14d14d_latest"]
+    assert official["overlap_count"] == 1
+    assert official["live_only_count"] == 1
+    assert official["scored_only_count"] == 1
+    assert official["won_mismatches"] == 0
+    assert official["all_live"]["settled"] == 2
+    assert official["all_scored"]["settled"] == 2
+    assert official["overlap"]["live_actual_pnl"] == 5.0
+    assert official["overlap"]["live_normalized_pnl"] == 2.55
+    assert official["overlap"]["scored_pnl"] == 2.55
+    assert official["live_only"]["live_actual_pnl"] == -5.1
+    assert official["live_only"]["live_normalized_pnl"] == -2.45
+    assert official["scored_only"]["scored_pnl"] == -2.45
+    window_by_id = {row["candidate_id"]: row for row in payload["window_candidates"]}
+    assert window_by_id["official_truth_14d14d_latest"]["wins"] == 1
+    assert window_by_id["official_truth_14d14d_latest"]["losses"] == 1
+    assert window_by_id["official_truth_14d14d_latest"]["win_rate"] == 0.5
+    assert window_by_id["official_truth_14d14d_latest"]["pnl_usdc"] == 0.1
 
 
 def test_strategy_comparison_uses_hourly_scored_summary_when_bucket_is_hour(monkeypatch, tmp_path):
@@ -232,8 +388,10 @@ def test_strategy_comparison_uses_hourly_scored_summary_when_bucket_is_hour(monk
         },
     )
 
-    with server.app.test_client() as client:
-        payload = client.get("/api/strategy-comparison?metric=pnl&bucket=hour&window=24h").get_json()
+    payload = server._strategy_comparison_payload(
+        now=datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc),
+        args={"metric": "pnl", "bucket": "hour", "window": "24h"},
+    )
 
     series = [
         row for row in payload["timeseries"]
@@ -245,3 +403,121 @@ def test_strategy_comparison_uses_hourly_scored_summary_when_bucket_is_hour(monk
     assert series[0]["losses"] == 0
     assert series[0]["win_rate"] == 1.0
     assert series[0]["scored"] is True
+
+
+def test_strategy_comparison_exposes_window_scoped_candidate_summary(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="LONG",
+                created_at="2026-06-29T00:02:00Z",
+            ),
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="SHORT",
+                created_at="2026-07-02T00:02:00Z",
+            ),
+        ],
+    )
+    _write_json(
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json",
+        {
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "total_pnl": -7.5,
+                    "win_rate": 0.5,
+                    "daily": [
+                        {
+                            "bucket": "2026-06-29",
+                            "pnl_usdc": -10.0,
+                            "wins": 0,
+                            "losses": 1,
+                            "win_rate": 0.0,
+                        },
+                        {
+                            "bucket": "2026-07-02",
+                            "pnl_usdc": 2.5,
+                            "wins": 1,
+                            "losses": 0,
+                            "win_rate": 1.0,
+                        },
+                    ],
+                }
+            ]
+        },
+    )
+
+    payload = server._strategy_comparison_payload(
+        now=datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc),
+        args={"window": "24h", "bucket": "day", "metric": "pnl"},
+    )
+
+    all_by_id = {row["candidate_id"]: row for row in payload["candidates"]}
+    window_by_id = {row["candidate_id"]: row for row in payload["window_candidates"]}
+    assert all_by_id["official_truth_14d14d_latest"]["evaluated"] == 2
+    assert window_by_id["official_truth_14d14d_latest"]["evaluated"] == 1
+    assert window_by_id["official_truth_14d14d_latest"]["passed"] == 1
+    assert window_by_id["official_truth_14d14d_latest"]["pnl_usdc"] == 2.5
+    assert window_by_id["official_truth_14d14d_latest"]["wins"] == 1
+    assert window_by_id["official_truth_14d14d_latest"]["losses"] == 0
+    assert window_by_id["official_truth_14d14d_latest"]["win_rate"] == 1.0
+    assert payload["window_coverage"]["partial"] is False
+
+
+def test_strategy_comparison_marks_partial_window_coverage(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="LONG",
+                created_at="2026-07-02T00:02:00Z",
+            ),
+        ],
+    )
+
+    payload = server._strategy_comparison_payload(
+        now=datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc),
+        args={"window": "7d", "bucket": "day", "metric": "signals"},
+    )
+
+    assert payload["window_coverage"]["partial"] is True
+    assert payload["window_coverage"]["covered_days"] == 0.5
+    assert any("selected 7d window only has 0.50d" in item for item in payload["warnings"])
+
+
+def test_strategy_compare_frontend_uses_window_scoped_rows():
+    source = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
+
+    assert "const windowCandidates = data?.window_candidates ?? candidates;" in source
+    assert "const tableCandidates = windowCandidates" in source
+    assert "{tableCandidates.map((row) => (" in source
+    assert "row.pnl_usdc" in source

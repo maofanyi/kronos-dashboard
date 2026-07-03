@@ -376,7 +376,7 @@ const LIVE_MODE_NON_OPERATIONAL_CHECKS = new Set([
 export default function StatusBar() {
   const [open, setOpen] = useState(false);
   const { data, error } = usePolling<StatusData>("/api/status", 5000);
-  const { data: safety } = usePolling<SafetyData>("/api/live-safety", 5000);
+  const { data: safety } = usePolling<SafetyData>("/api/live-safety", 30000);
   const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=80", 5000);
   const now = new Date();
   const cooling = (data?.cooldown_left ?? 0) > 0;

@@ -2472,7 +2472,7 @@ export default function Live({
   const { data: events } = usePolling<EventItem[]>(`/api/events?source=${eventSource}&limit=80`, 5000);
   const { data: trades } = usePolling<TradeItem[]>("/api/trades?limit=200", 5000);
   const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=260", 5000);
-  const { data: safety } = usePolling<LiveSafety>("/api/live-safety", 5000);
+  const { data: safety } = usePolling<LiveSafety>("/api/live-safety", 30000);
   const { data: signalStats } = usePolling<SignalStats>(`/api/signal-stats?source=${eventSource}`, 10000);
   const liveReal = safety?.live_real;
   const paperMonitor = safety?.paper_monitor;

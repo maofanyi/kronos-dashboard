@@ -31,6 +31,8 @@ BTC_LIVE_LOCK = threading.Lock()
 BTC_LIVE_WORKER = {"started": False, "thread": None}
 BTC_CANDLE_CACHE = {}
 BTC_CANDLE_LOCK = threading.Lock()
+_DASHBOARD_RESPONSE_CACHE = {}
+_DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
 KRONOS_CHECKPOINT_DIR = Path(os.environ.get("KRONOS_DATA_DIR", "../Kronos/data/checkpoints"))
 KRONOS_LOG_DIR = KRONOS_CHECKPOINT_DIR.parent / "logs"
 KRONOS_FEATURE_DIR = KRONOS_CHECKPOINT_DIR.parent / "features"
@@ -62,6 +64,27 @@ CLOB_ENV_KEYS = {
 BTC_LIVE_MAX_PRICE_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_PRICE_AGE_SECONDS", "15"))
 BTC_LIVE_MAX_RECEIVED_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_RECEIVED_AGE_SECONDS", "30"))
 DASHBOARD_TRADING_DAY_TZ_DEFAULT = "Asia/Shanghai"
+
+
+def _dashboard_cache_seconds(env_name: str, default_seconds: float) -> float:
+    try:
+        return max(0.0, float(os.environ.get(env_name, str(default_seconds))))
+    except (TypeError, ValueError):
+        return default_seconds
+
+
+def _cached_dashboard_payload(cache_key, ttl_seconds: float, factory):
+    if ttl_seconds <= 0:
+        return factory()
+    now = time.time()
+    with _DASHBOARD_RESPONSE_CACHE_LOCK:
+        cached = _DASHBOARD_RESPONSE_CACHE.get(cache_key)
+        if cached and now - cached["ts"] <= ttl_seconds:
+            return cached["payload"]
+    payload = factory()
+    with _DASHBOARD_RESPONSE_CACHE_LOCK:
+        _DASHBOARD_RESPONSE_CACHE[cache_key] = {"ts": now, "payload": payload}
+    return payload
 
 
 def _configured_paper_source():
@@ -2915,9 +2938,14 @@ def _candidate_side(record):
     return side if side in {"LONG", "SHORT"} else ""
 
 
-def _strategy_scored_summary_by_candidate(path=None):
+def _strategy_scored_summary_payload(path=None):
     path = path or _candidate_no_submit_official_truth_scored_summary_path()
     payload = _read_json(path) or {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _strategy_scored_summary_by_candidate(path=None):
+    payload = _strategy_scored_summary_payload(path)
     rows = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
     return {
         str(row.get("candidate_id") or ""): row
@@ -2963,6 +2991,24 @@ def _strategy_window_start(now_dt, window):
     return None
 
 
+def _strategy_records_for_filters(records, *, now_dt, filters):
+    start = _strategy_window_start(now_dt, filters["window"])
+    selected = set(filters["candidates"])
+    selected_records = []
+    for record in records:
+        candidate_id = str(record.get("candidate_id") or "")
+        if candidate_id not in selected:
+            continue
+        ts = _strategy_record_ts(record)
+        if ts is None:
+            continue
+        ts = ts.astimezone(timezone.utc)
+        if start is not None and ts < start:
+            continue
+        selected_records.append(record)
+    return selected_records
+
+
 def _strategy_bucket_key(ts, bucket):
     ts = ts.astimezone(timezone.utc)
     if bucket == "hour":
@@ -2970,9 +3016,55 @@ def _strategy_bucket_key(ts, bucket):
     return ts.date().isoformat()
 
 
+def _scored_trade_buckets(scored, bucket="day"):
+    trades = scored.get("trades") if isinstance(scored, dict) and isinstance(scored.get("trades"), list) else []
+    if not trades:
+        return {}
+    grouped = _strategy_group_records_by_trade_key(trades, keep="first")
+    buckets = {}
+    for rows in grouped.values():
+        if not rows:
+            continue
+        trade = rows[0]
+        ts = _strategy_trade_entry_ts(trade)
+        if ts is None:
+            continue
+        bucket_key = _strategy_bucket_key(ts, bucket)
+        row = buckets.setdefault(
+            bucket_key,
+            {
+                "bucket": bucket_key,
+                "settled": 0,
+                "wins": 0,
+                "losses": 0,
+                "win_rate": None,
+                "pnl_usdc": 0.0,
+            },
+        )
+        row["settled"] += 1
+        won = _record_won(trade)
+        if won is True:
+            row["wins"] += 1
+        elif won is False:
+            row["losses"] += 1
+        row["pnl_usdc"] += _strategy_scored_pnl(
+            trade,
+            default_size_shares=_float_value(trade, "size_shares", "order_size_shares", "size") or 5.0,
+            default_maker_price=_float_value(trade, "maker_price", "price", "limit_price") or 0.49,
+        )
+    for row in buckets.values():
+        row["pnl_usdc"] = round(float(row["pnl_usdc"]), 6)
+        row["win_rate"] = round(row["wins"] / row["settled"], 4) if row["settled"] else None
+    return buckets
+
+
 def _scored_buckets_by_candidate(scored_by_candidate, bucket="day"):
     out = {}
     for candidate_id, scored in scored_by_candidate.items():
+        trade_buckets = _scored_trade_buckets(scored, bucket)
+        if trade_buckets:
+            out[candidate_id] = trade_buckets
+            continue
         key = "hourly" if bucket == "hour" else "daily"
         rows = scored.get(key) if isinstance(scored, dict) and isinstance(scored.get(key), list) else []
         out[candidate_id] = {
@@ -2984,19 +3076,13 @@ def _scored_buckets_by_candidate(scored_by_candidate, bucket="day"):
 
 
 def _strategy_timeseries(records, *, now_dt, filters, scored_by_candidate):
-    start = _strategy_window_start(now_dt, filters["window"])
-    selected = set(filters["candidates"])
     buckets = {}
-    for record in records:
+    for record in _strategy_records_for_filters(records, now_dt=now_dt, filters=filters):
         candidate_id = str(record.get("candidate_id") or "")
-        if candidate_id not in selected:
-            continue
         ts = _strategy_record_ts(record)
         if ts is None:
             continue
         ts = ts.astimezone(timezone.utc)
-        if start is not None and ts < start:
-            continue
         key = (candidate_id, _strategy_bucket_key(ts, filters["bucket"]))
         bucket = buckets.setdefault(
             key,
@@ -3037,6 +3123,88 @@ def _strategy_timeseries(records, *, now_dt, filters, scored_by_candidate):
             bucket["pnl_usdc"] = scored_row.get("pnl_usdc", scored_row.get("total_pnl"))
             bucket["scored"] = True
     return sorted(buckets.values(), key=lambda row: (row["bucket"], row["candidate_id"]))
+
+
+def _strategy_window_scores(timeseries):
+    scores = {}
+    for row in timeseries:
+        if not row.get("scored"):
+            continue
+        candidate_id = str(row.get("candidate_id") or "")
+        if not candidate_id:
+            continue
+        score = scores.setdefault(
+            candidate_id,
+            {"wins": 0, "losses": 0, "pnl_usdc": 0.0, "pnl_seen": False, "scored": False},
+        )
+        wins = _num(row.get("wins"))
+        losses = _num(row.get("losses"))
+        pnl = _num(row.get("pnl_usdc"))
+        if wins is not None:
+            score["wins"] += int(wins)
+            score["scored"] = True
+        if losses is not None:
+            score["losses"] += int(losses)
+            score["scored"] = True
+        if pnl is not None:
+            score["pnl_usdc"] += float(pnl)
+            score["pnl_seen"] = True
+            score["scored"] = True
+    for score in scores.values():
+        settled = score["wins"] + score["losses"]
+        score["win_rate"] = round(score["wins"] / settled, 4) if settled else None
+        score["pnl_usdc"] = round(score["pnl_usdc"], 6) if score["pnl_seen"] else None
+    return scores
+
+
+def _strategy_window_candidate_summaries(candidate_specs, records, *, now_dt, filters, timeseries):
+    window_records = _strategy_records_for_filters(records, now_dt=now_dt, filters=filters)
+    scores = _strategy_window_scores(timeseries)
+    summaries = []
+    for spec in candidate_specs:
+        row = _summarize_strategy_candidate(spec, window_records, now_dt=now_dt, scored_by_candidate={})
+        score = scores.get(spec["candidate_id"])
+        if isinstance(score, dict) and score.get("scored"):
+            row["wins"] = score["wins"]
+            row["losses"] = score["losses"]
+            row["win_rate"] = score["win_rate"]
+            row["pnl_usdc"] = score["pnl_usdc"]
+            row["scoring_status"] = "scored"
+        else:
+            row["wins"] = None
+            row["losses"] = None
+            row["win_rate"] = None
+            row["pnl_usdc"] = None
+        summaries.append(row)
+    return summaries
+
+
+def _strategy_window_coverage(now_dt, filters, *, first_signal):
+    requested_start = _strategy_window_start(now_dt, filters["window"])
+    requested_days = {"24h": 1.0, "7d": 7.0, "14d": 14.0}.get(filters["window"])
+    data_start = _ensure_aware_utc(first_signal)
+    effective_start = data_start
+    partial = False
+    if requested_start is not None:
+        if data_start is None:
+            effective_start = requested_start
+        elif data_start > requested_start:
+            effective_start = data_start
+            partial = True
+        else:
+            effective_start = requested_start
+    covered_days = 0.0
+    if effective_start is not None:
+        covered_days = round(max(0.0, (now_dt - effective_start).total_seconds() / 86400.0), 2)
+    return {
+        "window": filters["window"],
+        "requested_days": requested_days,
+        "requested_start_at": _iso_utc(requested_start),
+        "data_start_at": _iso_utc(data_start),
+        "effective_start_at": _iso_utc(effective_start),
+        "covered_days": covered_days,
+        "partial": partial,
+    }
 
 
 def _summarize_strategy_candidate(candidate_spec, records, *, now_dt, scored_by_candidate):
@@ -3127,6 +3295,290 @@ def _strategy_recent_signal(record):
     }
 
 
+def _strategy_trade_entry_ts(record):
+    for key in ("entry_ts", "source_prediction_created_at", "created_at"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _strategy_trade_side(record):
+    for key in ("side", "direction", "action", "token_outcome", "outcome"):
+        text = str(record.get(key) or "").strip().upper()
+        if not text:
+            continue
+        if text in {"LONG", "UP", "BUY_UP"} or text.endswith("_UP"):
+            return "LONG"
+        if text in {"SHORT", "DOWN", "BUY_DOWN"} or text.endswith("_DOWN"):
+            return "SHORT"
+    return ""
+
+
+def _strategy_trade_key(record):
+    ts = _strategy_trade_entry_ts(record)
+    side = _strategy_trade_side(record)
+    if ts is None or side not in {"LONG", "SHORT"}:
+        return None
+    return (_iso_utc(ts), side)
+
+
+def _strategy_trade_in_window(record, *, now_dt, filters):
+    ts = _strategy_trade_entry_ts(record)
+    if ts is None:
+        return False
+    start = _strategy_window_start(now_dt, filters["window"])
+    return start is None or ts.astimezone(timezone.utc) >= start
+
+
+def _strategy_live_reference_source(record):
+    for key in ("reference_price_source", "settlement_source", "market_result_source", "fill_source"):
+        value = str(record.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def _strategy_live_reference_source_ok(record):
+    return _strategy_live_reference_source(record).lower().startswith("chainlink_datastreams")
+
+
+def _strategy_explicit_pnl(record):
+    for key in ("pnl_usdc", "realized_pnl", "net_pnl", "pnl"):
+        value = _num(record.get(key))
+        if value is not None:
+            return value
+    return None
+
+
+def _strategy_filled_size(record):
+    return _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size", "filledSize", "sizeMatched") or 0.0
+
+
+def _strategy_fill_price(record):
+    return _float_value(record, "average_fill_price", "avg_fill_price", "filled_avg_price", "price", "limit_price")
+
+
+def _strategy_is_final_live_settlement(record):
+    status = str(record.get("status") or "").upper()
+    if status in {"SETTLED", "WON", "LOST", "CLOSED"}:
+        return True
+    return _strategy_explicit_pnl(record) is not None and _record_won(record) is not None
+
+
+def _strategy_binary_option_pnl(won, *, size_shares, maker_price):
+    if won is None or size_shares is None or maker_price is None:
+        return None
+    if won:
+        return round(float(size_shares) * (1.0 - float(maker_price)), 6)
+    return round(-float(size_shares) * float(maker_price), 6)
+
+
+def _strategy_live_actual_pnl(record):
+    explicit = _strategy_explicit_pnl(record)
+    if explicit is not None:
+        return round(float(explicit), 6)
+    return _strategy_binary_option_pnl(
+        _record_won(record),
+        size_shares=_strategy_filled_size(record),
+        maker_price=_strategy_fill_price(record),
+    ) or 0.0
+
+
+def _strategy_live_normalized_pnl(record, *, size_shares, maker_price):
+    return _strategy_binary_option_pnl(
+        _record_won(record),
+        size_shares=size_shares,
+        maker_price=maker_price,
+    ) or 0.0
+
+
+def _strategy_scored_pnl(record, *, default_size_shares, default_maker_price):
+    explicit = _strategy_explicit_pnl(record)
+    if explicit is not None:
+        return round(float(explicit), 6)
+    return _strategy_binary_option_pnl(
+        _record_won(record),
+        size_shares=_float_value(record, "size_shares", "order_size_shares", "size") or default_size_shares,
+        maker_price=_float_value(record, "maker_price", "price", "limit_price") or default_maker_price,
+    ) or 0.0
+
+
+def _strategy_group_records_by_trade_key(records, *, keep="all"):
+    grouped = {}
+    for record in records:
+        key = _strategy_trade_key(record)
+        if key is not None:
+            if keep == "first" and key in grouped:
+                continue
+            grouped.setdefault(key, []).append(record)
+    return grouped
+
+
+def _strategy_live_records_for_match(*, now_dt, filters):
+    records = _rows_from_ledger_payload(_read_json(_live_real_ledger_path()))
+    matched = []
+    for record in records:
+        if not _strategy_is_final_live_settlement(record):
+            continue
+        if not _strategy_live_reference_source_ok(record):
+            continue
+        if _strategy_filled_size(record) <= 0 and _strategy_explicit_pnl(record) is None:
+            continue
+        if _strategy_trade_key(record) is None:
+            continue
+        if not _strategy_trade_in_window(record, now_dt=now_dt, filters=filters):
+            continue
+        matched.append(record)
+    return matched
+
+
+def _strategy_scored_records_for_match(scored, *, now_dt, filters):
+    rows = scored.get("trades") if isinstance(scored, dict) and isinstance(scored.get("trades"), list) else []
+    return [
+        row for row in rows
+        if isinstance(row, dict)
+        and _strategy_trade_key(row) is not None
+        and _strategy_trade_in_window(row, now_dt=now_dt, filters=filters)
+    ]
+
+
+def _strategy_first_won(rows):
+    for row in rows or []:
+        won = _record_won(row)
+        if won is not None:
+            return won
+    return None
+
+
+def _strategy_live_scored_segment_summary(keys, *, live_by_key, scored_by_key, size_shares, maker_price):
+    keys = sorted(keys)
+    wins = 0
+    losses = 0
+    live_actual_pnl = 0.0
+    live_normalized_pnl = 0.0
+    scored_pnl = 0.0
+    for key in keys:
+        live_rows = live_by_key.get(key, [])
+        scored_rows = scored_by_key.get(key, [])
+        won = _strategy_first_won(live_rows) if live_rows else _strategy_first_won(scored_rows)
+        if won is True:
+            wins += 1
+        elif won is False:
+            losses += 1
+        for row in live_rows:
+            live_actual_pnl += _strategy_live_actual_pnl(row)
+        if live_rows:
+            live_normalized_pnl += _strategy_live_normalized_pnl(
+                live_rows[0],
+                size_shares=size_shares,
+                maker_price=maker_price,
+            )
+        for row in scored_rows:
+            scored_pnl += _strategy_scored_pnl(
+                row,
+                default_size_shares=size_shares,
+                default_maker_price=maker_price,
+            )
+    settled = len(keys)
+    return {
+        "settled": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / settled, 4) if settled else None,
+        "live_actual_pnl": round(live_actual_pnl, 6),
+        "live_normalized_pnl": round(live_normalized_pnl, 6),
+        "scored_pnl": round(scored_pnl, 6),
+    }
+
+
+def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, scored_by_candidate, scored_path):
+    ledger_path = _live_real_ledger_path()
+    scored_payload = _strategy_scored_summary_payload(scored_path)
+    size_shares = _num(scored_payload.get("size_shares")) or 5.0
+    maker_price = _num(scored_payload.get("default_maker_price")) or 0.49
+    live_records = _strategy_live_records_for_match(now_dt=now_dt, filters=filters)
+    live_by_key = _strategy_group_records_by_trade_key(live_records)
+    live_keys = set(live_by_key)
+    rows = []
+    for spec in candidate_specs:
+        candidate_id = spec["candidate_id"]
+        scored = scored_by_candidate.get(candidate_id)
+        scored_available = isinstance(scored, dict)
+        scored_records = _strategy_scored_records_for_match(scored or {}, now_dt=now_dt, filters=filters)
+        scored_by_key = _strategy_group_records_by_trade_key(scored_records, keep="first")
+        scored_keys = set(scored_by_key)
+        if scored_available:
+            overlap_keys = live_keys & scored_keys
+            live_only_keys = live_keys - scored_keys
+            scored_only_keys = scored_keys - live_keys
+        else:
+            overlap_keys = set()
+            live_only_keys = set()
+            scored_only_keys = set()
+        won_mismatches = sum(
+            1 for key in overlap_keys
+            if _strategy_first_won(live_by_key.get(key, [])) != _strategy_first_won(scored_by_key.get(key, []))
+        )
+        rows.append(
+            {
+                "candidate_id": candidate_id,
+                "label": spec["label"],
+                "scored_available": scored_available,
+                "overlap_count": len(overlap_keys),
+                "live_only_count": len(live_only_keys),
+                "scored_only_count": len(scored_only_keys),
+                "won_mismatches": won_mismatches,
+                "all_live": _strategy_live_scored_segment_summary(
+                    live_keys if scored_available else set(),
+                    live_by_key=live_by_key,
+                    scored_by_key={},
+                    size_shares=size_shares,
+                    maker_price=maker_price,
+                ),
+                "all_scored": _strategy_live_scored_segment_summary(
+                    scored_keys,
+                    live_by_key={},
+                    scored_by_key=scored_by_key,
+                    size_shares=size_shares,
+                    maker_price=maker_price,
+                ),
+                "overlap": _strategy_live_scored_segment_summary(
+                    overlap_keys,
+                    live_by_key=live_by_key,
+                    scored_by_key=scored_by_key,
+                    size_shares=size_shares,
+                    maker_price=maker_price,
+                ),
+                "live_only": _strategy_live_scored_segment_summary(
+                    live_only_keys,
+                    live_by_key=live_by_key,
+                    scored_by_key={},
+                    size_shares=size_shares,
+                    maker_price=maker_price,
+                ),
+                "scored_only": _strategy_live_scored_segment_summary(
+                    scored_only_keys,
+                    live_by_key={},
+                    scored_by_key=scored_by_key,
+                    size_shares=size_shares,
+                    maker_price=maker_price,
+                ),
+            }
+        )
+    return {
+        "available": ledger_path.exists() and scored_path.exists(),
+        "ledger_path": str(ledger_path),
+        "scored_summary_path": str(scored_path),
+        "live_reference_source": "chainlink_datastreams*",
+        "size_shares": size_shares,
+        "maker_price": maker_price,
+        "live_order_count": len(live_records),
+        "live_settled_count": len(live_keys),
+        "candidates": rows,
+    }
+
+
 def _strategy_comparison_payload(*, now=None, args=None):
     now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
     filters = _strategy_compare_filters(args or {})
@@ -3155,15 +3607,28 @@ def _strategy_comparison_payload(*, now=None, args=None):
         _summarize_strategy_candidate(spec, records, now_dt=now_dt, scored_by_candidate=scored_by_candidate)
         for spec in STRATEGY_COMPARE_CANDIDATES
     ]
+    timeseries = _strategy_timeseries(records, now_dt=now_dt, filters=filters, scored_by_candidate=scored_by_candidate)
+    window_candidates = _strategy_window_candidate_summaries(
+        STRATEGY_COMPARE_CANDIDATES,
+        records,
+        now_dt=now_dt,
+        filters=filters,
+        timeseries=timeseries,
+    )
+    window_coverage = _strategy_window_coverage(now_dt, filters, first_signal=first_signal)
+    if window_coverage["partial"]:
+        warnings.append(
+            f"selected {filters['window']} window only has {window_coverage['covered_days']:.2f}d of no-submit collection"
+        )
     min_passed = min((row["passed"] for row in candidates), default=0)
     recent_records = sorted(
         records,
         key=lambda record: _strategy_record_ts(record) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
-    )[:50]
+    )[:10]
     return {
         "generated_at": _iso_utc(now_dt),
-        "ok": bool(records) and not warnings,
+        "ok": bool(records) and signals_path.exists() and latest_path.exists(),
         "warnings": warnings,
         "collection": {
             "signals_path": signals_path.as_posix(),
@@ -3187,8 +3652,17 @@ def _strategy_comparison_payload(*, now=None, args=None):
         },
         "live": _strategy_live_prediction_summary(now_dt),
         "candidates": candidates,
+        "window_candidates": window_candidates,
+        "window_coverage": window_coverage,
+        "live_matched": _strategy_live_matched_comparison(
+            STRATEGY_COMPARE_CANDIDATES,
+            now_dt=now_dt,
+            filters=filters,
+            scored_by_candidate=scored_by_candidate,
+            scored_path=scored_path,
+        ),
         "filters": filters,
-        "timeseries": _strategy_timeseries(records, now_dt=now_dt, filters=filters, scored_by_candidate=scored_by_candidate),
+        "timeseries": timeseries,
         "recent_signals": [_strategy_recent_signal(record) for record in recent_records],
     }
 
@@ -5901,7 +6375,13 @@ def api_live_intel():
 
 @app.route("/api/live-safety")
 def api_live_safety():
-    return jsonify(_safety_report_summary())
+    ttl_seconds = _dashboard_cache_seconds("DASHBOARD_LIVE_SAFETY_CACHE_SECONDS", 30)
+    payload = _cached_dashboard_payload(
+        ("live-safety", str(KRONOS_CHECKPOINT_DIR), str(KRONOS_REPORT_DIR)),
+        ttl_seconds,
+        _safety_report_summary,
+    )
+    return jsonify(payload)
 
 
 @app.route("/api/live-risk")
@@ -6584,7 +7064,14 @@ def api_btc_klines():
 
 @app.route("/api/strategy-comparison")
 def api_strategy_comparison():
-    return jsonify(_strategy_comparison_payload(args=request.args))
+    ttl_seconds = _dashboard_cache_seconds("DASHBOARD_STRATEGY_COMPARISON_CACHE_SECONDS", 30)
+    query = request.query_string.decode("utf-8", errors="replace")
+    payload = _cached_dashboard_payload(
+        ("strategy-comparison", str(KRONOS_CHECKPOINT_DIR), str(KRONOS_REPORT_DIR), query),
+        ttl_seconds,
+        lambda: _strategy_comparison_payload(args=request.args),
+    )
+    return jsonify(payload)
 
 
 @app.route("/api/compare")
