@@ -92,3 +92,13 @@ def test_strategy_compare_frontend_shows_live_matched_real_comparison():
     assert "Live-Matched" in compare_page
     assert "Actual PnL" in compare_page
     assert "Normalized PnL" in compare_page
+
+
+def test_strategy_compare_frontend_separates_today_actual_and_scored_pnl():
+    compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
+
+    assert 'useState<StrategyFilters["window"]>("today")' in compare_page
+    assert '(["today", "24h", "7d", "14d", "all"] as const)' in compare_page
+    assert "Actual Live PnL" in compare_page
+    assert "Scored PnL" in compare_page
+    assert "Scored Win Rate" in compare_page

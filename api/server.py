@@ -2956,7 +2956,7 @@ def _strategy_scored_summary_by_candidate(path=None):
 
 def _strategy_compare_filters(args):
     window = str(args.get("window") or "7d").strip().lower()
-    if window not in {"24h", "7d", "14d", "all"}:
+    if window not in {"today", "24h", "7d", "14d", "all"}:
         window = "7d"
     bucket = str(args.get("bucket") or "day").strip().lower()
     if bucket not in {"hour", "day"}:
@@ -2982,6 +2982,9 @@ def _strategy_compare_filters(args):
 
 
 def _strategy_window_start(now_dt, window):
+    now_dt = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
+    if window == "today":
+        return _dashboard_day_info(now=now_dt)["start_utc"]
     if window == "24h":
         return now_dt - timedelta(hours=24)
     if window == "7d":
@@ -3016,10 +3019,15 @@ def _strategy_bucket_key(ts, bucket):
     return ts.date().isoformat()
 
 
-def _scored_trade_buckets(scored, bucket="day"):
+def _scored_trade_buckets(scored, bucket="day", *, now_dt=None, filters=None):
     trades = scored.get("trades") if isinstance(scored, dict) and isinstance(scored.get("trades"), list) else []
     if not trades:
         return {}
+    if filters is not None:
+        trades = [
+            trade for trade in trades
+            if isinstance(trade, dict) and _strategy_trade_in_window(trade, now_dt=now_dt, filters=filters)
+        ]
     grouped = _strategy_group_records_by_trade_key(trades, keep="first")
     buckets = {}
     for rows in grouped.values():
@@ -3058,10 +3066,10 @@ def _scored_trade_buckets(scored, bucket="day"):
     return buckets
 
 
-def _scored_buckets_by_candidate(scored_by_candidate, bucket="day"):
+def _scored_buckets_by_candidate(scored_by_candidate, bucket="day", *, now_dt=None, filters=None):
     out = {}
     for candidate_id, scored in scored_by_candidate.items():
-        trade_buckets = _scored_trade_buckets(scored, bucket)
+        trade_buckets = _scored_trade_buckets(scored, bucket, now_dt=now_dt, filters=filters)
         if trade_buckets:
             out[candidate_id] = trade_buckets
             continue
@@ -3111,7 +3119,12 @@ def _strategy_timeseries(records, *, now_dt, filters, scored_by_candidate):
             bucket["same_side_overlap"] += 1
         if record.get("live_signal_filtered"):
             bucket["live_signal_filtered"] += 1
-    scored_daily = _scored_buckets_by_candidate(scored_by_candidate, filters["bucket"])
+    scored_daily = _scored_buckets_by_candidate(
+        scored_by_candidate,
+        filters["bucket"],
+        now_dt=now_dt,
+        filters=filters,
+    )
     for bucket in buckets.values():
         if bucket["evaluated"]:
             bucket["pass_rate"] = round(bucket["passed"] / bucket["evaluated"], 4)
@@ -3181,7 +3194,7 @@ def _strategy_window_candidate_summaries(candidate_specs, records, *, now_dt, fi
 
 def _strategy_window_coverage(now_dt, filters, *, first_signal):
     requested_start = _strategy_window_start(now_dt, filters["window"])
-    requested_days = {"24h": 1.0, "7d": 7.0, "14d": 14.0}.get(filters["window"])
+    requested_days = {"today": 1.0, "24h": 1.0, "7d": 7.0, "14d": 14.0}.get(filters["window"])
     data_start = _ensure_aware_utc(first_signal)
     effective_start = data_start
     partial = False

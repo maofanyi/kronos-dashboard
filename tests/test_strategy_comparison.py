@@ -334,6 +334,108 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
     assert window_by_id["official_truth_14d14d_latest"]["pnl_usdc"] == 0.1
 
 
+def test_strategy_comparison_today_window_matches_dashboard_trading_day(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="LONG",
+                created_at="2026-07-03T15:55:00Z",
+            ),
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="SHORT",
+                created_at="2026-07-03T16:05:00Z",
+            ),
+        ],
+    )
+    _write_json(report_dir / "candidate_no_submit_official_truth_latest.json", {"ok": True, "total_records": 2})
+    _write_json(
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json",
+        {
+            "default_maker_price": 0.49,
+            "size_shares": 5.0,
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "trades": [
+                        {
+                            "entry_ts": "2026-07-03T15:55:00Z",
+                            "settle_ts": "2026-07-03T16:00:00Z",
+                            "side": "LONG",
+                            "won": True,
+                            "pnl_usdc": 2.55,
+                        },
+                        {
+                            "entry_ts": "2026-07-03T16:05:00Z",
+                            "settle_ts": "2026-07-03T16:10:00Z",
+                            "side": "SHORT",
+                            "won": False,
+                            "pnl_usdc": -2.45,
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "status": "SETTLED",
+                "entry_ts": "2026-07-03T15:55:00Z",
+                "settle_ts": "2026-07-03T16:00:00Z",
+                "side": "LONG",
+                "won": True,
+                "fill_size": 10.0,
+                "average_fill_price": 0.49,
+                "reference_price_source": "chainlink_datastreams_pending",
+            },
+            {
+                "status": "SETTLED",
+                "entry_ts": "2026-07-03T16:05:00Z",
+                "settle_ts": "2026-07-03T16:10:00Z",
+                "side": "SHORT",
+                "won": False,
+                "fill_size": 10.0,
+                "average_fill_price": 0.51,
+                "reference_price_source": "chainlink_datastreams_pending",
+            },
+        ],
+    )
+
+    payload = server._strategy_comparison_payload(
+        now=datetime(2026, 7, 3, 18, 0, tzinfo=timezone.utc),
+        args={"window": "today", "bucket": "day", "metric": "pnl"},
+    )
+
+    assert payload["filters"]["window"] == "today"
+    assert payload["window_coverage"]["requested_start_at"] == "2026-07-03T16:00:00Z"
+    by_id = {row["candidate_id"]: row for row in payload["window_candidates"]}
+    assert by_id["official_truth_14d14d_latest"]["evaluated"] == 1
+    assert by_id["official_truth_14d14d_latest"]["pnl_usdc"] == -2.45
+    live_by_id = {row["candidate_id"]: row for row in payload["live_matched"]["candidates"]}
+    official = live_by_id["official_truth_14d14d_latest"]
+    assert official["all_live"]["settled"] == 1
+    assert official["all_live"]["live_actual_pnl"] == -5.1
+    assert official["all_scored"]["scored_pnl"] == -2.45
+    assert official["overlap"]["live_normalized_pnl"] == -2.45
+
+
 def test_strategy_comparison_uses_hourly_scored_summary_when_bucket_is_hour(monkeypatch, tmp_path):
     report_dir = tmp_path / "reports"
     checkpoint_dir = tmp_path / "checkpoints"
@@ -519,5 +621,6 @@ def test_strategy_compare_frontend_uses_window_scoped_rows():
 
     assert "const windowCandidates = data?.window_candidates ?? candidates;" in source
     assert "const tableCandidates = windowCandidates" in source
-    assert "{tableCandidates.map((row) => (" in source
+    assert "{tableCandidates.map((row) => {" in source
+    assert "const liveRow = liveMatchedByCandidate[row.candidate_id];" in source
     assert "row.pnl_usdc" in source

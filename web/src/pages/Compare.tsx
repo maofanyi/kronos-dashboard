@@ -71,7 +71,7 @@ type CandidateSummary = {
 };
 
 type StrategyFilters = {
-  window: "24h" | "7d" | "14d" | "all";
+  window: "today" | "24h" | "7d" | "14d" | "all";
   bucket: "hour" | "day";
   metric: "signals" | "pnl" | "win_rate" | "overlap";
   candidates: string[];
@@ -242,8 +242,8 @@ function seriesValue(point: StrategyTimePoint, metric: StrategyFilters["metric"]
 }
 
 function metricLabel(metric: StrategyFilters["metric"]) {
-  if (metric === "pnl") return "PnL";
-  if (metric === "win_rate") return "Win Rate";
+  if (metric === "pnl") return "Scored PnL";
+  if (metric === "win_rate") return "Scored Win Rate";
   if (metric === "overlap") return "Overlap";
   return "Passed Signals";
 }
@@ -260,7 +260,7 @@ function latestMetricLabel(value: number, metric: StrategyFilters["metric"], pen
 }
 
 export default function Compare() {
-  const [windowValue, setWindowValue] = useState<StrategyFilters["window"]>("7d");
+  const [windowValue, setWindowValue] = useState<StrategyFilters["window"]>("today");
   const [bucket, setBucket] = useState<StrategyFilters["bucket"]>("day");
   const [metric, setMetric] = useState<StrategyFilters["metric"]>("signals");
   const [selected, setSelected] = useState<string[]>([
@@ -317,8 +317,15 @@ export default function Compare() {
   const coverage = data?.window_coverage;
   const liveMatched = data?.live_matched;
   const liveMatchedRows = (liveMatched?.candidates ?? []).filter((row) => selected.includes(row.candidate_id));
+  const liveMatchedByCandidate = useMemo(() => {
+    const rows: Record<string, LiveMatchedCandidate> = {};
+    for (const row of liveMatched?.candidates ?? []) rows[row.candidate_id] = row;
+    return rows;
+  }, [liveMatched?.candidates]);
   const windowLabel =
-    coverage?.partial && typeof coverage.covered_days === "number"
+    windowValue === "today"
+      ? `today since ${coverage?.requested_start_at ?? "day start"}`
+      : coverage?.partial && typeof coverage.covered_days === "number"
       ? `${windowValue} requested / ${coverage.covered_days.toFixed(2)}d collected`
       : `${windowValue} window`;
 
@@ -428,7 +435,7 @@ export default function Compare() {
         }
       >
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 p-4">
-          {(["24h", "7d", "14d", "all"] as const).map((item) => (
+          {(["today", "24h", "7d", "14d", "all"] as const).map((item) => (
             <button
               key={item}
               onClick={() => setWindowValue(item)}
@@ -512,34 +519,39 @@ export default function Compare() {
                 <th className="px-3 py-2 text-right font-medium">Overlap</th>
                 <th className="px-3 py-2 text-right font-medium">Candidate Only</th>
                 <th className="px-3 py-2 text-right font-medium">Filtered Live</th>
-                <th className="px-3 py-2 text-right font-medium">PnL</th>
-                <th className="px-3 py-2 text-right font-medium">Win Rate</th>
+                <th className="px-3 py-2 text-right font-medium">Actual Live PnL</th>
+                <th className="px-3 py-2 text-right font-medium">Scored PnL</th>
+                <th className="px-3 py-2 text-right font-medium">Scored Win Rate</th>
                 <th className="px-3 py-2 text-right font-medium">Status</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-900">
-              {tableCandidates.map((row) => (
-                <tr key={row.candidate_id} className="hover:bg-zinc-900/40">
-                  <td className="px-4 py-2 text-zinc-100">{row.label}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.evaluated}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.passed}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{percent(row.pass_rate)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">
-                    {row.long} / {row.short}
-                  </td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.same_side_overlap}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.candidate_only}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.live_signal_filtered}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{moneyOrPending(row.pnl_usdc)}</td>
-                  <td className="px-3 py-2 text-right font-mono text-zinc-300">{typeof row.win_rate === "number" ? percent(row.win_rate) : "Pending"}</td>
-                  <td className="px-3 py-2 text-right">
-                    <StatusPill ok={row.minimum_ready} label={row.minimum_ready ? "Ready" : "Collecting"} />
-                  </td>
-                </tr>
-              ))}
+              {tableCandidates.map((row) => {
+                const liveRow = liveMatchedByCandidate[row.candidate_id];
+                return (
+                  <tr key={row.candidate_id} className="hover:bg-zinc-900/40">
+                    <td className="px-4 py-2 text-zinc-100">{row.label}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.evaluated}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.passed}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{percent(row.pass_rate)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">
+                      {row.long} / {row.short}
+                    </td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.same_side_overlap}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.candidate_only}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.live_signal_filtered}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(liveRow?.all_live?.live_actual_pnl)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{moneyOrPending(row.pnl_usdc)}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{typeof row.win_rate === "number" ? percent(row.win_rate) : "Pending"}</td>
+                    <td className="px-3 py-2 text-right">
+                      <StatusPill ok={row.minimum_ready} label={row.minimum_ready ? "Ready" : "Collecting"} />
+                    </td>
+                  </tr>
+                );
+              })}
               {tableCandidates.length === 0 && (
                 <tr>
-                  <td className="px-4 py-8 text-center text-sm text-zinc-500" colSpan={11}>
+                  <td className="px-4 py-8 text-center text-sm text-zinc-500" colSpan={12}>
                     No selected strategy rows
                   </td>
                 </tr>
