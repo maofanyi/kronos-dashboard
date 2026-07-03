@@ -3209,6 +3209,13 @@ def _strategy_window_coverage(now_dt, filters, *, first_signal):
     covered_days = 0.0
     if effective_start is not None:
         covered_days = round(max(0.0, (now_dt - effective_start).total_seconds() / 86400.0), 2)
+    score_status = "partial" if partial else "complete"
+    if partial:
+        score_label = f"Partial {covered_days:.2f}d"
+    elif requested_days is not None:
+        score_label = f"Complete {requested_days:.0f}d"
+    else:
+        score_label = "All collected"
     return {
         "window": filters["window"],
         "requested_days": requested_days,
@@ -3217,6 +3224,8 @@ def _strategy_window_coverage(now_dt, filters, *, first_signal):
         "effective_start_at": _iso_utc(effective_start),
         "covered_days": covered_days,
         "partial": partial,
+        "score_status": score_status,
+        "score_label": score_label,
         "day_tz": day_tz,
         "time_basis": "live_trading_day",
     }

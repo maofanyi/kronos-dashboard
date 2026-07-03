@@ -698,6 +698,8 @@ def test_strategy_comparison_marks_partial_window_coverage(monkeypatch, tmp_path
 
     assert payload["window_coverage"]["partial"] is True
     assert payload["window_coverage"]["covered_days"] == 0.5
+    assert payload["window_coverage"]["score_status"] == "partial"
+    assert payload["window_coverage"]["score_label"] == "Partial 0.50d"
     assert any("selected 7d window only has 0.50d" in item for item in payload["warnings"])
 
 

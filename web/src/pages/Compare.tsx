@@ -102,6 +102,10 @@ type WindowCoverage = {
   effective_start_at?: string | null;
   covered_days: number;
   partial: boolean;
+  score_status?: "partial" | "complete";
+  score_label?: string | null;
+  day_tz?: string | null;
+  time_basis?: string | null;
 };
 
 type LiveMatchedSegment = {
@@ -177,7 +181,6 @@ type StrategyComparisonData = {
 const panel = "rounded-md border border-zinc-800 bg-zinc-950/70";
 const colors = ["var(--chart-1)", "var(--chart-2)", "var(--chart-4)", "#34d399"];
 
-const moneyOrPending = (value: unknown) => (typeof value === "number" ? `$${value.toFixed(2)}` : "Pending");
 const signedMoneyOrPending = (value: unknown) =>
   typeof value === "number" ? `${value >= 0 ? "+" : "-"}$${Math.abs(value).toFixed(2)}` : "Pending";
 const percent = (value?: number | null) =>
@@ -252,11 +255,17 @@ function metricPending(metric: StrategyFilters["metric"], collection?: Collectio
   return (metric === "pnl" || metric === "win_rate") && !collection?.scored_summary_exists;
 }
 
-function latestMetricLabel(value: number, metric: StrategyFilters["metric"], pending: boolean) {
-  if (pending) return "Pending";
+function latestMetricLabel(value: number, metric: StrategyFilters["metric"], pending: boolean, pendingLabel = "Pending") {
+  if (pending) return pendingLabel;
   if (metric === "pnl") return `$${value.toFixed(2)}`;
   if (metric === "win_rate") return `${value.toFixed(1)}%`;
   return value.toFixed(0);
+}
+
+function scoreLabel(coverage?: WindowCoverage) {
+  if (coverage?.score_label) return coverage.score_label;
+  if (coverage?.partial) return `Partial ${coverage.covered_days.toFixed(2)}d`;
+  return "Complete";
 }
 
 export default function Compare() {
@@ -315,6 +324,9 @@ export default function Compare() {
   const recent = data?.recent_signals ?? [];
   const pendingMetric = metricPending(metric, collection);
   const coverage = data?.window_coverage;
+  const partialWindow = Boolean(coverage?.partial && windowValue !== "today");
+  const partialScoredMetric = partialWindow && (metric === "pnl" || metric === "win_rate");
+  const currentScoreLabel = scoreLabel(coverage);
   const liveMatched = data?.live_matched;
   const liveMatchedRows = (liveMatched?.candidates ?? []).filter((row) => selected.includes(row.candidate_id));
   const liveMatchedByCandidate = useMemo(() => {
@@ -419,7 +431,13 @@ export default function Compare() {
 
       <Panel
         title="Strategy Trends"
-        sub={pendingMetric ? "pending official/Data Streams scoring" : `${windowLabel} / ${bucket} / ${metricLabel(metric)}`}
+        sub={
+          pendingMetric
+            ? "pending official/Data Streams scoring"
+            : partialScoredMetric
+            ? `${windowLabel} / ${currentScoreLabel} candidate scoring`
+            : `${windowLabel} / ${bucket} / ${metricLabel(metric)}`
+        }
         right={
           <div className="flex items-center gap-2">
             <button
@@ -430,7 +448,10 @@ export default function Compare() {
               <RefreshCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
               Refresh
             </button>
-            <StatusPill ok={!pendingMetric} label={pendingMetric ? "Pending scoring" : "Live chart"} />
+            <StatusPill
+              ok={!pendingMetric && !partialScoredMetric}
+              label={pendingMetric ? "Pending scoring" : partialScoredMetric ? currentScoreLabel : "Live chart"}
+            />
           </div>
         }
       >
@@ -480,6 +501,11 @@ export default function Compare() {
             </label>
           ))}
         </div>
+        {partialScoredMetric ? (
+          <div className="border-b border-zinc-800 px-4 py-3 text-sm text-amber-300">
+            {currentScoreLabel}: candidate scored {metricLabel(metric)} only covers collected no-submit signals, not the full selected live trading window.
+          </div>
+        ) : null}
 
         <div className="grid gap-4 p-4 lg:grid-cols-3">
           {candidates
@@ -488,16 +514,24 @@ export default function Compare() {
               const points = byCandidate[row.candidate_id] ?? [];
               const values = points.map((point) => seriesValue(point, metric));
               const latestValue = values.length ? values[values.length - 1] : 0;
+              const latestLabel = latestMetricLabel(
+                latestValue,
+                metric,
+                pendingMetric || partialScoredMetric,
+                partialScoredMetric ? currentScoreLabel : "Pending",
+              );
               return (
                 <div key={row.candidate_id} className="min-w-0 rounded-md border border-zinc-800 bg-black/20 p-3">
                   <div className="mb-2 flex items-center justify-between gap-3">
                     <span className="truncate text-sm font-medium text-zinc-100">{row.label}</span>
-                    <span className="font-mono text-xs text-zinc-500">{latestMetricLabel(latestValue, metric, pendingMetric)}</span>
+                    <span className="font-mono text-xs text-zinc-500">{latestLabel}</span>
                   </div>
                   <Chart
                     data={values.length ? values : [0]}
                     color={colors[index % colors.length]}
-                    formatValue={(value) => latestMetricLabel(value, metric, pendingMetric)}
+                    formatValue={(value) =>
+                      latestMetricLabel(value, metric, pendingMetric || partialScoredMetric, partialScoredMetric ? currentScoreLabel : "Pending")
+                    }
                     showZeroLine={metric === "pnl"}
                   />
                 </div>
@@ -520,8 +554,9 @@ export default function Compare() {
                 <th className="px-3 py-2 text-right font-medium">Candidate Only</th>
                 <th className="px-3 py-2 text-right font-medium">Filtered Live</th>
                 <th className="px-3 py-2 text-right font-medium">Actual Live PnL</th>
-                <th className="px-3 py-2 text-right font-medium">Scored PnL</th>
-                <th className="px-3 py-2 text-right font-medium">Scored Win Rate</th>
+                <th className="px-3 py-2 text-right font-medium">Live Normalized PnL</th>
+                <th className="px-3 py-2 text-right font-medium">Candidate Scored PnL</th>
+                <th className="px-3 py-2 text-right font-medium">Candidate Scored Win Rate</th>
                 <th className="px-3 py-2 text-right font-medium">Status</th>
               </tr>
             </thead>
@@ -541,8 +576,13 @@ export default function Compare() {
                     <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.candidate_only}</td>
                     <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.live_signal_filtered}</td>
                     <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(liveRow?.all_live?.live_actual_pnl)}</td>
-                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{moneyOrPending(row.pnl_usdc)}</td>
-                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{typeof row.win_rate === "number" ? percent(row.win_rate) : "Pending"}</td>
+                    <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(liveRow?.all_live?.live_normalized_pnl)}</td>
+                    <td className={`px-3 py-2 text-right font-mono ${partialWindow ? "text-amber-300" : "text-zinc-300"}`}>
+                      {partialWindow ? currentScoreLabel : signedMoneyOrPending(row.pnl_usdc)}
+                    </td>
+                    <td className={`px-3 py-2 text-right font-mono ${partialWindow ? "text-amber-300" : "text-zinc-300"}`}>
+                      {partialWindow ? currentScoreLabel : typeof row.win_rate === "number" ? percent(row.win_rate) : "Pending"}
+                    </td>
                     <td className="px-3 py-2 text-right">
                       <StatusPill ok={row.minimum_ready} label={row.minimum_ready ? "Ready" : "Collecting"} />
                     </td>
@@ -551,7 +591,7 @@ export default function Compare() {
               })}
               {tableCandidates.length === 0 && (
                 <tr>
-                  <td className="px-4 py-8 text-center text-sm text-zinc-500" colSpan={12}>
+                  <td className="px-4 py-8 text-center text-sm text-zinc-500" colSpan={13}>
                     No selected strategy rows
                   </td>
                 </tr>

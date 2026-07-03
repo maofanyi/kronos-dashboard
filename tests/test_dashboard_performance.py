@@ -104,3 +104,14 @@ def test_strategy_compare_frontend_separates_today_actual_and_scored_pnl():
     assert "Actual Live PnL" in compare_page
     assert "Scored PnL" in compare_page
     assert "Scored Win Rate" in compare_page
+
+
+def test_strategy_compare_frontend_marks_partial_scored_summaries():
+    compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
+
+    assert "partialWindow" in compare_page
+    assert "Partial" in compare_page
+    assert "coverage?.score_label" in compare_page
+    assert "Candidate Scored PnL" in compare_page
+    assert "Live Normalized PnL" in compare_page
+    assert "Candidate Scored Win Rate" in compare_page
