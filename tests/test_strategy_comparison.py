@@ -436,6 +436,91 @@ def test_strategy_comparison_today_window_matches_dashboard_trading_day(monkeypa
     assert official["overlap"]["live_normalized_pnl"] == -2.45
 
 
+def test_strategy_comparison_7d_uses_live_trading_day_window_and_buckets(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="LONG",
+                created_at="2026-06-27T15:55:00Z",
+            ),
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="SHORT",
+                created_at="2026-06-27T16:05:00Z",
+            ),
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="SHORT",
+                created_at="2026-07-03T16:05:00Z",
+            ),
+        ],
+    )
+    _write_json(report_dir / "candidate_no_submit_official_truth_latest.json", {"ok": True, "total_records": 3})
+    _write_json(
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json",
+        {
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "trades": [
+                        {
+                            "entry_ts": "2026-06-27T15:55:00Z",
+                            "side": "LONG",
+                            "won": True,
+                            "pnl_usdc": 2.55,
+                        },
+                        {
+                            "entry_ts": "2026-06-27T16:05:00Z",
+                            "side": "SHORT",
+                            "won": False,
+                            "pnl_usdc": -2.45,
+                        },
+                        {
+                            "entry_ts": "2026-07-03T16:05:00Z",
+                            "side": "SHORT",
+                            "won": True,
+                            "pnl_usdc": 2.55,
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+
+    payload = server._strategy_comparison_payload(
+        now=datetime(2026, 7, 4, 1, 0, tzinfo=timezone.utc),
+        args={"window": "7d", "bucket": "day", "metric": "pnl"},
+    )
+
+    assert payload["window_coverage"]["requested_start_at"] == "2026-06-27T16:00:00Z"
+    assert payload["window_coverage"]["day_tz"] == "Asia/Shanghai"
+    by_id = {row["candidate_id"]: row for row in payload["window_candidates"]}
+    assert by_id["official_truth_14d14d_latest"]["evaluated"] == 2
+    assert by_id["official_truth_14d14d_latest"]["pnl_usdc"] == 0.1
+    series = [
+        row for row in payload["timeseries"]
+        if row["candidate_id"] == "official_truth_14d14d_latest"
+    ]
+    assert [row["bucket"] for row in series] == ["2026-06-28", "2026-07-04"]
+    assert [row["pnl_usdc"] for row in series] == [-2.45, 2.55]
+
+
 def test_strategy_comparison_uses_hourly_scored_summary_when_bucket_is_hour(monkeypatch, tmp_path):
     report_dir = tmp_path / "reports"
     checkpoint_dir = tmp_path / "checkpoints"

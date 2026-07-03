@@ -2983,14 +2983,13 @@ def _strategy_compare_filters(args):
 
 def _strategy_window_start(now_dt, window):
     now_dt = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
-    if window == "today":
-        return _dashboard_day_info(now=now_dt)["start_utc"]
-    if window == "24h":
-        return now_dt - timedelta(hours=24)
+    today = _dashboard_day_info(now=now_dt)["day"]
+    if window in {"today", "24h"}:
+        return _dashboard_day_info(day=today)["start_utc"]
     if window == "7d":
-        return now_dt - timedelta(days=7)
+        return _dashboard_day_info(day=today - timedelta(days=6))["start_utc"]
     if window == "14d":
-        return now_dt - timedelta(days=14)
+        return _dashboard_day_info(day=today - timedelta(days=13))["start_utc"]
     return None
 
 
@@ -3016,7 +3015,7 @@ def _strategy_bucket_key(ts, bucket):
     ts = ts.astimezone(timezone.utc)
     if bucket == "hour":
         return ts.replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
-    return ts.date().isoformat()
+    return _dashboard_day_key(ts).isoformat()
 
 
 def _scored_trade_buckets(scored, bucket="day", *, now_dt=None, filters=None):
@@ -3195,6 +3194,7 @@ def _strategy_window_candidate_summaries(candidate_specs, records, *, now_dt, fi
 def _strategy_window_coverage(now_dt, filters, *, first_signal):
     requested_start = _strategy_window_start(now_dt, filters["window"])
     requested_days = {"today": 1.0, "24h": 1.0, "7d": 7.0, "14d": 14.0}.get(filters["window"])
+    _, day_tz = _dashboard_trading_day_timezone()
     data_start = _ensure_aware_utc(first_signal)
     effective_start = data_start
     partial = False
@@ -3217,6 +3217,8 @@ def _strategy_window_coverage(now_dt, filters, *, first_signal):
         "effective_start_at": _iso_utc(effective_start),
         "covered_days": covered_days,
         "partial": partial,
+        "day_tz": day_tz,
+        "time_basis": "live_trading_day",
     }
 
 

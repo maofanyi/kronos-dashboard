@@ -98,7 +98,9 @@ def test_strategy_compare_frontend_separates_today_actual_and_scored_pnl():
     compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
 
     assert 'useState<StrategyFilters["window"]>("today")' in compare_page
-    assert '(["today", "24h", "7d", "14d", "all"] as const)' in compare_page
+    assert '(["today", "7d", "14d", "all"] as const)' in compare_page
+    assert '"24h" |' not in compare_page
+    assert "live trading day" in compare_page
     assert "Actual Live PnL" in compare_page
     assert "Scored PnL" in compare_page
     assert "Scored Win Rate" in compare_page

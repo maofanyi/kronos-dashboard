@@ -71,7 +71,7 @@ type CandidateSummary = {
 };
 
 type StrategyFilters = {
-  window: "today" | "24h" | "7d" | "14d" | "all";
+  window: "today" | "7d" | "14d" | "all";
   bucket: "hour" | "day";
   metric: "signals" | "pnl" | "win_rate" | "overlap";
   candidates: string[];
@@ -324,10 +324,10 @@ export default function Compare() {
   }, [liveMatched?.candidates]);
   const windowLabel =
     windowValue === "today"
-      ? `today since ${coverage?.requested_start_at ?? "day start"}`
+      ? `live trading day since ${coverage?.requested_start_at ?? "day start"}`
       : coverage?.partial && typeof coverage.covered_days === "number"
-      ? `${windowValue} requested / ${coverage.covered_days.toFixed(2)}d collected`
-      : `${windowValue} window`;
+      ? `${windowValue} live trading days requested / ${coverage.covered_days.toFixed(2)}d collected`
+      : `${windowValue} live trading days`;
 
   const byCandidate = useMemo(() => {
     const groups: Record<string, StrategyTimePoint[]> = {};
@@ -435,7 +435,7 @@ export default function Compare() {
         }
       >
         <div className="flex flex-wrap items-center gap-2 border-b border-zinc-800 p-4">
-          {(["today", "24h", "7d", "14d", "all"] as const).map((item) => (
+          {(["today", "7d", "14d", "all"] as const).map((item) => (
             <button
               key={item}
               onClick={() => setWindowValue(item)}
