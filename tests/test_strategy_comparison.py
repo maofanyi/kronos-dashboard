@@ -334,6 +334,96 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
     assert window_by_id["official_truth_14d14d_latest"]["pnl_usdc"] == 0.1
 
 
+def test_strategy_comparison_falls_back_to_live_config_sizing(monkeypatch, tmp_path):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    config_dir = tmp_path / "config"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    config_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    monkeypatch.setattr(server, "KRONOS_CONFIG_DIR", config_dir)
+    monkeypatch.setattr(
+        server,
+        "_live_order_sync_summary",
+        lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
+    )
+    _append_jsonl(
+        report_dir / "candidate_no_submit_official_truth_signals.jsonl",
+        [
+            _candidate_record(
+                "official_truth_14d14d_latest",
+                passed=True,
+                side="LONG",
+                created_at="2026-07-02T00:00:00Z",
+            )
+        ],
+    )
+    _write_json(report_dir / "candidate_no_submit_official_truth_latest.json", {"ok": True, "total_records": 1})
+    _write_json(
+        config_dir / "aligned_prod_current_next_official_truth_14d14d_live_params.json",
+        {
+            "size_shares": 10.0,
+            "maker_price_assumption": 0.49,
+            "live_restart_contract": {
+                "order_size_shares": 10.0,
+                "min_price": 0.49,
+            },
+        },
+    )
+    _write_json(
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json",
+        {
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "trades": [
+                        {
+                            "entry_ts": "2026-07-02T00:05:00Z",
+                            "settle_ts": "2026-07-02T00:10:00Z",
+                            "side": "LONG",
+                            "won": True,
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    _write_json(
+        checkpoint_dir / "live_real_orders_current_next.json",
+        [
+            {
+                "status": "SETTLED",
+                "entry_ts": "2026-07-02T00:05:00Z",
+                "settle_ts": "2026-07-02T00:10:00Z",
+                "side": "LONG",
+                "won": True,
+                "fill_size": 10.0,
+                "average_fill_price": 0.49,
+                "reference_price_source": "chainlink_datastreams_pending",
+            },
+        ],
+    )
+
+    payload = server._strategy_comparison_payload(
+        now=datetime(2026, 7, 2, 12, 0, tzinfo=timezone.utc),
+        args={"window": "all", "bucket": "day", "metric": "pnl"},
+    )
+
+    live_by_id = {row["candidate_id"]: row for row in payload["live_matched"]["candidates"]}
+    official = live_by_id["official_truth_14d14d_latest"]
+    assert payload["live_matched"]["size_shares"] == 10.0
+    assert payload["live_matched"]["maker_price"] == 0.49
+    assert official["overlap"]["live_normalized_pnl"] == 5.1
+    assert official["overlap"]["scored_pnl"] == 5.1
+    series = [
+        row for row in payload["timeseries"]
+        if row["candidate_id"] == "official_truth_14d14d_latest"
+    ]
+    assert series[0]["pnl_usdc"] == 5.1
+
+
 def test_strategy_comparison_today_window_matches_dashboard_trading_day(monkeypatch, tmp_path):
     report_dir = tmp_path / "reports"
     checkpoint_dir = tmp_path / "checkpoints"

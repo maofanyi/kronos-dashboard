@@ -2944,14 +2944,79 @@ def _strategy_scored_summary_payload(path=None):
     return payload if isinstance(payload, dict) else {}
 
 
+def _strategy_config_num(payload, paths):
+    if not isinstance(payload, dict):
+        return None
+    for path in paths:
+        current = payload
+        for key in path:
+            if not isinstance(current, dict):
+                current = None
+                break
+            current = current.get(key)
+        value = _num(current)
+        if value is not None:
+            return value
+    return None
+
+
+def _strategy_live_scoring_defaults(scored_payload=None):
+    scored_payload = scored_payload if isinstance(scored_payload, dict) else {}
+    size_shares = _num(scored_payload.get("size_shares"))
+    maker_price = _num(scored_payload.get("default_maker_price"))
+    config_paths = [
+        KRONOS_RUNTIME_DIR / "effective_trade_config.json",
+        KRONOS_CONFIG_DIR / "aligned_prod_current_next_official_truth_14d14d_live_params.json",
+        KRONOS_CONFIG_DIR / "trade_profiles" / "live_current_formal.json",
+    ]
+    for path in config_paths:
+        if size_shares is not None and maker_price is not None:
+            break
+        payload = _read_json(path) or {}
+        if not isinstance(payload, dict):
+            continue
+        if size_shares is None:
+            size_shares = _strategy_config_num(
+                payload,
+                (
+                    ("size_shares",),
+                    ("order_size_shares",),
+                    ("live_restart_contract", "order_size_shares"),
+                    ("sizing", "order_size_shares"),
+                ),
+            )
+        if maker_price is None:
+            maker_price = _strategy_config_num(
+                payload,
+                (
+                    ("maker_price_assumption",),
+                    ("default_maker_price",),
+                    ("maker_price",),
+                    ("live_restart_contract", "maker_price_assumption"),
+                    ("live_restart_contract", "min_price"),
+                    ("price", "maker_price_assumption"),
+                    ("price", "min_price"),
+                ),
+            )
+    return {
+        "size_shares": size_shares if size_shares is not None else 5.0,
+        "maker_price": maker_price if maker_price is not None else 0.49,
+    }
+
+
 def _strategy_scored_summary_by_candidate(path=None):
     payload = _strategy_scored_summary_payload(path)
+    defaults = _strategy_live_scoring_defaults(payload)
     rows = payload.get("candidates") if isinstance(payload.get("candidates"), list) else []
-    return {
-        str(row.get("candidate_id") or ""): row
-        for row in rows
-        if isinstance(row, dict) and row.get("candidate_id")
-    }
+    out = {}
+    for row in rows:
+        if not isinstance(row, dict) or not row.get("candidate_id"):
+            continue
+        item = dict(row)
+        item.setdefault("_scoring_size_shares", defaults["size_shares"])
+        item.setdefault("_scoring_maker_price", defaults["maker_price"])
+        out[str(row.get("candidate_id") or "")] = item
+    return out
 
 
 def _strategy_compare_filters(args):
@@ -3056,8 +3121,8 @@ def _scored_trade_buckets(scored, bucket="day", *, now_dt=None, filters=None):
             row["losses"] += 1
         row["pnl_usdc"] += _strategy_scored_pnl(
             trade,
-            default_size_shares=_float_value(trade, "size_shares", "order_size_shares", "size") or 5.0,
-            default_maker_price=_float_value(trade, "maker_price", "price", "limit_price") or 0.49,
+            default_size_shares=_num(scored.get("_scoring_size_shares")) or 5.0,
+            default_maker_price=_num(scored.get("_scoring_maker_price")) or 0.49,
         )
     for row in buckets.values():
         row["pnl_usdc"] = round(float(row["pnl_usdc"]), 6)
@@ -3519,8 +3584,9 @@ def _strategy_live_scored_segment_summary(keys, *, live_by_key, scored_by_key, s
 def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, scored_by_candidate, scored_path):
     ledger_path = _live_real_ledger_path()
     scored_payload = _strategy_scored_summary_payload(scored_path)
-    size_shares = _num(scored_payload.get("size_shares")) or 5.0
-    maker_price = _num(scored_payload.get("default_maker_price")) or 0.49
+    scoring_defaults = _strategy_live_scoring_defaults(scored_payload)
+    size_shares = _num(scoring_defaults.get("size_shares")) or 5.0
+    maker_price = _num(scoring_defaults.get("maker_price")) or 0.49
     live_records = _strategy_live_records_for_match(now_dt=now_dt, filters=filters)
     live_by_key = _strategy_group_records_by_trade_key(live_records)
     live_keys = set(live_by_key)
