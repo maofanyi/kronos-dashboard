@@ -10,6 +10,11 @@ import {
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Chart } from "@/components/chart";
+import {
+  StrategyDifferences,
+  type LiveMatchedCandidate,
+  type LiveMatchedComparison,
+} from "../components/StrategyDifferences";
 
 type CollectionSummary = {
   signals_file_exists: boolean;
@@ -106,43 +111,6 @@ type WindowCoverage = {
   score_label?: string | null;
   day_tz?: string | null;
   time_basis?: string | null;
-};
-
-type LiveMatchedSegment = {
-  settled: number;
-  wins: number;
-  losses: number;
-  win_rate?: number | null;
-  live_actual_pnl: number;
-  live_normalized_pnl: number;
-  scored_pnl: number;
-};
-
-type LiveMatchedCandidate = {
-  candidate_id: string;
-  label: string;
-  scored_available: boolean;
-  overlap_count: number;
-  live_only_count: number;
-  scored_only_count: number;
-  won_mismatches: number;
-  all_live: LiveMatchedSegment;
-  all_scored: LiveMatchedSegment;
-  overlap: LiveMatchedSegment;
-  live_only: LiveMatchedSegment;
-  scored_only: LiveMatchedSegment;
-};
-
-type LiveMatchedComparison = {
-  available: boolean;
-  ledger_path: string;
-  scored_summary_path: string;
-  live_reference_source: string;
-  size_shares: number;
-  maker_price: number;
-  live_order_count: number;
-  live_settled_count: number;
-  candidates: LiveMatchedCandidate[];
 };
 
 type RecentSignal = {
@@ -328,7 +296,6 @@ export default function Compare() {
   const partialScoredMetric = partialWindow && (metric === "pnl" || metric === "win_rate");
   const currentScoreLabel = scoreLabel(coverage);
   const liveMatched = data?.live_matched;
-  const liveMatchedRows = (liveMatched?.candidates ?? []).filter((row) => selected.includes(row.candidate_id));
   const liveMatchedByCandidate = useMemo(() => {
     const rows: Record<string, LiveMatchedCandidate> = {};
     for (const row of liveMatched?.candidates ?? []) rows[row.candidate_id] = row;
@@ -601,73 +568,12 @@ export default function Compare() {
         </div>
       </Panel>
 
-      <Panel
-        title="Live-Matched"
-        sub={`${windowLabel} / actual live fills vs scored candidates`}
-        right={<StatusPill ok={Boolean(liveMatched?.available)} label={liveMatched?.available ? "Available" : "Pending"} />}
-      >
-        {!liveMatched?.available ? (
-          <div className="px-4 py-3 text-sm text-amber-300">Live ledger or scored summary is not available yet.</div>
-        ) : (
-          <div className="overflow-x-auto">
-            <table className="min-w-full divide-y divide-zinc-900 text-sm">
-              <thead className="bg-black/20 text-xs uppercase tracking-[0.14em] text-zinc-500">
-                <tr>
-                  <th className="px-4 py-2 text-left font-medium">Strategy</th>
-                  <th className="px-3 py-2 text-right font-medium">Overlap</th>
-                  <th className="px-3 py-2 text-right font-medium">Live Only</th>
-                  <th className="px-3 py-2 text-right font-medium">Scored Only</th>
-                  <th className="px-3 py-2 text-right font-medium">Win Match</th>
-                  <th className="px-3 py-2 text-right font-medium">Actual PnL</th>
-                  <th className="px-3 py-2 text-right font-medium">Normalized PnL</th>
-                  <th className="px-3 py-2 text-right font-medium">Scored PnL</th>
-                  <th className="px-3 py-2 text-right font-medium">Live-only PnL</th>
-                  <th className="px-3 py-2 text-right font-medium">Scored-only PnL</th>
-                  <th className="px-3 py-2 text-right font-medium">Live All</th>
-                  <th className="px-3 py-2 text-right font-medium">Scored All</th>
-                </tr>
-              </thead>
-              <tbody className="divide-y divide-zinc-900">
-                {liveMatchedRows.map((row) => {
-                  const matchedWins = Math.max(0, row.overlap_count - row.won_mismatches);
-                  return (
-                    <tr key={row.candidate_id} className="hover:bg-zinc-900/40">
-                      <td className="px-4 py-2 text-zinc-100">
-                        <div>{row.label}</div>
-                        {!row.scored_available && <div className="mt-0.5 text-xs text-amber-300">Scored missing</div>}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.overlap_count}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.live_only_count}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.scored_only_count}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">
-                        {row.overlap_count ? `${matchedWins}/${row.overlap_count}` : "-"}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(row.overlap.live_actual_pnl)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(row.overlap.live_normalized_pnl)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(row.overlap.scored_pnl)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(row.live_only.live_actual_pnl)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">{signedMoneyOrPending(row.scored_only.scored_pnl)}</td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">
-                        {row.all_live.settled} / {signedMoneyOrPending(row.all_live.live_actual_pnl)}
-                      </td>
-                      <td className="px-3 py-2 text-right font-mono text-zinc-300">
-                        {row.all_scored.settled} / {signedMoneyOrPending(row.all_scored.scored_pnl)}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {liveMatchedRows.length === 0 && (
-                  <tr>
-                    <td className="px-4 py-8 text-center text-sm text-zinc-500" colSpan={12}>
-                      No live-matched rows
-                    </td>
-                  </tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </Panel>
+      <StrategyDifferences
+        windowValue={windowValue}
+        liveStrategyId={data?.live?.strategy_id}
+        selectedCandidateIds={selected}
+        comparison={liveMatched}
+      />
 
       <Panel
         title="Recent Candidate Signals"
