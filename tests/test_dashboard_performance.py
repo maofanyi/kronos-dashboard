@@ -67,6 +67,37 @@ def test_strategy_comparison_route_uses_query_scoped_response_cache(monkeypatch)
     assert calls["count"] == 3
 
 
+def test_strategy_difference_route_uses_query_scoped_response_cache(monkeypatch):
+    _clear_response_cache()
+    calls = {"count": 0}
+
+    def fake_payload(*, candidate_id, filters, now=None):
+        calls["count"] += 1
+        return {"sequence": calls["count"], "candidate_id": candidate_id}
+
+    monkeypatch.setenv("DASHBOARD_STRATEGY_DIFFERENCES_CACHE_SECONDS", "20")
+    monkeypatch.setattr(server, "_strategy_difference_payload", fake_payload)
+
+    with server.app.test_client() as client:
+        first = client.get(
+            "/api/strategy-comparison/differences"
+            "?candidate=official_truth_14d14d_latest&window=today"
+        ).get_json()
+        second = client.get(
+            "/api/strategy-comparison/differences"
+            "?candidate=official_truth_14d14d_latest&window=today"
+        ).get_json()
+        other = client.get(
+            "/api/strategy-comparison/differences"
+            "?candidate=official_truth_7d7d_latest&window=today"
+        ).get_json()
+
+    assert first["sequence"] == 1
+    assert second["sequence"] == 1
+    assert other["sequence"] == 2
+    assert calls["count"] == 2
+
+
 def test_frontend_uses_slower_polling_for_heavy_dashboard_endpoints():
     status_bar = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
     live_page = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
