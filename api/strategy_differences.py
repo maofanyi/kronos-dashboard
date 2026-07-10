@@ -103,6 +103,7 @@ def reconcile_strategy_orders(
         ledger_available
         and scored_available
         and not conflicting_scored_keys
+        and live_quality["excluded_live_reference_count"] == 0
     )
     return {
         "rows": rows,
@@ -419,14 +420,14 @@ def _reconcile_market(
 ) -> dict[str, Any]:
     live_present = bool(live and live.get("present"))
     simulated_present = bool(simulated and simulated.get("present"))
-    excluded_only_live_settlement = bool(
-        live and live.get("excluded_final_fill_count", 0) > 0 and not live_present
+    has_excluded_final_fill = bool(
+        live and live.get("excluded_final_fill_count", 0) > 0
     )
     missing_live_pnl = bool(live and live.get("missing_pnl_count", 0) > 0)
     missing_simulated_pnl = bool(
         simulated and simulated.get("missing_pnl_count", 0) > 0
     )
-    if not ledger_available or excluded_only_live_settlement or missing_live_pnl:
+    if not ledger_available or has_excluded_final_fill or missing_live_pnl:
         live_pnl = None
     elif live_present:
         live_pnl = round(float(live["pnl"]), 6)
@@ -507,7 +508,7 @@ def _reconcile_market(
         "reconcilable": (
             ledger_available
             and scored_available
-            and not excluded_only_live_settlement
+            and not has_excluded_final_fill
             and not missing_live_pnl
             and not missing_simulated_pnl
         ),

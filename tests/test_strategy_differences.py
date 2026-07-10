@@ -175,6 +175,65 @@ def test_non_datastreams_final_fill_is_excluded_not_called_no_fill():
     assert summary["pnl_delta"] is None
 
 
+def test_excluded_only_final_fill_marks_empty_summary_unreconcilable():
+    result = reconcile_strategy_orders(
+        live_records=[_live(reference_price_source="binance_kline")],
+        formal_predictions=[],
+        scored_records=[],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert result["rows"] == []
+    assert result["data_quality"]["excluded_live_reference_count"] == 1
+    assert result["data_quality"]["reconcilable"] is False
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
+def test_mixed_trusted_and_excluded_final_fills_are_unreconcilable():
+    result = reconcile_strategy_orders(
+        live_records=[
+            _live(order_id="trusted", average_fill_price=0.49, net_pnl=-4.9),
+            _live(
+                order_id="excluded",
+                filled_size=2.0,
+                average_fill_price=0.50,
+                net_pnl=-1.0,
+                reference_price_source="binance_kline",
+            ),
+        ],
+        formal_predictions=[],
+        scored_records=[_scored()],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    row = result["rows"][0]
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert row["live"]["present"] is True
+    assert row["live"]["excluded_final_fill_count"] == 1
+    assert row["live_pnl"] is None
+    assert row["pnl_delta"] is None
+    assert row["reconcilable"] is False
+    assert result["data_quality"]["reconcilable"] is False
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
 def test_trusted_final_fill_without_explicit_pnl_is_unreconcilable():
     result = reconcile_strategy_orders(
         live_records=[
