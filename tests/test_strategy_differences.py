@@ -208,6 +208,40 @@ def test_trusted_final_fill_without_explicit_pnl_is_unreconcilable():
     assert summary["pnl_delta"] is None
 
 
+def test_scored_trade_without_explicit_pnl_is_unreconcilable():
+    result = reconcile_strategy_orders(
+        live_records=[],
+        formal_predictions=[],
+        scored_records=[
+            _scored(
+                pnl_usdc=None,
+                realized_pnl=None,
+                net_pnl=None,
+                pnl=None,
+            )
+        ],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    row = result["rows"][0]
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert row["simulated"]["present"] is True
+    assert row["simulated"]["side"] == "LONG"
+    assert row["simulated"]["missing_pnl_count"] == 1
+    assert row["simulated_pnl"] is None
+    assert row["pnl_delta"] is None
+    assert row["reconcilable"] is False
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
 def test_conflicting_scored_duplicates_are_excluded_with_data_quality_marker():
     result = reconcile_strategy_orders(
         live_records=[],
@@ -219,7 +253,40 @@ def test_conflicting_scored_duplicates_are_excluded_with_data_quality_marker():
         scored_available=True,
     )
     assert result["rows"] == []
+    assert result["data_quality"]["conflicting_scored_markets"] == [
+        ("2026-07-10T10:10:00Z", "2026-07-10T10:15:00Z")
+    ]
+    assert result["data_quality"]["reconcilable"] is False
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
+def test_conflicting_scored_market_omits_matching_live_market():
+    result = reconcile_strategy_orders(
+        live_records=[_live(average_fill_price=0.49, net_pnl=-4.9)],
+        formal_predictions=[],
+        scored_records=[_scored(side="LONG"), _scored(side="SHORT")],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    assert result["rows"] == []
     assert len(result["data_quality"]["conflicting_scored_markets"]) == 1
+    assert result["data_quality"]["reconcilable"] is False
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
 
 
 def test_records_before_start_are_not_returned():

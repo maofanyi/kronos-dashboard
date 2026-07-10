@@ -81,7 +81,8 @@ def reconcile_strategy_orders(
         end_at=end_at,
     )
     trusted_live_keys = {key for key, value in live_by_market.items() if value["present"]}
-    keys = sorted(trusted_live_keys | set(scored_by_market))
+    conflicting_scored_keys = set(scored_quality["conflicting_scored_markets"])
+    keys = sorted((trusted_live_keys | set(scored_by_market)) - conflicting_scored_keys)
     rows = [
         _reconcile_market(
             key,
@@ -98,11 +99,16 @@ def reconcile_strategy_orders(
         warnings.append("live ledger missing; live PnL is unknown")
     if not scored_available:
         warnings.append("candidate scored summary missing")
+    global_reconcilable = (
+        ledger_available
+        and scored_available
+        and not conflicting_scored_keys
+    )
     return {
         "rows": rows,
         "warnings": warnings,
         "data_quality": {
-            "reconcilable": ledger_available and scored_available,
+            "reconcilable": global_reconcilable,
             "excluded_live_reference_count": live_quality[
                 "excluded_live_reference_count"
             ],
@@ -366,7 +372,8 @@ def _aggregate_scored_markets(
             "won": won,
             "size": size,
             "price": price,
-            "pnl": round(pnl or 0.0, 6),
+            "pnl": round(pnl, 6) if pnl is not None else None,
+            "missing_pnl_count": int(pnl is None),
         }
 
     warnings = []
@@ -416,16 +423,21 @@ def _reconcile_market(
         live and live.get("excluded_final_fill_count", 0) > 0 and not live_present
     )
     missing_live_pnl = bool(live and live.get("missing_pnl_count", 0) > 0)
-    live_pnl = (
-        round(float(live.get("pnl", 0.0)) if live_present and live else 0.0, 6)
-        if ledger_available and not excluded_only_live_settlement and not missing_live_pnl
-        else None
+    missing_simulated_pnl = bool(
+        simulated and simulated.get("missing_pnl_count", 0) > 0
     )
-    simulated_pnl = (
-        round(float(simulated.get("pnl", 0.0)) if simulated_present and simulated else 0.0, 6)
-        if scored_available
-        else None
-    )
+    if not ledger_available or excluded_only_live_settlement or missing_live_pnl:
+        live_pnl = None
+    elif live_present:
+        live_pnl = round(float(live["pnl"]), 6)
+    else:
+        live_pnl = 0.0
+    if not scored_available or missing_simulated_pnl:
+        simulated_pnl = None
+    elif simulated_present:
+        simulated_pnl = round(float(simulated["pnl"]), 6)
+    else:
+        simulated_pnl = 0.0
     pnl_delta = (
         round(live_pnl - simulated_pnl, 6)
         if live_pnl is not None and simulated_pnl is not None
@@ -497,6 +509,7 @@ def _reconcile_market(
             and scored_available
             and not excluded_only_live_settlement
             and not missing_live_pnl
+            and not missing_simulated_pnl
         ),
         "live_pnl": live_pnl,
         "simulated_pnl": simulated_pnl,
@@ -511,11 +524,14 @@ def _money_summary(
 ) -> dict[str, Any]:
     materialized = list(rows)
     summary: dict[str, Any] = {"market_count": len(materialized)}
-    if not reconcilable:
+    if not reconcilable or any(
+        row.get("live_pnl") is None or row.get("simulated_pnl") is None
+        for row in materialized
+    ):
         summary.update({"live_pnl": None, "simulated_pnl": None, "pnl_delta": None})
         return summary
-    live_pnl = round(sum(float(row.get("live_pnl") or 0.0) for row in materialized), 6)
-    simulated_pnl = round(sum(float(row.get("simulated_pnl") or 0.0) for row in materialized), 6)
+    live_pnl = round(sum(float(row["live_pnl"]) for row in materialized), 6)
+    simulated_pnl = round(sum(float(row["simulated_pnl"]) for row in materialized), 6)
     summary.update(
         {
             "live_pnl": live_pnl,
