@@ -168,6 +168,26 @@ def test_strategy_difference_route_returns_reconciling_summaries(monkeypatch, tm
             "candidate=official_truth_14d14d_latest&limit=not-a-number",
             "invalid_pagination",
         ),
+        (
+            "candidate=official_truth_14d14d_latest&window=bogus",
+            "invalid_window",
+        ),
+        (
+            "candidate=official_truth_14d14d_latest&include_matched=maybe",
+            "invalid_include_matched",
+        ),
+        (
+            "candidate=official_truth_14d14d_latest&limit=0",
+            "invalid_pagination",
+        ),
+        (
+            "candidate=official_truth_14d14d_latest&limit=501",
+            "invalid_pagination",
+        ),
+        (
+            "candidate=official_truth_14d14d_latest&offset=-1",
+            "invalid_pagination",
+        ),
     ],
 )
 def test_strategy_difference_route_rejects_invalid_queries(query, error):
@@ -175,6 +195,24 @@ def test_strategy_difference_route_rejects_invalid_queries(query, error):
         response = client.get(f"/api/strategy-comparison/differences?{query}")
     assert response.status_code == 400
     assert response.get_json()["error"] == error
+
+
+@pytest.mark.parametrize("value", ["", "0", "false", "no"])
+def test_strategy_difference_route_accepts_false_include_matched_values(
+    monkeypatch,
+    tmp_path,
+    value,
+):
+    _configure_strategy_files(monkeypatch, tmp_path)
+    with server.app.test_client() as client:
+        payload = client.get(
+            "/api/strategy-comparison/differences"
+            "?candidate=official_truth_14d14d_latest"
+            f"&window=all&include_matched={value}"
+        ).get_json()
+
+    assert payload["filters"]["include_matched"] is False
+    assert payload["pagination"]["total"] == 2
 
 
 def test_strategy_difference_route_keeps_overall_and_filtered_summaries_separate(
@@ -236,7 +274,35 @@ def test_strategy_difference_route_reports_missing_selected_candidate(
 
     assert payload["available"] is False
     assert payload["rows"] == []
-    assert payload["warnings"] == ["candidate scored summary missing"]
+    assert "candidate scored summary missing" in payload["warnings"]
+
+
+def test_strategy_difference_route_reports_every_missing_source(
+    monkeypatch,
+    tmp_path,
+):
+    _configure_strategy_files(monkeypatch, tmp_path)
+    (tmp_path / "checkpoints" / "live_real_orders_current_next.json").unlink()
+    (tmp_path / "reports" / "prediction_bound_live_formal_predictions.jsonl").unlink()
+    (
+        tmp_path
+        / "reports"
+        / "candidate_no_submit_official_truth_scored_summary.json"
+    ).unlink()
+
+    with server.app.test_client() as client:
+        payload = client.get(
+            "/api/strategy-comparison/differences"
+            "?candidate=official_truth_14d14d_latest"
+        ).get_json()
+
+    assert payload["available"] is False
+    assert payload["rows"] == []
+    assert set(payload["warnings"]) == {
+        "live ledger missing; live PnL is unknown",
+        "formal prediction history missing; simulated-only causes may be unknown",
+        "candidate scored summary missing",
+    }
 
 
 def test_strategy_difference_route_missing_formal_history_keeps_money_reconcilable(
