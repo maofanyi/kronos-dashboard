@@ -33,10 +33,10 @@ def market_key(record: Mapping[str, Any]) -> tuple[str, str] | None:
 def summarize_difference_rows(
     rows: Iterable[Mapping[str, Any]],
     *,
-    reconcilable: bool = True,
+    reconcilable: bool,
 ) -> dict[str, Any]:
     materialized = list(rows)
-    reconcilable = reconcilable and all(
+    effective_reconcilable = reconcilable and all(
         row.get("reconcilable", True) for row in materialized
     )
     by_type: dict[str, dict[str, Any]] = {}
@@ -44,8 +44,11 @@ def summarize_difference_rows(
         typed = [row for row in materialized if row["primary_type"] == difference_type]
         if not typed:
             continue
-        by_type[difference_type] = _money_summary(typed, reconcilable=reconcilable)
-    summary = _money_summary(materialized, reconcilable=reconcilable)
+        by_type[difference_type] = _money_summary(
+            typed,
+            reconcilable=effective_reconcilable,
+        )
+    summary = _money_summary(materialized, reconcilable=effective_reconcilable)
     summary["difference_count"] = sum(row["primary_type"] != "matched" for row in materialized)
     summary["matched_count"] = sum(row["primary_type"] == "matched" for row in materialized)
     summary["by_type"] = by_type

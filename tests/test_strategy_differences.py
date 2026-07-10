@@ -1,5 +1,7 @@
 from datetime import datetime, timezone
 
+import pytest
+
 from api.strategy_differences import reconcile_strategy_orders, summarize_difference_rows
 
 
@@ -91,7 +93,10 @@ def test_summary_reconciles_market_and_reason_totals():
         ledger_available=True,
         scored_available=True,
     )
-    summary = summarize_difference_rows(result["rows"])
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
 
     assert summary["live_pnl"] == -5.0
     assert summary["simulated_pnl"] == -4.9
@@ -155,7 +160,10 @@ def test_non_datastreams_final_fill_is_excluded_not_called_no_fill():
     )
     assert result["data_quality"]["excluded_live_reference_count"] == 1
     row = result["rows"][0]
-    summary = summarize_difference_rows(result["rows"])
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
     assert row["primary_type"] == "simulated_only_unknown"
     assert "missing_source" in row["difference_flags"]
     assert row["live_pnl"] is None
@@ -186,7 +194,10 @@ def test_trusted_final_fill_without_explicit_pnl_is_unreconcilable():
     )
 
     row = result["rows"][0]
-    summary = summarize_difference_rows(result["rows"])
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
     assert row["live"]["present"] is True
     assert row["live"]["missing_pnl_count"] == 1
     assert row["live_pnl"] is None
@@ -241,7 +252,10 @@ def test_missing_live_ledger_marks_live_pnl_and_summary_unknown():
     )
 
     row = result["rows"][0]
-    summary = summarize_difference_rows(result["rows"])
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
     assert row["live_pnl"] is None
     assert row["simulated_pnl"] == -4.9
     assert row["pnl_delta"] is None
@@ -262,10 +276,39 @@ def test_missing_scored_summary_marks_simulated_pnl_and_summary_unknown():
     )
 
     row = result["rows"][0]
-    summary = summarize_difference_rows(result["rows"])
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
     assert row["live_pnl"] == -5.0
     assert row["simulated_pnl"] is None
     assert row["pnl_delta"] is None
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
+def test_summary_requires_global_reconcilability_flag():
+    with pytest.raises(TypeError):
+        summarize_difference_rows([])
+
+
+def test_missing_ledger_with_no_rows_keeps_summary_money_unknown():
+    result = reconcile_strategy_orders(
+        live_records=[],
+        formal_predictions=[],
+        scored_records=[],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=False,
+        scored_available=True,
+    )
+
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert result["rows"] == []
     assert summary["live_pnl"] is None
     assert summary["simulated_pnl"] is None
     assert summary["pnl_delta"] is None
@@ -292,6 +335,28 @@ def test_no_fill_attempt_is_classified_as_simulated_no_fill():
     row = result["rows"][0]
     assert row["primary_type"] == "simulated_no_fill"
     assert row["difference_flags"] == ["no_fill"]
+
+
+@pytest.mark.parametrize("status", ["NO_FILL", "CANCELLED"])
+def test_unscored_no_fill_attempt_is_omitted(status):
+    result = reconcile_strategy_orders(
+        live_records=[
+            _live(
+                status=status,
+                filled_size=0,
+                average_fill_price=None,
+                net_pnl=None,
+            )
+        ],
+        formal_predictions=[],
+        scored_records=[],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    assert result["rows"] == []
 
 
 def test_latest_order_update_is_deduplicated_across_markets():
