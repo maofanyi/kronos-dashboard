@@ -447,7 +447,7 @@ def _classify_simulated_only(
     if (
         same_side
         and formal.get("would_place_order") is True
-        and formal.get("submitted") is not True
+        and formal.get("submitted") is False
         and str(formal.get("guarded_mode") or "").lower() == "blocked"
     ):
         return (

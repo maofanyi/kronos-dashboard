@@ -551,6 +551,17 @@ def test_simulated_order_explains_pre_submit_gate():
     assert row["difference_flags"] == ["pre_submit_gate"]
 
 
+def test_missing_submitted_evidence_leaves_pre_submit_cause_unknown():
+    formal = _formal()
+    del formal["submitted"]
+
+    row = _single_type(formal_predictions=[formal])
+
+    assert row["primary_type"] == "simulated_only_unknown"
+    assert row["difference_flags"] == ["missing_source"]
+    assert row["reason_label"] == "no comparable live fill reason is known"
+
+
 def test_simulated_order_explains_no_fill_before_gate_reason():
     row = _single_type(
         live_records=[
