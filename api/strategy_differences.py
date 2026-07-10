@@ -36,6 +36,9 @@ def summarize_difference_rows(
     reconcilable: bool = True,
 ) -> dict[str, Any]:
     materialized = list(rows)
+    reconcilable = reconcilable and all(
+        row.get("reconcilable", True) for row in materialized
+    )
     by_type: dict[str, dict[str, Any]] = {}
     for difference_type in DIFFERENCE_TYPES:
         typed = [row for row in materialized if row["primary_type"] == difference_type]
@@ -82,6 +85,8 @@ def reconcile_strategy_orders(
             live=live_by_market.get(key),
             formal=formal_by_market.get(key),
             simulated=scored_by_market.get(key),
+            ledger_available=ledger_available,
+            scored_available=scored_available,
         )
         for key in keys
     ]
@@ -192,20 +197,45 @@ def _order_updated_at(record: Mapping[str, Any]) -> datetime:
 
 
 def _dedupe_live_records(records: Iterable[Mapping[str, Any]]) -> list[Mapping[str, Any]]:
-    deduplicated: list[Mapping[str, Any]] = []
-    known: dict[tuple[str, str], tuple[datetime, int, Mapping[str, Any]]] = {}
-    for index, record in enumerate(records):
-        order_identifier = record.get("order_id") or record.get("order_key")
-        if order_identifier in (None, ""):
-            deduplicated.append(record)
-            continue
-        marker = ("order", str(order_identifier))
-        candidate = (_order_updated_at(record), index, record)
-        existing = known.get(marker)
-        if existing is None or candidate[:2] >= existing[:2]:
-            known[marker] = candidate
-    deduplicated.extend(item[2] for item in known.values())
-    return deduplicated
+    materialized = list(records)
+    parents = list(range(len(materialized)))
+
+    def find(index: int) -> int:
+        while parents[index] != index:
+            parents[index] = parents[parents[index]]
+            index = parents[index]
+        return index
+
+    def union(left: int, right: int) -> None:
+        left_root = find(left)
+        right_root = find(right)
+        if left_root != right_root:
+            parents[right_root] = left_root
+
+    known: dict[tuple[str, str], int] = {}
+    identified: set[int] = set()
+    for index, record in enumerate(materialized):
+        for key in ("order_id", "order_key"):
+            value = record.get(key)
+            if value in (None, ""):
+                continue
+            identified.add(index)
+            marker = (key, str(value))
+            previous = known.get(marker)
+            if previous is None:
+                known[marker] = index
+            else:
+                union(index, previous)
+
+    groups: dict[int, list[int]] = defaultdict(list)
+    for index in identified:
+        groups[find(index)].append(index)
+    selected = {
+        max(indexes, key=lambda index: (_order_updated_at(materialized[index]), index))
+        for indexes in groups.values()
+    }
+    selected.update(index for index in range(len(materialized)) if index not in identified)
+    return [materialized[index] for index in sorted(selected)]
 
 
 def _is_final_filled(record: Mapping[str, Any]) -> bool:
@@ -232,7 +262,7 @@ def _aggregate_live_markets(
     end_at: datetime,
 ) -> tuple[dict[tuple[str, str], dict[str, Any]], dict[str, Any]]:
     grouped: dict[tuple[str, str], list[Mapping[str, Any]]] = defaultdict(list)
-    for record in records:
+    for record in _dedupe_live_records(records):
         key = market_key(record)
         if key is not None and _in_window(record, start_at=start_at, end_at=end_at):
             grouped[key].append(record)
@@ -240,10 +270,13 @@ def _aggregate_live_markets(
     excluded_live_reference_count = 0
     markets: dict[tuple[str, str], dict[str, Any]] = {}
     for key, market_records in grouped.items():
-        attempts = _dedupe_live_records(market_records)
+        attempts = market_records
         trusted_fills: list[Mapping[str, Any]] = []
         excluded_final_fill_count = 0
+        no_fill_attempt_count = 0
         for record in attempts:
+            if str(record.get("status") or "").upper() in NO_FILL_STATUSES:
+                no_fill_attempt_count += 1
             if not _is_final_filled(record):
                 continue
             if not _has_datastreams_reference(record):
@@ -272,6 +305,7 @@ def _aggregate_live_markets(
             "won": _won(latest_fill) if latest_fill is not None else None,
             "pnl": round(live_pnl, 6),
             "excluded_final_fill_count": excluded_final_fill_count,
+            "no_fill_attempt_count": no_fill_attempt_count,
         }
 
     warnings = []
@@ -363,11 +397,26 @@ def _reconcile_market(
     live: Mapping[str, Any] | None,
     formal: Mapping[str, Any] | None,
     simulated: Mapping[str, Any] | None,
+    ledger_available: bool,
+    scored_available: bool,
 ) -> dict[str, Any]:
     live_present = bool(live and live.get("present"))
     simulated_present = bool(simulated and simulated.get("present"))
-    live_pnl = round(float(live.get("pnl", 0.0)) if live_present and live else 0.0, 6)
-    simulated_pnl = round(float(simulated.get("pnl", 0.0)) if simulated_present and simulated else 0.0, 6)
+    live_pnl = (
+        round(float(live.get("pnl", 0.0)) if live_present and live else 0.0, 6)
+        if ledger_available
+        else None
+    )
+    simulated_pnl = (
+        round(float(simulated.get("pnl", 0.0)) if simulated_present and simulated else 0.0, 6)
+        if scored_available
+        else None
+    )
+    pnl_delta = (
+        round(live_pnl - simulated_pnl, 6)
+        if live_pnl is not None and simulated_pnl is not None
+        else None
+    )
     difference_flags: list[str] = []
 
     if live_present and simulated_present:
@@ -378,12 +427,13 @@ def _reconcile_market(
         execution_pairs = (
             ("size", live.get("filled_size"), simulated.get("size")),
             ("price", live.get("average_fill_price"), simulated.get("price")),
-            ("pnl", live_pnl, simulated_pnl),
             ("attempts", live.get("attempts"), simulated.get("attempts")),
         )
         difference_flags.extend(
             name for name, left, right in execution_pairs if not _numbers_match(left, right)
         )
+        if live_pnl is not None and simulated_pnl is not None and not _numbers_match(live_pnl, simulated_pnl):
+            difference_flags.append("pnl")
         if "side" in difference_flags:
             primary_type = "side_mismatch"
             reason_label = "live and simulated sides differ"
@@ -401,13 +451,21 @@ def _reconcile_market(
         difference_flags = ["missing_source"]
         reason_label = "no simulated trade for this market"
     else:
-        primary_type = "simulated_only_unknown"
-        difference_flags = ["missing_source"]
         if live and live.get("excluded_final_fill_count", 0) > 0:
+            primary_type = "simulated_only_unknown"
+            difference_flags = ["missing_source"]
             reason_label = "live settlement source is not comparable"
+        elif live and live.get("no_fill_attempt_count", 0) > 0:
+            primary_type = "simulated_no_fill"
+            difference_flags = ["no_fill"]
+            reason_label = "live order attempt did not fill"
         elif formal:
+            primary_type = "simulated_only_unknown"
+            difference_flags = ["missing_source"]
             reason_label = "no comparable live fill for this market"
         else:
+            primary_type = "simulated_only_unknown"
+            difference_flags = ["missing_source"]
             reason_label = "live and formal sources do not explain this market"
 
     return {
@@ -420,9 +478,10 @@ def _reconcile_market(
         "live": dict(live) if live is not None else None,
         "formal": dict(formal) if formal is not None else None,
         "simulated": dict(simulated) if simulated is not None else None,
+        "reconcilable": ledger_available and scored_available,
         "live_pnl": live_pnl,
         "simulated_pnl": simulated_pnl,
-        "pnl_delta": round(live_pnl - simulated_pnl, 6),
+        "pnl_delta": pnl_delta,
     }
 
 

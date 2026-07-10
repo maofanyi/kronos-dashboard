@@ -188,3 +188,99 @@ def test_records_before_start_are_not_returned():
         scored_available=True,
     )
     assert result["rows"] == []
+
+
+def test_missing_live_ledger_marks_live_pnl_and_summary_unknown():
+    result = reconcile_strategy_orders(
+        live_records=[_live()],
+        formal_predictions=[],
+        scored_records=[_scored()],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=False,
+        scored_available=True,
+    )
+
+    row = result["rows"][0]
+    summary = summarize_difference_rows(result["rows"])
+    assert row["live_pnl"] is None
+    assert row["simulated_pnl"] == -4.9
+    assert row["pnl_delta"] is None
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
+def test_missing_scored_summary_marks_simulated_pnl_and_summary_unknown():
+    result = reconcile_strategy_orders(
+        live_records=[_live()],
+        formal_predictions=[],
+        scored_records=[_scored()],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=False,
+    )
+
+    row = result["rows"][0]
+    summary = summarize_difference_rows(result["rows"])
+    assert row["live_pnl"] == -5.0
+    assert row["simulated_pnl"] is None
+    assert row["pnl_delta"] is None
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
+def test_no_fill_attempt_is_classified_as_simulated_no_fill():
+    result = reconcile_strategy_orders(
+        live_records=[
+            _live(
+                status="NO_FILL",
+                filled_size=0,
+                average_fill_price=None,
+                net_pnl=None,
+            )
+        ],
+        formal_predictions=[],
+        scored_records=[_scored()],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    row = result["rows"][0]
+    assert row["primary_type"] == "simulated_no_fill"
+    assert row["difference_flags"] == ["no_fill"]
+
+
+def test_latest_order_update_is_deduplicated_across_markets():
+    latest_entry = "2026-07-10T10:20:00Z"
+    latest_settle = "2026-07-10T10:25:00Z"
+    result = reconcile_strategy_orders(
+        live_records=[
+            _live(
+                order_id="updated-order",
+                updated_at="2026-07-10T10:11:00Z",
+            ),
+            _live(
+                order_id="updated-order",
+                entry_ts=latest_entry,
+                settle_ts=latest_settle,
+                updated_at="2026-07-10T10:21:00Z",
+                average_fill_price=0.49,
+                net_pnl=-4.9,
+            ),
+        ],
+        formal_predictions=[],
+        scored_records=[_scored(entry_ts=latest_entry, settle_ts=latest_settle)],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    assert len(result["rows"]) == 1
+    assert result["rows"][0]["entry_ts"] == latest_entry
+    assert result["rows"][0]["primary_type"] == "matched"
