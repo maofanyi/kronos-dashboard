@@ -108,41 +108,53 @@ def test_frontend_uses_slower_polling_for_heavy_dashboard_endpoints():
 
 def test_strategy_compare_frontend_fetches_on_demand_without_polling():
     compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
+    differences = Path("web/src/components/StrategyDifferences.tsx").read_text(
+        encoding="utf-8"
+    )
 
     assert 'import { usePolling } from "../hooks/usePolling";' not in compare_page
     assert "usePolling<StrategyComparisonData>" not in compare_page
     assert "fetchStrategyComparison" in compare_page
-    assert "Refresh" in compare_page
+    assert "usePolling" not in differences
+    assert "setInterval" not in differences
+    assert "if (!expanded || !candidateId)" in differences
+    assert 'title="刷新差异数据"' in differences
     assert "showRecent" in compare_page
 
 
-def test_strategy_compare_frontend_shows_live_matched_real_comparison():
+def test_strategy_compare_frontend_shows_lazy_strategy_differences():
     compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
+    differences = Path("web/src/components/StrategyDifferences.tsx").read_text(
+        encoding="utf-8"
+    )
 
     assert "live_matched" in compare_page
-    assert "Live-Matched" in compare_page
-    assert "Actual PnL" in compare_page
-    assert "Normalized PnL" in compare_page
+    assert "<StrategyDifferences" in compare_page
+    assert "实盘与模拟差异" in differences
+    assert "全窗口差额" in differences
+    assert "筛选后差额" in differences
+    assert "不可对账" in differences
 
 
-def test_strategy_compare_frontend_separates_today_actual_and_scored_pnl():
+def test_strategy_compare_frontend_separates_today_live_and_simulated_pnl():
     compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
+    differences = Path("web/src/components/StrategyDifferences.tsx").read_text(
+        encoding="utf-8"
+    )
 
     assert 'useState<StrategyFilters["window"]>("today")' in compare_page
-    assert '(["today", "7d", "14d", "all"] as const)' in compare_page
-    assert '"24h" |' not in compare_page
-    assert "live trading day" in compare_page
-    assert "Actual Live PnL" in compare_page
-    assert "Scored PnL" in compare_page
-    assert "Scored Win Rate" in compare_page
+    assert '(["today", "24h", "7d", "14d", "all"] as const)' in compare_page
+    assert "今天交易日" in compare_page
+    assert "实盘PnL" in differences
+    assert "模拟PnL" in differences
+    assert "全窗口差额" in differences
 
 
 def test_strategy_compare_frontend_marks_partial_scored_summaries():
     compare_page = Path("web/src/pages/Compare.tsx").read_text(encoding="utf-8")
 
     assert "partialWindow" in compare_page
-    assert "Partial" in compare_page
+    assert "部分评分" in compare_page
     assert "coverage?.score_label" in compare_page
-    assert "Candidate Scored PnL" in compare_page
-    assert "Live Normalized PnL" in compare_page
-    assert "Candidate Scored Win Rate" in compare_page
+    assert "候选策略评分只覆盖已采集的 no-submit 信号" in compare_page
+    assert "不等同于完整交易窗口" in compare_page
