@@ -1788,16 +1788,21 @@ def _monthly_pnl_calendar_from_records(records, *, month_value):
         _dashboard_day_key(_record_ts(record)).strftime("%Y-%m")
         for record in settled_records
     })
+    total_pnl_raw = 0.0
     for record in settled_records:
         day_key = _dashboard_day_key(_record_ts(record)).isoformat()
         if day_key not in days:
             continue
         item = days[day_key]
-        item["pnl_usdc"] = round(item["pnl_usdc"] + _record_pnl(record), 8)
+        pnl = _record_pnl(record)
+        item["pnl_usdc"] += pnl
+        total_pnl_raw += pnl
         item["settled"] += 1
         won = _record_won(record)
         item["wins"] += int(won is True)
         item["losses"] += int(won is False)
+    for item in days.values():
+        item["pnl_usdc"] = round(item["pnl_usdc"], 8)
     ordered = list(days.values())
     settled = sum(row["settled"] for row in ordered)
     wins = sum(row["wins"] for row in ordered)
@@ -1809,7 +1814,7 @@ def _monthly_pnl_calendar_from_records(records, *, month_value):
         "end_date": ordered[-1]["date"],
         "available_months": available_months,
         "days": ordered,
-        "total_pnl_usdc": round(sum(row["pnl_usdc"] for row in ordered), 8),
+        "total_pnl_usdc": round(total_pnl_raw, 8),
         "settled": settled,
         "wins": wins,
         "losses": losses,
@@ -1849,7 +1854,7 @@ def _daily_pnl_orders_from_records(records, *, day_value):
             "settle_ts": _iso_utc(_record_ts(record)),
             "filled_size": _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size"),
             "average_fill_price": _float_value(record, "average_fill_price", "avg_fill_price"),
-            "pnl_usdc": round(_record_pnl(record), 8),
+            "pnl_usdc": _record_pnl(record),
             "won": _record_won(record),
             "status": str(record.get("status") or "").upper() or None,
             "settlement_source": record.get("settlement_source"),

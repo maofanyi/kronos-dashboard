@@ -1,17 +1,8 @@
 from __future__ import annotations
 
-import json
-from datetime import date
-from pathlib import Path
-
 import pytest
 
 from api import server
-
-
-def _write_json(path: Path, payload) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _records() -> list[dict]:
@@ -97,6 +88,59 @@ def test_daily_orders_reconcile_exactly_to_month_day(monkeypatch):
     assert sum(row["pnl_usdc"] for row in day["orders"]) == pytest.approx(month_day["pnl_usdc"])
     assert day["total_pnl_usdc"] == month_day["pnl_usdc"]
     assert day["orders"][0]["settlement_source"] == "official_chainlink"
+
+
+def test_calendar_rounds_totals_only_after_raw_pnl_accumulation(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
+    records = [
+        {
+            "order_id": "rounding-one",
+            "status": "SETTLED",
+            "settled_at": "2026-07-01T00:00:00Z",
+            "pnl": 0.0000000049,
+            "won": True,
+        },
+        {
+            "order_id": "rounding-two",
+            "status": "SETTLED",
+            "settled_at": "2026-07-01T00:01:00Z",
+            "pnl": 0.0000000049,
+            "won": True,
+        },
+    ]
+
+    month = server._monthly_pnl_calendar_from_records(records, month_value="2026-07")
+    day = server._daily_pnl_orders_from_records(records, day_value="2026-07-01")
+
+    month_day = next(row for row in month["days"] if row["date"] == "2026-07-01")
+    assert month_day["pnl_usdc"] == 0.00000001
+    assert month["total_pnl_usdc"] == 0.00000001
+    assert day["orders"][0]["pnl_usdc"] == pytest.approx(0.0000000049)
+    assert day["orders"][1]["pnl_usdc"] == pytest.approx(0.0000000049)
+    assert round(sum(row["pnl_usdc"] for row in day["orders"]), 8) == day["total_pnl_usdc"]
+    assert day["total_pnl_usdc"] == 0.00000001
+
+
+def test_calendar_retains_duplicate_qualifying_settled_rows(monkeypatch):
+    monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
+    duplicate = {
+        "order_id": "same-order",
+        "signal_id": "same-signal",
+        "status": "SETTLED",
+        "settled_at": "2026-07-01T00:00:00Z",
+        "pnl": 1.25,
+        "won": True,
+    }
+
+    month = server._monthly_pnl_calendar_from_records([duplicate, dict(duplicate)], month_value="2026-07")
+    day = server._daily_pnl_orders_from_records([duplicate, dict(duplicate)], day_value="2026-07-01")
+
+    month_day = next(row for row in month["days"] if row["date"] == "2026-07-01")
+    assert month_day["settled"] == 2
+    assert month_day["pnl_usdc"] == 2.5
+    assert day["settled"] == 2
+    assert len(day["orders"]) == 2
+    assert day["total_pnl_usdc"] == 2.5
 
 
 def test_calendar_ledger_path_selects_only_supported_sources(monkeypatch, tmp_path):
