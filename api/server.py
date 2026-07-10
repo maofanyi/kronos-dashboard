@@ -1,5 +1,6 @@
 """Flask API server for Kronos Dashboard."""
 import asyncio
+from calendar import monthrange
 import hashlib
 import hmac
 import json
@@ -1738,6 +1739,136 @@ def _weekly_pnl_calendar_from_records(records, *, now=None):
         "losses": losses,
         "win_rate": round(wins / settled, 4) if settled else 0.0,
         "day_tz": day_info["day_tz"],
+        "source": "settled_ledger_trading_day",
+    }
+
+
+def _calendar_month(value):
+    try:
+        parsed = datetime.strptime(str(value), "%Y-%m")
+    except (TypeError, ValueError) as exc:
+        raise ValueError("month must use YYYY-MM") from exc
+    return parsed.year, parsed.month
+
+
+def _calendar_settled_records(records):
+    return [
+        record
+        for record in (records or [])
+        if isinstance(record, dict)
+        and _is_equity_settled_record(record)
+        and _record_ts(record) is not None
+    ]
+
+
+def _calendar_ledger_path(source):
+    if source == "live_real":
+        return _live_real_ledger_path()
+    if source == "paper_monitor":
+        return _paper_ledger_path()
+    raise ValueError("unsupported source")
+
+
+def _monthly_pnl_calendar_from_records(records, *, month_value):
+    year, month = _calendar_month(month_value)
+    day_tz = _dashboard_day_info(day=date(year, month, 1))["day_tz"]
+    day_count = monthrange(year, month)[1]
+    days = {
+        date(year, month, number).isoformat(): {
+            "date": date(year, month, number).isoformat(),
+            "pnl_usdc": 0.0,
+            "settled": 0,
+            "wins": 0,
+            "losses": 0,
+        }
+        for number in range(1, day_count + 1)
+    }
+    settled_records = _calendar_settled_records(records)
+    available_months = sorted({
+        _dashboard_day_key(_record_ts(record)).strftime("%Y-%m")
+        for record in settled_records
+    })
+    for record in settled_records:
+        day_key = _dashboard_day_key(_record_ts(record)).isoformat()
+        if day_key not in days:
+            continue
+        item = days[day_key]
+        item["pnl_usdc"] = round(item["pnl_usdc"] + _record_pnl(record), 8)
+        item["settled"] += 1
+        won = _record_won(record)
+        item["wins"] += int(won is True)
+        item["losses"] += int(won is False)
+    ordered = list(days.values())
+    settled = sum(row["settled"] for row in ordered)
+    wins = sum(row["wins"] for row in ordered)
+    losses = sum(row["losses"] for row in ordered)
+    return {
+        "month": f"{year:04d}-{month:02d}",
+        "day_tz": day_tz,
+        "start_date": ordered[0]["date"],
+        "end_date": ordered[-1]["date"],
+        "available_months": available_months,
+        "days": ordered,
+        "total_pnl_usdc": round(sum(row["pnl_usdc"] for row in ordered), 8),
+        "settled": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / settled, 4) if settled else 0.0,
+        "empty": settled == 0,
+        "source": "settled_ledger_trading_day",
+    }
+
+
+def _daily_pnl_orders_from_records(records, *, day_value):
+    try:
+        day = date.fromisoformat(str(day_value))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("date must use YYYY-MM-DD") from exc
+    day_tz = _dashboard_day_info(day=day)["day_tz"]
+    settled_records = [
+        record
+        for record in _calendar_settled_records(records)
+        if _dashboard_day_key(_record_ts(record)) == day
+    ]
+    ordered_records = sorted(
+        settled_records,
+        key=_record_ts,
+        reverse=True,
+    )
+    orders = [
+        {
+            "order_id": record.get("order_id"),
+            "market_slug": record.get("market_slug"),
+            "direction": str(
+                record.get("direction")
+                or record.get("token_outcome")
+                or record.get("side")
+                or record.get("action")
+                or ""
+            ).upper() or None,
+            "settle_ts": _iso_utc(_record_ts(record)),
+            "filled_size": _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size"),
+            "average_fill_price": _float_value(record, "average_fill_price", "avg_fill_price"),
+            "pnl_usdc": round(_record_pnl(record), 8),
+            "won": _record_won(record),
+            "status": str(record.get("status") or "").upper() or None,
+            "settlement_source": record.get("settlement_source"),
+        }
+        for record in ordered_records
+    ]
+    total_pnl = round(sum(row["pnl_usdc"] for row in orders), 8)
+    settled = len(orders)
+    wins = sum(1 for row in orders if row["won"] is True)
+    losses = sum(1 for row in orders if row["won"] is False)
+    return {
+        "date": day.isoformat(),
+        "day_tz": day_tz,
+        "orders": orders,
+        "total_pnl_usdc": total_pnl,
+        "settled": settled,
+        "wins": wins,
+        "losses": losses,
+        "win_rate": round(wins / settled, 4) if settled else 0.0,
         "source": "settled_ledger_trading_day",
     }
 
