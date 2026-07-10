@@ -252,7 +252,7 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
                         {
                             "entry_ts": "2026-07-02T00:05:00Z",
                             "settle_ts": "2026-07-02T00:10:00Z",
-                            "side": "LONG",
+                            "side": "SHORT",
                             "won": True,
                             "pnl_usdc": 2.55,
                             "maker_price": 0.49,
@@ -315,10 +315,13 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
     assert live_matched["available"] is True
     by_id = {row["candidate_id"]: row for row in live_matched["candidates"]}
     official = by_id["official_truth_14d14d_latest"]
+    assert by_id["official_truth_7d7d_latest"]["pnl_delta"] is None
     assert official["overlap_count"] == 1
     assert official["live_only_count"] == 1
     assert official["scored_only_count"] == 1
+    assert official["side_mismatches"] == 1
     assert official["won_mismatches"] == 0
+    assert official["pnl_delta"] == -0.2
     assert official["all_live"]["settled"] == 2
     assert official["all_scored"]["settled"] == 2
     assert official["overlap"]["live_actual_pnl"] == 5.0
@@ -332,6 +335,51 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
     assert window_by_id["official_truth_14d14d_latest"]["losses"] == 1
     assert window_by_id["official_truth_14d14d_latest"]["win_rate"] == 0.5
     assert window_by_id["official_truth_14d14d_latest"]["pnl_usdc"] == 0.1
+
+
+def test_strategy_live_matched_pnl_delta_is_unknown_without_ledger(
+    monkeypatch,
+    tmp_path,
+):
+    report_dir = tmp_path / "reports"
+    checkpoint_dir = tmp_path / "checkpoints"
+    report_dir.mkdir()
+    checkpoint_dir.mkdir()
+    monkeypatch.setattr(server, "KRONOS_REPORT_DIR", report_dir)
+    monkeypatch.setattr(server, "KRONOS_CHECKPOINT_DIR", checkpoint_dir)
+    scored_path = (
+        report_dir / "candidate_no_submit_official_truth_scored_summary.json"
+    )
+    _write_json(
+        scored_path,
+        {
+            "candidates": [
+                {
+                    "candidate_id": "official_truth_14d14d_latest",
+                    "trades": [],
+                }
+            ]
+        },
+    )
+    candidate_specs = [
+        spec
+        for spec in server.STRATEGY_COMPARE_CANDIDATES
+        if spec["candidate_id"] == "official_truth_14d14d_latest"
+    ]
+
+    payload = server._strategy_live_matched_comparison(
+        candidate_specs,
+        now_dt=datetime(2026, 7, 10, 12, 0, tzinfo=timezone.utc),
+        filters=server._strategy_compare_filters({"window": "all"}),
+        scored_by_candidate=server._strategy_scored_summary_by_candidate(
+            scored_path
+        ),
+        scored_path=scored_path,
+    )
+
+    assert payload["available"] is False
+    assert payload["candidates"][0]["scored_available"] is True
+    assert payload["candidates"][0]["pnl_delta"] is None
 
 
 def test_strategy_comparison_falls_back_to_live_config_sizing(monkeypatch, tmp_path):

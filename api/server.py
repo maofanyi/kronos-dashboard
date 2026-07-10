@@ -20,6 +20,19 @@ import requests
 from flask import Flask, g, jsonify, request, send_from_directory
 from flask_cors import CORS
 
+try:
+    from .strategy_differences import (
+        DIFFERENCE_TYPES,
+        reconcile_strategy_orders,
+        summarize_difference_rows,
+    )
+except ImportError:
+    from strategy_differences import (
+        DIFFERENCE_TYPES,
+        reconcile_strategy_orders,
+        summarize_difference_rows,
+    )
+
 app = Flask(__name__, static_folder="static", static_url_path="")
 CORS(app)
 
@@ -3046,6 +3059,54 @@ def _strategy_compare_filters(args):
     }
 
 
+def _strategy_difference_filters(args):
+    candidate_id = str(args.get("candidate") or "").strip()
+    allowed_candidates = {
+        spec["candidate_id"] for spec in STRATEGY_COMPARE_CANDIDATES
+    }
+    if candidate_id not in allowed_candidates:
+        raise ValueError("invalid_candidate")
+    raw_window = args.get("window")
+    window = "7d" if raw_window is None else str(raw_window).strip().lower()
+    if window not in {"today", "24h", "7d", "14d", "all"}:
+        raise ValueError("invalid_window")
+    requested_types = [
+        value.strip()
+        for value in str(args.get("types") or "").split(",")
+        if value.strip()
+    ]
+    invalid_types = [
+        value for value in requested_types if value not in DIFFERENCE_TYPES
+    ]
+    if invalid_types:
+        raise ValueError("invalid_types")
+    raw_include_matched = args.get("include_matched")
+    normalized_include_matched = str(raw_include_matched or "").strip().lower()
+    if normalized_include_matched in {"", "0", "false", "no"}:
+        include_matched = False
+    elif normalized_include_matched in {"1", "true", "yes"}:
+        include_matched = True
+    else:
+        raise ValueError("invalid_include_matched")
+    try:
+        raw_limit = args.get("limit")
+        raw_offset = args.get("offset")
+        limit = 100 if raw_limit is None else int(raw_limit)
+        offset = 0 if raw_offset is None else int(raw_offset)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("invalid_pagination") from exc
+    if not 1 <= limit <= 500 or offset < 0:
+        raise ValueError("invalid_pagination")
+    return {
+        "candidate_id": candidate_id,
+        "window": window,
+        "types": requested_types,
+        "include_matched": include_matched,
+        "limit": limit,
+        "offset": offset,
+    }
+
+
 def _strategy_window_start(now_dt, window):
     now_dt = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
     today = _dashboard_day_info(now=now_dt)["day"]
@@ -3092,7 +3153,11 @@ def _scored_trade_buckets(scored, bucket="day", *, now_dt=None, filters=None):
             trade for trade in trades
             if isinstance(trade, dict) and _strategy_trade_in_window(trade, now_dt=now_dt, filters=filters)
         ]
-    grouped = _strategy_group_records_by_trade_key(trades, keep="first")
+    grouped = _strategy_group_records_by_trade_key(
+        trades,
+        keep="first",
+        key_func=_strategy_scored_bucket_trade_key,
+    )
     buckets = {}
     for rows in grouped.values():
         if not rows:
@@ -3405,11 +3470,22 @@ def _strategy_trade_side(record):
 
 
 def _strategy_trade_key(record):
-    ts = _strategy_trade_entry_ts(record)
-    side = _strategy_trade_side(record)
-    if ts is None or side not in {"LONG", "SHORT"}:
+    entry_ts = _parse_dt(record.get("entry_ts"))
+    settle_ts = _parse_dt(record.get("settle_ts"))
+    if entry_ts is None or settle_ts is None:
         return None
-    return (_iso_utc(ts), side)
+    return (_iso_utc(entry_ts), _iso_utc(settle_ts))
+
+
+def _strategy_scored_bucket_trade_key(record):
+    market_key = _strategy_trade_key(record)
+    if market_key is not None:
+        return market_key
+    entry_ts = _strategy_trade_entry_ts(record)
+    side = _strategy_trade_side(record)
+    if entry_ts is None or side not in {"LONG", "SHORT"}:
+        return None
+    return (_iso_utc(entry_ts), side)
 
 
 def _strategy_trade_in_window(record, *, now_dt, filters):
@@ -3493,10 +3569,11 @@ def _strategy_scored_pnl(record, *, default_size_shares, default_maker_price):
     ) or 0.0
 
 
-def _strategy_group_records_by_trade_key(records, *, keep="all"):
+def _strategy_group_records_by_trade_key(records, *, keep="all", key_func=None):
+    key_func = key_func or _strategy_trade_key
     grouped = {}
     for record in records:
-        key = _strategy_trade_key(record)
+        key = key_func(record)
         if key is not None:
             if keep == "first" and key in grouped:
                 continue
@@ -3538,6 +3615,14 @@ def _strategy_first_won(rows):
         if won is not None:
             return won
     return None
+
+
+def _strategy_first_side(rows):
+    for row in rows or []:
+        side = _strategy_trade_side(row)
+        if side in {"LONG", "SHORT"}:
+            return side
+    return ""
 
 
 def _strategy_live_scored_segment_summary(keys, *, live_by_key, scored_by_key, size_shares, maker_price):
@@ -3583,6 +3668,7 @@ def _strategy_live_scored_segment_summary(keys, *, live_by_key, scored_by_key, s
 
 def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, scored_by_candidate, scored_path):
     ledger_path = _live_real_ledger_path()
+    ledger_available = ledger_path.exists()
     scored_payload = _strategy_scored_summary_payload(scored_path)
     scoring_defaults = _strategy_live_scoring_defaults(scored_payload)
     size_shares = _num(scoring_defaults.get("size_shares")) or 5.0
@@ -3610,6 +3696,24 @@ def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, score
             1 for key in overlap_keys
             if _strategy_first_won(live_by_key.get(key, [])) != _strategy_first_won(scored_by_key.get(key, []))
         )
+        side_mismatches = sum(
+            1 for key in overlap_keys
+            if _strategy_first_side(live_by_key.get(key, [])) != _strategy_first_side(scored_by_key.get(key, []))
+        )
+        all_live_summary = _strategy_live_scored_segment_summary(
+            live_keys if scored_available else set(),
+            live_by_key=live_by_key,
+            scored_by_key={},
+            size_shares=size_shares,
+            maker_price=maker_price,
+        )
+        all_scored_summary = _strategy_live_scored_segment_summary(
+            scored_keys,
+            live_by_key={},
+            scored_by_key=scored_by_key,
+            size_shares=size_shares,
+            maker_price=maker_price,
+        )
         rows.append(
             {
                 "candidate_id": candidate_id,
@@ -3618,21 +3722,19 @@ def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, score
                 "overlap_count": len(overlap_keys),
                 "live_only_count": len(live_only_keys),
                 "scored_only_count": len(scored_only_keys),
+                "side_mismatches": side_mismatches,
                 "won_mismatches": won_mismatches,
-                "all_live": _strategy_live_scored_segment_summary(
-                    live_keys if scored_available else set(),
-                    live_by_key=live_by_key,
-                    scored_by_key={},
-                    size_shares=size_shares,
-                    maker_price=maker_price,
+                "pnl_delta": (
+                    round(
+                        all_live_summary["live_actual_pnl"]
+                        - all_scored_summary["scored_pnl"],
+                        6,
+                    )
+                    if ledger_available and scored_available
+                    else None
                 ),
-                "all_scored": _strategy_live_scored_segment_summary(
-                    scored_keys,
-                    live_by_key={},
-                    scored_by_key=scored_by_key,
-                    size_shares=size_shares,
-                    maker_price=maker_price,
-                ),
+                "all_live": all_live_summary,
+                "all_scored": all_scored_summary,
                 "overlap": _strategy_live_scored_segment_summary(
                     overlap_keys,
                     live_by_key=live_by_key,
@@ -3657,7 +3759,7 @@ def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, score
             }
         )
     return {
-        "available": ledger_path.exists() and scored_path.exists(),
+        "available": ledger_available and scored_path.exists(),
         "ledger_path": str(ledger_path),
         "scored_summary_path": str(scored_path),
         "live_reference_source": "chainlink_datastreams*",
@@ -3666,6 +3768,111 @@ def _strategy_live_matched_comparison(candidate_specs, *, now_dt, filters, score
         "live_order_count": len(live_records),
         "live_settled_count": len(live_keys),
         "candidates": rows,
+    }
+
+
+def _strategy_difference_payload(*, candidate_id, filters, now=None):
+    now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+    ledger_path = _live_real_ledger_path()
+    formal_path = _live_formal_prediction_history_path()
+    scored_path = _candidate_no_submit_official_truth_scored_summary_path()
+    ledger_available = ledger_path.exists()
+    formal_available = formal_path.exists()
+    scored_summary_available = scored_path.exists()
+    scored_by_candidate = _strategy_scored_summary_by_candidate(scored_path)
+    scored = scored_by_candidate.get(candidate_id)
+    scored_available = scored_summary_available and isinstance(scored, dict)
+    source_warnings = []
+    if not ledger_available:
+        source_warnings.append("live ledger missing; live PnL is unknown")
+    if not formal_available:
+        source_warnings.append(
+            "formal prediction history missing; simulated-only causes may be unknown"
+        )
+    if not scored_available:
+        source_warnings.append("candidate scored summary missing")
+    if not scored_available:
+        reconcilable = False
+        empty_summary = summarize_difference_rows([], reconcilable=reconcilable)
+        return {
+            "generated_at": _iso_utc(now_dt),
+            "candidate_id": candidate_id,
+            "available": False,
+            "warnings": source_warnings,
+            "data_quality": {
+                "reconcilable": reconcilable,
+                "excluded_live_reference_count": 0,
+                "conflicting_scored_markets": [],
+            },
+            "filters": filters,
+            "overall_summary": empty_summary,
+            "filtered_summary": empty_summary,
+            "pagination": {
+                "limit": filters["limit"],
+                "offset": filters["offset"],
+                "returned": 0,
+                "total": 0,
+            },
+            "rows": [],
+        }
+
+    scored_records = scored.get("trades") if isinstance(scored.get("trades"), list) else []
+    result = reconcile_strategy_orders(
+        live_records=_rows_from_ledger_payload(_read_json(ledger_path)),
+        formal_predictions=_tail_jsonl(
+            formal_path,
+            limit=STRATEGY_COMPARISON_SIGNAL_READ_LIMIT,
+        ),
+        scored_records=[row for row in scored_records if isinstance(row, dict)],
+        start_at=_strategy_window_start(now_dt, filters["window"]),
+        end_at=now_dt,
+        ledger_available=ledger_available,
+        scored_available=scored_available,
+    )
+    reconcilable = result["data_quality"]["reconcilable"]
+    overall_rows = result["rows"]
+    overall_summary = summarize_difference_rows(
+        overall_rows,
+        reconcilable=reconcilable,
+    )
+    filtered_rows = [
+        row
+        for row in overall_rows
+        if (filters["include_matched"] or row["primary_type"] != "matched")
+        and (not filters["types"] or row["primary_type"] in filters["types"])
+    ]
+    filtered_summary = summarize_difference_rows(
+        filtered_rows,
+        reconcilable=reconcilable,
+    )
+    sorted_rows = sorted(
+        filtered_rows,
+        key=lambda row: str(row.get("entry_ts") or ""),
+        reverse=True,
+    )
+    offset = filters["offset"]
+    limit = filters["limit"]
+    rows = sorted_rows[offset:offset + limit]
+    warnings = list(result["warnings"])
+    for warning in source_warnings:
+        if warning not in warnings:
+            warnings.append(warning)
+    return {
+        "generated_at": _iso_utc(now_dt),
+        "candidate_id": candidate_id,
+        "available": ledger_available and scored_available,
+        "warnings": warnings,
+        "data_quality": result["data_quality"],
+        "filters": filters,
+        "overall_summary": overall_summary,
+        "filtered_summary": filtered_summary,
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "returned": len(rows),
+            "total": len(filtered_rows),
+        },
+        "rows": rows,
     }
 
 
@@ -7160,6 +7367,33 @@ def api_strategy_comparison():
         ("strategy-comparison", str(KRONOS_CHECKPOINT_DIR), str(KRONOS_REPORT_DIR), query),
         ttl_seconds,
         lambda: _strategy_comparison_payload(args=request.args),
+    )
+    return jsonify(payload)
+
+
+@app.route("/api/strategy-comparison/differences")
+def api_strategy_comparison_differences():
+    try:
+        filters = _strategy_difference_filters(request.args)
+    except ValueError as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    ttl_seconds = _dashboard_cache_seconds(
+        "DASHBOARD_STRATEGY_DIFFERENCES_CACHE_SECONDS",
+        30,
+    )
+    query = request.query_string.decode("utf-8", errors="replace")
+    payload = _cached_dashboard_payload(
+        (
+            "strategy-comparison-differences",
+            str(KRONOS_CHECKPOINT_DIR),
+            str(KRONOS_REPORT_DIR),
+            query,
+        ),
+        ttl_seconds,
+        lambda: _strategy_difference_payload(
+            candidate_id=filters["candidate_id"],
+            filters=filters,
+        ),
     )
     return jsonify(payload)
 
