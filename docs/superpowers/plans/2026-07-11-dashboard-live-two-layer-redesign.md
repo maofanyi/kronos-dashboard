@@ -98,8 +98,9 @@ def _records() -> list[dict]:
             "settlement_source": "official_chainlink",
         },
         {
-            "order_id": "july-loss",
-            "status": "SETTLED",
+            "order_id": "july-loss-repost",
+            "signal_id": "signal-loss",
+            "status": "CANCELLED",
             "settled_at": "2026-07-02T02:00:00Z",
             "pnl": -4.90,
             "won": False,
@@ -120,7 +121,7 @@ def _records() -> list[dict]:
     ]
 
 
-def test_month_calendar_uses_configured_trading_day_and_dedupes_records(monkeypatch):
+def test_month_calendar_uses_configured_trading_day_and_ignores_non_settled_attempts(monkeypatch):
     monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
 
     payload = server._monthly_pnl_calendar_from_records(_records(), month_value="2026-07")
@@ -183,20 +184,13 @@ def _calendar_month(value):
 
 
 def _calendar_settled_records(records):
-    selected = []
-    seen = set()
-    for index, record in enumerate(records or []):
-        if not isinstance(record, dict) or not _is_equity_settled_record(record):
-            continue
-        ts = _record_ts(record)
-        if ts is None:
-            continue
-        identity = str(record.get("order_id") or record.get("transaction_hash") or f"row:{index}")
-        if identity in seen:
-            continue
-        seen.add(identity)
-        selected.append(record)
-    return selected
+    return [
+        record
+        for record in (records or [])
+        if isinstance(record, dict)
+        and _is_equity_settled_record(record)
+        and _record_ts(record) is not None
+    ]
 
 
 def _monthly_pnl_calendar_from_records(records, *, month_value):
