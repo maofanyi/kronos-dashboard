@@ -394,19 +394,78 @@ def _aggregate_formal_markets(
         key = market_key(record)
         if key is not None and _in_window(record, start_at=start_at, end_at=end_at):
             grouped[key].append(record)
-    return {
-        key: {
-            "side": _side(max(market_records, key=_order_updated_at)),
-            "records": len(market_records),
-        }
-        for key, market_records in grouped.items()
-    }
+    markets: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, market_records in grouped.items():
+        selected = max(market_records, key=_formal_selection_priority)
+        market = dict(selected)
+        market["side"] = _side(selected)
+        market["records"] = len(market_records)
+        markets[key] = market
+    return markets
+
+
+def _formal_selection_priority(record: Mapping[str, Any]) -> tuple[bool, bool, datetime]:
+    return (
+        record.get("submitted") is True,
+        record.get("would_place_order") is True,
+        _parse_dt(record.get("created_at")) or datetime.min.replace(tzinfo=timezone.utc),
+    )
 
 
 def _numbers_match(left: float | None, right: float | None) -> bool:
     if left is None or right is None:
         return left is right
     return abs(left - right) <= EPSILON
+
+
+def _classify_simulated_only(
+    *,
+    live: Mapping[str, Any] | None,
+    formal: Mapping[str, Any] | None,
+    simulated: Mapping[str, Any],
+) -> tuple[str, list[str], str]:
+    if (
+        live
+        and live["attempts"] > 0
+        and not live["present"]
+        and live.get("excluded_final_fill_count", 0) == 0
+    ):
+        return "simulated_no_fill", ["no_fill"], "live order attempt did not fill"
+    if live and live.get("excluded_final_fill_count", 0) > 0:
+        return (
+            "simulated_only_unknown",
+            ["missing_source"],
+            "live settlement source is not comparable",
+        )
+    if formal is None:
+        return (
+            "simulated_only_unknown",
+            ["missing_source"],
+            "formal prediction record is missing",
+        )
+    same_side = formal.get("side") == simulated.get("side")
+    if (
+        same_side
+        and formal.get("would_place_order") is True
+        and formal.get("submitted") is not True
+        and str(formal.get("guarded_mode") or "").lower() == "blocked"
+    ):
+        return (
+            "simulated_pre_submit_blocked",
+            ["pre_submit_gate"],
+            "pre-submit risk gate blocked order",
+        )
+    if not same_side or formal.get("would_place_order") is not True:
+        return (
+            "simulated_strategy_only",
+            ["strategy_signal"],
+            "candidate strategy has an independent signal",
+        )
+    return (
+        "simulated_only_unknown",
+        ["missing_source"],
+        "no comparable live fill reason is known",
+    )
 
 
 def _reconcile_market(
@@ -478,22 +537,11 @@ def _reconcile_market(
         difference_flags = ["missing_source"]
         reason_label = "no simulated trade for this market"
     else:
-        if live and live.get("excluded_final_fill_count", 0) > 0:
-            primary_type = "simulated_only_unknown"
-            difference_flags = ["missing_source"]
-            reason_label = "live settlement source is not comparable"
-        elif live and live.get("no_fill_attempt_count", 0) > 0:
-            primary_type = "simulated_no_fill"
-            difference_flags = ["no_fill"]
-            reason_label = "live order attempt did not fill"
-        elif formal:
-            primary_type = "simulated_only_unknown"
-            difference_flags = ["missing_source"]
-            reason_label = "no comparable live fill for this market"
-        else:
-            primary_type = "simulated_only_unknown"
-            difference_flags = ["missing_source"]
-            reason_label = "live and formal sources do not explain this market"
+        primary_type, difference_flags, reason_label = _classify_simulated_only(
+            live=live,
+            formal=formal,
+            simulated=simulated,
+        )
 
     return {
         "entry_ts": key[0],

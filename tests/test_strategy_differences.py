@@ -514,3 +514,130 @@ def test_latest_order_update_is_deduplicated_across_markets():
     assert len(result["rows"]) == 1
     assert result["rows"][0]["entry_ts"] == latest_entry
     assert result["rows"][0]["primary_type"] == "matched"
+
+
+def _formal(**overrides):
+    row = {
+        "entry_ts": "2026-07-10T10:10:00Z",
+        "settle_ts": "2026-07-10T10:15:00Z",
+        "side": "LONG",
+        "action": "BUY_UP",
+        "would_place_order": True,
+        "submitted": False,
+        "guarded_mode": "blocked",
+        "guarded_reason": "pre-submit gates blocked prediction-bound order",
+        "created_at": "2026-07-10T10:05:15Z",
+    }
+    row.update(overrides)
+    return row
+
+
+def _single_type(*, live_records=(), formal_predictions=(), scored_records=None):
+    result = reconcile_strategy_orders(
+        live_records=list(live_records),
+        formal_predictions=list(formal_predictions),
+        scored_records=list(scored_records or [_scored()]),
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+    return result["rows"][0]
+
+
+def test_simulated_order_explains_pre_submit_gate():
+    row = _single_type(formal_predictions=[_formal()])
+    assert row["primary_type"] == "simulated_pre_submit_blocked"
+    assert row["difference_flags"] == ["pre_submit_gate"]
+
+
+def test_simulated_order_explains_no_fill_before_gate_reason():
+    row = _single_type(
+        live_records=[
+            _live(status="NO_FILL", filled_size=0, average_fill_price=None, net_pnl=None),
+        ],
+        formal_predictions=[_formal(submitted=True, guarded_mode=None)],
+    )
+    assert row["primary_type"] == "simulated_no_fill"
+    assert row["difference_flags"] == ["no_fill"]
+
+
+def test_candidate_signal_without_same_formal_action_is_strategy_only():
+    row = _single_type(
+        formal_predictions=[
+            _formal(side=None, action="HOLD", would_place_order=False, guarded_mode=None),
+        ]
+    )
+    assert row["primary_type"] == "simulated_strategy_only"
+    assert row["difference_flags"] == ["strategy_signal"]
+
+
+def test_missing_formal_record_is_unknown_but_pnl_still_reconciles():
+    row = _single_type()
+    assert row["primary_type"] == "simulated_only_unknown"
+    assert row["live_pnl"] == 0.0
+    assert row["simulated_pnl"] == -4.9
+    assert row["pnl_delta"] == 4.9
+
+
+def test_missing_ledger_marks_amounts_unreconcilable():
+    result = reconcile_strategy_orders(
+        live_records=[],
+        formal_predictions=[],
+        scored_records=[_scored()],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=False,
+        scored_available=True,
+    )
+    summary = summarize_difference_rows(
+        result["rows"],
+        reconcilable=result["data_quality"]["reconcilable"],
+    )
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
+def test_formal_selection_prefers_submitted_attempt_over_later_hold():
+    row = _single_type(
+        formal_predictions=[
+            _formal(
+                side=None,
+                action="HOLD",
+                would_place_order=False,
+                guarded_mode=None,
+                created_at="2026-07-10T10:06:00Z",
+            ),
+            _formal(submitted=True, guarded_mode=None),
+        ]
+    )
+    assert row["formal"]["submitted"] is True
+    assert row["formal"]["created_at"] == "2026-07-10T10:05:15Z"
+
+
+def test_formal_selection_prefers_would_place_order_over_later_hold():
+    row = _single_type(
+        formal_predictions=[
+            _formal(
+                side=None,
+                action="HOLD",
+                would_place_order=False,
+                guarded_mode=None,
+                created_at="2026-07-10T10:06:00Z",
+            ),
+            _formal(),
+        ]
+    )
+    assert row["formal"]["would_place_order"] is True
+    assert row["formal"]["created_at"] == "2026-07-10T10:05:15Z"
+
+
+def test_formal_selection_uses_latest_created_at_after_priority_ties():
+    row = _single_type(
+        formal_predictions=[
+            _formal(created_at="2026-07-10T10:05:15Z"),
+            _formal(created_at="2026-07-10T10:06:00Z"),
+        ]
+    )
+    assert row["formal"]["created_at"] == "2026-07-10T10:06:00Z"
