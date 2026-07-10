@@ -6818,6 +6818,38 @@ def api_live_safety():
     return jsonify(payload)
 
 
+@app.route("/api/live-pnl-calendar")
+def api_live_pnl_calendar():
+    try:
+        source = request.args.get("source")
+        ledger_path = _calendar_ledger_path(source)
+        records = _rows_from_ledger_payload(_read_json(ledger_path))
+        payload = _monthly_pnl_calendar_from_records(
+            records,
+            month_value=request.args.get("month"),
+        )
+        payload["source"] = source
+        return jsonify(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
+@app.route("/api/live-pnl-calendar/orders")
+def api_live_pnl_calendar_orders():
+    try:
+        source = request.args.get("source")
+        ledger_path = _calendar_ledger_path(source)
+        records = _rows_from_ledger_payload(_read_json(ledger_path))
+        payload = _daily_pnl_orders_from_records(
+            records,
+            day_value=request.args.get("date"),
+        )
+        payload["source"] = source
+        return jsonify(payload)
+    except ValueError as exc:
+        return jsonify({"error": str(exc)}), 400
+
+
 @app.route("/api/live-risk")
 def api_live_risk():
     return jsonify(_live_risk_summary())

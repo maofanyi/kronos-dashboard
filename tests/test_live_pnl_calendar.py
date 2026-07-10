@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from api import server
+
+
+def _write_json(path: Path, payload) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _records() -> list[dict]:
@@ -153,3 +161,89 @@ def test_calendar_ledger_path_selects_only_supported_sources(monkeypatch, tmp_pa
     assert server._calendar_ledger_path("paper_monitor") == paper_path
     with pytest.raises(ValueError, match="unsupported source"):
         server._calendar_ledger_path("unknown")
+
+
+def test_live_pnl_calendar_routes_are_read_only_and_reconcile(monkeypatch, tmp_path):
+    ledger = tmp_path / "live.json"
+    _write_json(ledger, _records())
+    monkeypatch.setattr(server, "_live_real_ledger_path", lambda: ledger)
+    monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
+
+    with server.app.test_client() as client:
+        month_response = client.get("/api/live-pnl-calendar?source=live_real&month=2026-07")
+        day_response = client.get("/api/live-pnl-calendar/orders?source=live_real&date=2026-07-01")
+
+    assert month_response.status_code == 200
+    assert day_response.status_code == 200
+    month = month_response.get_json()
+    day = day_response.get_json()
+    assert month["source"] == "live_real"
+    assert day["source"] == "live_real"
+    assert day["total_pnl_usdc"] == next(
+        row for row in month["days"] if row["date"] == "2026-07-01"
+    )["pnl_usdc"]
+    response_text = json.dumps({"month": month, "day": day}).lower()
+    assert "ledger" not in response_text
+    assert "private_key" not in response_text
+    assert str(ledger).lower() not in response_text
+
+
+def test_live_pnl_calendar_routes_support_paper_monitor(monkeypatch, tmp_path):
+    paper_ledger = tmp_path / "paper.json"
+    _write_json(paper_ledger, _records())
+    monkeypatch.setattr(server, "_paper_ledger_path", lambda: paper_ledger)
+
+    with server.app.test_client() as client:
+        month_response = client.get("/api/live-pnl-calendar?source=paper_monitor&month=2026-07")
+        day_response = client.get("/api/live-pnl-calendar/orders?source=paper_monitor&date=2026-07-01")
+
+    assert month_response.status_code == 200
+    assert day_response.status_code == 200
+    assert month_response.get_json()["source"] == "paper_monitor"
+    assert day_response.get_json()["source"] == "paper_monitor"
+
+
+def test_live_pnl_calendar_routes_are_get_only(monkeypatch, tmp_path):
+    ledger = tmp_path / "live.json"
+    _write_json(ledger, _records())
+    before = ledger.read_bytes()
+    monkeypatch.setattr(server, "_live_real_ledger_path", lambda: ledger)
+
+    with server.app.test_client() as client:
+        month_response = client.post("/api/live-pnl-calendar?source=live_real&month=2026-07")
+        day_response = client.post("/api/live-pnl-calendar/orders?source=live_real&date=2026-07-01")
+
+    assert month_response.status_code == 405
+    assert day_response.status_code == 405
+    assert ledger.read_bytes() == before
+
+
+def test_live_pnl_calendar_routes_do_not_fallback_between_sources(monkeypatch, tmp_path):
+    paper_ledger = tmp_path / "paper.json"
+    missing_live_ledger = tmp_path / "missing-live.json"
+    _write_json(paper_ledger, _records())
+    monkeypatch.setattr(server, "_live_real_ledger_path", lambda: missing_live_ledger)
+    monkeypatch.setattr(server, "_paper_ledger_path", lambda: paper_ledger)
+
+    with server.app.test_client() as client:
+        response = client.get("/api/live-pnl-calendar?source=live_real&month=2026-07")
+
+    assert response.status_code == 200
+    assert response.get_json()["source"] == "live_real"
+    assert response.get_json()["empty"] is True
+    assert response.get_json()["settled"] == 0
+
+
+@pytest.mark.parametrize(
+    ("url", "message"),
+    [
+        ("/api/live-pnl-calendar?source=live_real&month=2026-13", "month must use YYYY-MM"),
+        ("/api/live-pnl-calendar/orders?source=live_real&date=bad", "date must use YYYY-MM-DD"),
+        ("/api/live-pnl-calendar?source=unknown&month=2026-07", "unsupported source"),
+    ],
+)
+def test_live_pnl_calendar_routes_reject_invalid_input(url, message):
+    with server.app.test_client() as client:
+        response = client.get(url)
+    assert response.status_code == 400
+    assert response.get_json()["error"] == message
