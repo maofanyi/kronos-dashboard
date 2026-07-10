@@ -21,6 +21,7 @@ The redesign applies to both `Live Real` and `Paper Monitor`, with live trading 
 - Do not invent missing PnL, win-rate, order, or account values. Missing and stale data must remain visibly marked.
 - Keep the Strategies page and its comparison semantics out of scope.
 - Do not introduce new frontend dependencies.
+- A new read-only Dashboard calendar API is allowed. It must only read existing ledgers and must not call any order-mutation path.
 
 ## Information Architecture
 
@@ -97,6 +98,20 @@ If a detail section contains a warning or error, its collapsed header must show 
 - Show date, PnL, and W/L details through direct labels or hover/focus details.
 - Keep the seven-day total and settled count in the section header.
 
+### Monthly PnL Calendar
+
+- Add a natural-month calendar below the compact seven-day result view.
+- Default to the current trading month and provide previous/next month controls plus a month picker.
+- Disable navigation beyond the current month or before the earliest month present in the selected ledger.
+- Each calendar day shows settled PnL and settled-order count. Color intensity communicates profit or loss magnitude; zero and no-data days remain neutral and visually distinct.
+- The month header shows total settled PnL, settled count, wins, losses, and win rate.
+- Selecting a populated day opens its contributing settled orders in a right-side drawer on desktop and an inline/bottom detail region on mobile.
+- Each daily order row shows settlement time, market, direction, filled size, average fill price, realized PnL, result, and settlement source.
+- Empty days do not request order details and show a neutral `No settled orders` state.
+- Keyboard users can focus and select calendar days. Every color-coded day also includes a text or accessible-label result.
+
+The calendar uses natural calendar months in the configured Dashboard trading-day timezone. It is not a rolling 30-day view.
+
 ## Language And Visual Style
 
 - Use Chinese for primary UI labels and explanatory copy.
@@ -123,6 +138,35 @@ If a detail section contains a warning or error, its collapsed header must show 
 - Detailed diagnostics should not create additional high-volume requests while collapsed.
 - Consolidate the Live page onto one `live-intel` payload size and derive compact/detail views client-side; do not poll both `limit=80` and `limit=260` for the same visible page.
 - Display a shared `last updated` indicator and stale warning so independently refreshed payloads do not appear to be one atomic snapshot.
+- Monthly calendar data is fetched on initial display and when the user changes month. It is cached by source and month and is not part of the periodic Live polling loop.
+- Daily order detail is fetched only when the user selects a populated day and is cached by source and date.
+
+## Monthly Calendar API
+
+Add two read-only endpoints backed by the complete selected ledger rather than the 60-row `order_records` summary.
+
+### Month Summary
+
+`GET /api/live-pnl-calendar?source=live_real&month=YYYY-MM`
+
+The response contains:
+
+- `source`, `month`, `day_tz`, `start_date`, and `end_date`.
+- `available_months` in ascending `YYYY-MM` order.
+- `total_pnl_usdc`, `settled`, `wins`, `losses`, and `win_rate`.
+- `days`, containing one entry for every natural date in the requested month with `date`, `pnl_usdc`, `settled`, `wins`, and `losses`.
+
+Invalid month values return HTTP 400. A valid month with no ledger records returns a complete zero-valued month and an empty-data indicator rather than HTTP 404.
+
+### Daily Settled Orders
+
+`GET /api/live-pnl-calendar/orders?source=live_real&date=YYYY-MM-DD`
+
+The response contains `source`, `date`, `day_tz`, day totals, and `orders`. Each order exposes only dashboard-safe fields required by the UI: signal/order identifier, market slug, direction/outcome, settlement timestamp, filled size, average fill price, realized PnL, won/lost result, status, and settlement source.
+
+Both endpoints must use the same existing helpers and inclusion rules as live daily and weekly PnL: `_is_equity_settled_record`, `_record_ts`, `_dashboard_day_key`, `_record_pnl`, and `_record_won`. The sum of returned daily-order PnL must equal both the selected day total and that day's month-summary PnL. Repost attempts or reconciliation records must not be double counted.
+
+The same contract may serve `paper_monitor` when its ledger exists. Unsupported sources return HTTP 400 and never silently fall back to live data.
 
 ## Component Boundaries
 
@@ -131,11 +175,12 @@ Split the current monolithic Live page by responsibility while retaining existin
 - `Live.tsx`: data orchestration, tab selection, and top-level error states.
 - `LiveCockpitSummary.tsx`: six decision metrics and critical alert presentation.
 - `LiveMarketSection.tsx`: BTC chart, equity history, and seven-day result strip.
+- `LiveMonthlyPnlCalendar.tsx`: month navigation, daily PnL grid, and selected-day detail presentation.
 - `LiveCurrentAction.tsx`: latest prediction, active-order state, and execution funnel.
 - `LiveOperationsDetails.tsx`: collapsed health, account, ledger, and diagnostics groups.
 - Shared compact metric and collapsible-section primitives remain local to the Live feature unless another page already uses an equivalent component.
 
-The split must not require an API schema change.
+The split changes no existing API schema. The monthly calendar is provided through the new isolated read-only endpoints described above.
 
 ## Loading, Missing, And Error States
 
@@ -151,6 +196,9 @@ The split must not require an API schema change.
 - Add a 390 x 844 test proving `document.documentElement.scrollWidth <= document.documentElement.clientWidth`.
 - Add mobile assertions proving the main KPI values are not clipped and the BTC section is reachable within the first screen of scrolling.
 - Add desktop visual checks at 1440 x 900 confirming both primary chart headings are visible in the first viewport.
+- Add API tests for month boundaries, leap years, invalid input, empty months, earliest/latest available month, and the configured `Asia/Shanghai` trading-day boundary.
+- Add an API invariant test proving each day's order-detail PnL equals its month-summary PnL without duplicate repost attempts.
+- Add Playwright coverage for changing months, selecting a profitable/loss/empty day, opening daily orders, keyboard selection, and the mobile detail layout.
 - Verify empty, stale, warning, and populated API fixtures.
 - Run `npm run build` in `web`.
 - Run the existing dashboard Python tests relevant to live safety and status payloads.
@@ -161,5 +209,6 @@ The split must not require an API schema change.
 - A user can determine live mode, account result, risk state, latest action, and active exposure without opening details.
 - The default page is materially shorter and no longer repeats runtime, risk, and order summaries across multiple visible panels.
 - Charts explain current market and account movement without duplicated metric cards.
+- Users can switch across every ledger-backed historical month and reconcile any populated day to its settled orders.
 - Mobile has no page-level overflow and never truncates a critical amount or status.
 - The redesign performs no order mutation and changes no trading configuration.
