@@ -1744,8 +1744,11 @@ def _weekly_pnl_calendar_from_records(records, *, now=None):
 
 
 def _calendar_month(value):
+    value = str(value)
+    if re.fullmatch(r"[0-9]{4}-(0[1-9]|1[0-2])", value) is None:
+        raise ValueError("month must use YYYY-MM")
     try:
-        parsed = datetime.strptime(str(value), "%Y-%m")
+        parsed = datetime.strptime(value, "%Y-%m")
     except (TypeError, ValueError) as exc:
         raise ValueError("month must use YYYY-MM") from exc
     return parsed.year, parsed.month
@@ -1825,8 +1828,11 @@ def _monthly_pnl_calendar_from_records(records, *, month_value):
 
 
 def _daily_pnl_orders_from_records(records, *, day_value):
+    day_value = str(day_value)
+    if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", day_value) is None:
+        raise ValueError("date must use YYYY-MM-DD")
     try:
-        day = date.fromisoformat(str(day_value))
+        day = date.fromisoformat(day_value)
     except (TypeError, ValueError) as exc:
         raise ValueError("date must use YYYY-MM-DD") from exc
     day_tz = _dashboard_day_info(day=day)["day_tz"]

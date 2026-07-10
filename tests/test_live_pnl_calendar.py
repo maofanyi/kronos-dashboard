@@ -59,6 +59,24 @@ def _records() -> list[dict]:
     ]
 
 
+def _route_records(order_id: str, pnl: float, *, include_raw: bool = False) -> list[dict]:
+    record = {
+        "order_id": order_id,
+        "status": "SETTLED",
+        "settled_at": "2026-07-01T00:00:00Z",
+        "pnl": pnl,
+        "won": pnl > 0,
+    }
+    if include_raw:
+        record.update({
+            "private_key": "PRIVATE_KEY_SENTINEL",
+            "raw": {
+                "raw_only_key": "RAW_ONLY_SENTINEL",
+            },
+        })
+    return [record]
+
+
 def test_month_calendar_uses_configured_trading_day_and_ignores_non_settled_attempts(monkeypatch):
     monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
 
@@ -164,43 +182,49 @@ def test_calendar_ledger_path_selects_only_supported_sources(monkeypatch, tmp_pa
 
 
 def test_live_pnl_calendar_routes_are_read_only_and_reconcile(monkeypatch, tmp_path):
-    ledger = tmp_path / "live.json"
-    _write_json(ledger, _records())
-    monkeypatch.setattr(server, "_live_real_ledger_path", lambda: ledger)
+    live_ledger = tmp_path / "live.json"
+    paper_ledger = tmp_path / "paper.json"
+    _write_json(live_ledger, _route_records("live-order", 3.75, include_raw=True))
+    _write_json(paper_ledger, _route_records("paper-order", -8.50))
+    monkeypatch.setattr(server, "_live_real_ledger_path", lambda: live_ledger)
+    monkeypatch.setattr(server, "_paper_ledger_path", lambda: paper_ledger)
     monkeypatch.setenv("DASHBOARD_TRADING_DAY_TZ", "Asia/Shanghai")
 
     with server.app.test_client() as client:
-        month_response = client.get("/api/live-pnl-calendar?source=live_real&month=2026-07")
-        day_response = client.get("/api/live-pnl-calendar/orders?source=live_real&date=2026-07-01")
+        live_month_response = client.get("/api/live-pnl-calendar?source=live_real&month=2026-07")
+        live_day_response = client.get("/api/live-pnl-calendar/orders?source=live_real&date=2026-07-01")
+        paper_month_response = client.get("/api/live-pnl-calendar?source=paper_monitor&month=2026-07")
+        paper_day_response = client.get("/api/live-pnl-calendar/orders?source=paper_monitor&date=2026-07-01")
 
-    assert month_response.status_code == 200
-    assert day_response.status_code == 200
-    month = month_response.get_json()
-    day = day_response.get_json()
-    assert month["source"] == "live_real"
-    assert day["source"] == "live_real"
-    assert day["total_pnl_usdc"] == next(
-        row for row in month["days"] if row["date"] == "2026-07-01"
-    )["pnl_usdc"]
-    response_text = json.dumps({"month": month, "day": day}).lower()
-    assert "ledger" not in response_text
-    assert "private_key" not in response_text
-    assert str(ledger).lower() not in response_text
+    responses = {
+        "live_month": live_month_response.get_json(),
+        "live_day": live_day_response.get_json(),
+        "paper_month": paper_month_response.get_json(),
+        "paper_day": paper_day_response.get_json(),
+    }
+    assert all(response.status_code == 200 for response in (
+        live_month_response,
+        live_day_response,
+        paper_month_response,
+        paper_day_response,
+    ))
+    assert responses["live_month"]["source"] == "live_real"
+    assert responses["live_month"]["total_pnl_usdc"] == 3.75
+    assert responses["live_day"]["total_pnl_usdc"] == 3.75
+    assert responses["live_day"]["orders"][0]["order_id"] == "live-order"
+    assert responses["paper_month"]["source"] == "paper_monitor"
+    assert responses["paper_month"]["total_pnl_usdc"] == -8.5
+    assert responses["paper_day"]["total_pnl_usdc"] == -8.5
+    assert responses["paper_day"]["orders"][0]["order_id"] == "paper-order"
 
-
-def test_live_pnl_calendar_routes_support_paper_monitor(monkeypatch, tmp_path):
-    paper_ledger = tmp_path / "paper.json"
-    _write_json(paper_ledger, _records())
-    monkeypatch.setattr(server, "_paper_ledger_path", lambda: paper_ledger)
-
-    with server.app.test_client() as client:
-        month_response = client.get("/api/live-pnl-calendar?source=paper_monitor&month=2026-07")
-        day_response = client.get("/api/live-pnl-calendar/orders?source=paper_monitor&date=2026-07-01")
-
-    assert month_response.status_code == 200
-    assert day_response.status_code == 200
-    assert month_response.get_json()["source"] == "paper_monitor"
-    assert day_response.get_json()["source"] == "paper_monitor"
+    live_text = json.dumps({"month": responses["live_month"], "day": responses["live_day"]}).lower()
+    paper_text = json.dumps({"month": responses["paper_month"], "day": responses["paper_day"]}).lower()
+    assert "paper-order" not in live_text
+    assert "-8.5" not in live_text
+    assert "live-order" not in paper_text
+    assert "3.75" not in paper_text
+    for forbidden in ("private_key", "private_key_sentinel", "raw_only_key", "raw_only_sentinel"):
+        assert forbidden not in live_text
 
 
 def test_live_pnl_calendar_routes_are_get_only(monkeypatch, tmp_path):
@@ -238,7 +262,11 @@ def test_live_pnl_calendar_routes_do_not_fallback_between_sources(monkeypatch, t
     ("url", "message"),
     [
         ("/api/live-pnl-calendar?source=live_real&month=2026-13", "month must use YYYY-MM"),
+        ("/api/live-pnl-calendar?source=live_real&month=2026-7", "month must use YYYY-MM"),
         ("/api/live-pnl-calendar/orders?source=live_real&date=bad", "date must use YYYY-MM-DD"),
+        ("/api/live-pnl-calendar/orders?source=live_real&date=20260701", "date must use YYYY-MM-DD"),
+        ("/api/live-pnl-calendar/orders?source=live_real&date=2026-W27-3", "date must use YYYY-MM-DD"),
+        ("/api/live-pnl-calendar/orders?source=live_real&date=2026-02-30", "date must use YYYY-MM-DD"),
         ("/api/live-pnl-calendar?source=unknown&month=2026-07", "unsupported source"),
     ],
 )
