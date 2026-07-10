@@ -25,12 +25,12 @@ export default function App() {
       <StatusBar />
       <BTCPriceBar />
 
-      <div className="flex border-b border-zinc-800 bg-zinc-950/80 px-4">
+      <div className="flex overflow-x-auto border-b border-zinc-800 bg-zinc-950/80 px-4">
         {tabs.map(([key, label, Icon]) => (
           <button
             key={key}
             onClick={() => setTab(key)}
-            className={`flex items-center gap-2 border-b-2 px-5 py-3 text-sm font-medium transition-colors ${
+            className={`flex shrink-0 items-center gap-2 border-b-2 px-5 py-3 text-sm font-medium transition-colors ${
               tab === key
                 ? "border-emerald-400 text-emerald-300"
                 : "border-transparent text-zinc-500 hover:text-zinc-200"

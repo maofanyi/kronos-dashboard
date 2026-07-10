@@ -314,3 +314,14 @@ test("reason flags are Chinese details and strategy selection is keyboard access
   await expect(otherStrategy).toHaveAttribute("aria-pressed", "true");
   await expect(otherStrategy).toContainText("当前选择");
 });
+
+test("strategy page contains horizontal scrolling on mobile", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await openDifferences(page);
+
+  const widths = await page.evaluate(() => ({
+    viewport: window.innerWidth,
+    page: document.documentElement.scrollWidth,
+  }));
+  expect(widths.page).toBeLessThanOrEqual(widths.viewport);
+});
