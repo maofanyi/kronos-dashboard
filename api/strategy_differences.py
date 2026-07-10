@@ -295,7 +295,13 @@ def _aggregate_live_markets(
             for record in trusted_fills
         )
         latest_fill = max(trusted_fills, key=_order_updated_at, default=None)
-        live_pnl = sum(_explicit_pnl(record) or 0.0 for record in trusted_fills)
+        explicit_pnls = [_explicit_pnl(record) for record in trusted_fills]
+        missing_pnl_count = sum(pnl is None for pnl in explicit_pnls)
+        live_pnl = (
+            round(sum(pnl for pnl in explicit_pnls if pnl is not None), 6)
+            if missing_pnl_count == 0
+            else None
+        )
         markets[key] = {
             "present": bool(trusted_fills),
             "attempts": len(attempts),
@@ -303,8 +309,9 @@ def _aggregate_live_markets(
             "average_fill_price": round(weighted_price_total / filled_size, 6) if filled_size > EPSILON else None,
             "side": _side(latest_fill) if latest_fill is not None else None,
             "won": _won(latest_fill) if latest_fill is not None else None,
-            "pnl": round(live_pnl, 6),
+            "pnl": live_pnl,
             "excluded_final_fill_count": excluded_final_fill_count,
+            "missing_pnl_count": missing_pnl_count,
             "no_fill_attempt_count": no_fill_attempt_count,
         }
 
@@ -405,9 +412,10 @@ def _reconcile_market(
     excluded_only_live_settlement = bool(
         live and live.get("excluded_final_fill_count", 0) > 0 and not live_present
     )
+    missing_live_pnl = bool(live and live.get("missing_pnl_count", 0) > 0)
     live_pnl = (
         round(float(live.get("pnl", 0.0)) if live_present and live else 0.0, 6)
-        if ledger_available and not excluded_only_live_settlement
+        if ledger_available and not excluded_only_live_settlement and not missing_live_pnl
         else None
     )
     simulated_pnl = (
@@ -481,7 +489,12 @@ def _reconcile_market(
         "live": dict(live) if live is not None else None,
         "formal": dict(formal) if formal is not None else None,
         "simulated": dict(simulated) if simulated is not None else None,
-        "reconcilable": ledger_available and scored_available and not excluded_only_live_settlement,
+        "reconcilable": (
+            ledger_available
+            and scored_available
+            and not excluded_only_live_settlement
+            and not missing_live_pnl
+        ),
         "live_pnl": live_pnl,
         "simulated_pnl": simulated_pnl,
         "pnl_delta": pnl_delta,

@@ -167,6 +167,36 @@ def test_non_datastreams_final_fill_is_excluded_not_called_no_fill():
     assert summary["pnl_delta"] is None
 
 
+def test_trusted_final_fill_without_explicit_pnl_is_unreconcilable():
+    result = reconcile_strategy_orders(
+        live_records=[
+            _live(
+                pnl_usdc=None,
+                realized_pnl=None,
+                net_pnl=None,
+                pnl=None,
+            )
+        ],
+        formal_predictions=[],
+        scored_records=[_scored()],
+        start_at=START,
+        end_at=NOW,
+        ledger_available=True,
+        scored_available=True,
+    )
+
+    row = result["rows"][0]
+    summary = summarize_difference_rows(result["rows"])
+    assert row["live"]["present"] is True
+    assert row["live"]["missing_pnl_count"] == 1
+    assert row["live_pnl"] is None
+    assert row["pnl_delta"] is None
+    assert row["reconcilable"] is False
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
+
+
 def test_conflicting_scored_duplicates_are_excluded_with_data_quality_marker():
     result = reconcile_strategy_orders(
         live_records=[],
