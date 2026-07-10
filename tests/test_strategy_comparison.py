@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from api import server
@@ -61,21 +61,27 @@ def test_strategy_comparison_summarizes_candidate_collection(monkeypatch, tmp_pa
         "_live_order_sync_summary",
         lambda: {"ok": True, "fresh": True, "available": True, "age_seconds": 12},
     )
+    first_dt = (datetime.now(timezone.utc) - timedelta(hours=1)).replace(
+        second=0,
+        microsecond=0,
+    )
+    first_ts = first_dt.isoformat().replace("+00:00", "Z")
+    second_ts = (first_dt + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
 
     _append_jsonl(
         report_dir / "prediction_bound_live_formal_predictions.jsonl",
         [
-            {"created_at": "2026-07-02T00:00:00Z", "would_place_order": True, "submitted": False},
-            {"created_at": "2026-07-02T00:05:00Z", "would_place_order": False, "submitted": False},
+            {"created_at": first_ts, "would_place_order": True, "submitted": False},
+            {"created_at": second_ts, "would_place_order": False, "submitted": False},
         ],
     )
     _append_jsonl(
         report_dir / "candidate_no_submit_official_truth_signals.jsonl",
         [
-            _candidate_record("round2_drawdown_density", passed=True, side="LONG", created_at="2026-07-02T00:00:00Z", overlap=True),
-            _candidate_record("official_truth_14d14d_latest", passed=True, side="SHORT", created_at="2026-07-02T00:00:00Z"),
-            _candidate_record("official_truth_14d14d_latest", passed=False, side=None, created_at="2026-07-02T00:05:00Z"),
-            _candidate_record("official_truth_7d7d_latest", passed=True, side="LONG", created_at="2026-07-02T00:05:00Z", overlap=True),
+            _candidate_record("round2_drawdown_density", passed=True, side="LONG", created_at=first_ts, overlap=True),
+            _candidate_record("official_truth_14d14d_latest", passed=True, side="SHORT", created_at=first_ts),
+            _candidate_record("official_truth_14d14d_latest", passed=False, side=None, created_at=second_ts),
+            _candidate_record("official_truth_7d7d_latest", passed=True, side="LONG", created_at=second_ts, overlap=True),
         ],
     )
     _write_json(report_dir / "candidate_no_submit_official_truth_latest.json", {"ok": True, "total_records": 4})
@@ -243,7 +249,7 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
                         {
                             "entry_ts": "2026-07-02T00:05:00Z",
                             "settle_ts": "2026-07-02T00:10:00Z",
-                            "side": "LONG",
+                            "side": "SHORT",
                             "won": True,
                             "pnl_usdc": 2.55,
                             "maker_price": 0.49,
@@ -252,7 +258,7 @@ def test_strategy_comparison_adds_live_matched_real_comparison(monkeypatch, tmp_
                         {
                             "entry_ts": "2026-07-02T00:05:00Z",
                             "settle_ts": "2026-07-02T00:10:00Z",
-                            "side": "SHORT",
+                            "side": "LONG",
                             "won": True,
                             "pnl_usdc": 2.55,
                             "maker_price": 0.49,
