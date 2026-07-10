@@ -4,7 +4,7 @@ import {
   ChevronRight,
   RefreshCw,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 type StrategyWindow = "today" | "24h" | "7d" | "14d" | "all";
 
@@ -125,6 +125,33 @@ const CAUSE_LABELS: Record<string, string> = {
   matched: "完全匹配",
 };
 
+const DIFFERENCE_FLAG_LABELS: Record<string, string> = {
+  side: "方向不同",
+  outcome: "结果不同",
+  size: "数量不同",
+  price: "价格不同",
+  attempts: "尝试次数不同",
+  pnl: "PnL不同",
+  missing_source: "缺少对应记录",
+  no_fill: "实盘未成交",
+  pre_submit_gate: "提交前风控拦截",
+  strategy_signal: "仅模拟策略信号",
+};
+
+const REASON_LABELS: Record<string, string> = {
+  "live and simulated sides differ": "实盘与模拟方向不同",
+  "live and simulated outcomes differ": "实盘与模拟结果不同",
+  "live and simulated execution fields differ": "实盘与模拟执行参数不同",
+  "live and simulated records match": "实盘与模拟记录完全匹配",
+  "no simulated trade for this market": "该市场没有对应模拟交易",
+  "live order attempt did not fill": "实盘订单尝试未成交",
+  "live settlement source is not comparable": "实盘结算数据源不可对比",
+  "formal prediction record is missing": "缺少实盘预测记录",
+  "pre-submit risk gate blocked order": "提交前风控拦截订单",
+  "candidate strategy has an independent signal": "候选策略产生独立信号",
+  "no comparable live fill reason is known": "缺少可对比的实盘成交原因",
+};
+
 const TYPE_OPTIONS = [
   "side_mismatch",
   "outcome_mismatch",
@@ -146,6 +173,14 @@ const windowLabel = (value: StrategyWindow) => {
 };
 
 const causeLabel = (value: string) => CAUSE_LABELS[value] ?? value;
+
+const reasonLabel = (row: DifferenceRow) => {
+  const details = row.difference_flags
+    .map((flag) => DIFFERENCE_FLAG_LABELS[flag] ?? flag)
+    .filter(Boolean);
+  if (details.length > 0) return details.join("、");
+  return REASON_LABELS[row.reason_label] ?? row.reason_label ?? causeLabel(row.primary_type);
+};
 
 function Money({ value }: { value: number | null | undefined }) {
   if (value == null || Number.isNaN(value)) {
@@ -224,8 +259,10 @@ export function StrategyDifferences({
   const [includeMatched, setIncludeMatched] = useState(false);
   const [offset, setOffset] = useState(0);
   const [data, setData] = useState<DifferenceResponse | null>(null);
+  const [dataQueryKey, setDataQueryKey] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const requestIdRef = useRef(0);
 
   useEffect(() => {
     setCandidateId(preferredCandidate);
@@ -236,8 +273,7 @@ export function StrategyDifferences({
     setOffset(0);
   }, [candidateId, includeMatched, typeFilter, windowValue]);
 
-  const fetchDifferences = useCallback(async (signal?: AbortSignal) => {
-    if (!expanded || !candidateId) return;
+  const queryString = useMemo(() => {
     const query = new URLSearchParams({
       candidate: candidateId,
       window: windowValue,
@@ -246,28 +282,42 @@ export function StrategyDifferences({
       offset: String(offset),
     });
     if (typeFilter !== "all") query.set("types", typeFilter);
+    return query.toString();
+  }, [candidateId, includeMatched, offset, typeFilter, windowValue]);
+
+  const fetchDifferences = useCallback(async (signal?: AbortSignal) => {
+    if (!expanded || !candidateId) return;
+    const requestId = ++requestIdRef.current;
+    const requestedQueryKey = queryString;
     setLoading(true);
+    setError(null);
     try {
       const response = await fetch(
-        "/api/strategy-comparison/differences?" + query.toString(),
+        "/api/strategy-comparison/differences?" + requestedQueryKey,
         { signal },
       );
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      setData((await response.json()) as DifferenceResponse);
+      const nextData = (await response.json()) as DifferenceResponse;
+      if (signal?.aborted || requestId !== requestIdRef.current) return;
+      setData(nextData);
+      setDataQueryKey(requestedQueryKey);
       setError(null);
     } catch (requestError) {
-      if (signal?.aborted) return;
+      if (signal?.aborted || requestId !== requestIdRef.current) return;
       setError(requestError instanceof Error ? requestError.message : String(requestError));
     } finally {
-      if (!signal?.aborted) setLoading(false);
+      if (!signal?.aborted && requestId === requestIdRef.current) setLoading(false);
     }
-  }, [candidateId, expanded, includeMatched, offset, typeFilter, windowValue]);
+  }, [candidateId, expanded, queryString]);
 
   useEffect(() => {
     if (!expanded || !candidateId) return;
     const controller = new AbortController();
     void fetchDifferences(controller.signal);
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      requestIdRef.current += 1;
+    };
   }, [candidateId, expanded, fetchDifferences]);
 
   const selectedSummary =
@@ -277,6 +327,7 @@ export function StrategyDifferences({
   const pageEnd = Math.min(offset + PAGE_SIZE, total);
   const canPrevious = offset > 0;
   const canNext = offset + PAGE_SIZE < total;
+  const dataIsStale = data != null && dataQueryKey !== queryString;
 
   return (
     <section className="border-y border-zinc-800 bg-zinc-950/35">
@@ -338,15 +389,27 @@ export function StrategyDifferences({
                 {candidates.map((row) => (
                   <tr
                     key={row.candidate_id}
-                    onClick={() => {
-                      setOffset(0);
-                      setCandidateId(row.candidate_id);
-                    }}
-                    className={`cursor-pointer ${row.candidate_id === candidateId ? "bg-emerald-500/5" : "hover:bg-zinc-900/40"}`}
+                    className={row.candidate_id === candidateId ? "bg-emerald-500/5" : "hover:bg-zinc-900/40"}
                   >
                     <td className="px-4 py-2 text-zinc-100">
-                      <div className="font-medium">{row.label}</div>
-                      <div className="mt-0.5 font-mono text-xs text-zinc-600">{row.candidate_id}</div>
+                      <button
+                        type="button"
+                        aria-label={`选择 ${row.label}`}
+                        aria-pressed={row.candidate_id === candidateId}
+                        onClick={() => {
+                          setOffset(0);
+                          setCandidateId(row.candidate_id);
+                        }}
+                        className="block w-full text-left outline-none focus-visible:ring-2 focus-visible:ring-emerald-400"
+                      >
+                        <span className="flex items-center gap-2 font-medium">
+                          {row.label}
+                          {row.candidate_id === candidateId && (
+                            <span className="text-xs font-normal text-emerald-300">当前选择</span>
+                          )}
+                        </span>
+                        <span className="mt-0.5 block font-mono text-xs text-zinc-600">{row.candidate_id}</span>
+                      </button>
                     </td>
                     <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.overlap_count}</td>
                     <td className="px-3 py-2 text-right font-mono text-zinc-300">{row.live_only_count}</td>
@@ -415,6 +478,11 @@ export function StrategyDifferences({
           {error && (
             <div className="border-t border-red-500/20 bg-red-500/5 px-4 py-3 text-sm text-red-300">
               刷新失败，保留上次成功数据：{error}
+            </div>
+          )}
+          {dataIsStale && (
+            <div className="border-t border-amber-500/20 bg-amber-500/5 px-4 py-3 text-sm text-amber-300">
+              当前筛选已变化，以下为上次成功查询结果。
             </div>
           )}
           {data?.warnings.length ? (
@@ -486,7 +554,7 @@ export function StrategyDifferences({
                         <td className="px-3 py-2 text-right"><Money value={row.live_pnl} /></td>
                         <td className="px-3 py-2 text-right"><Money value={row.simulated_pnl} /></td>
                         <td className="px-3 py-2 text-right"><Money value={row.pnl_delta} /></td>
-                        <td className="px-4 py-2 text-zinc-400">{causeLabel(row.primary_type)}</td>
+                        <td className="px-4 py-2 text-zinc-400">{reasonLabel(row)}</td>
                       </tr>
                     ))}
                     {data.rows.length === 0 && (

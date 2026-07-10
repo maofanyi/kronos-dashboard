@@ -25,9 +25,11 @@ def test_strategy_difference_panel_defaults_to_live_strategy_and_keeps_last_data
     source = _component_source()
 
     assert "row.candidate_id === liveStrategyId" in source
-    assert "setData((await response.json()) as DifferenceResponse)" in source
+    assert "requestId !== requestIdRef.current" in source
+    assert "setDataQueryKey(requestedQueryKey)" in source
     assert "setData(null)" not in source
     assert "刷新失败，保留上次成功数据" in source
+    assert "当前筛选已变化，以下为上次成功查询结果" in source
 
 
 def test_strategy_difference_panel_has_filters_pagination_and_manual_refresh():
@@ -54,6 +56,8 @@ def test_strategy_difference_panel_labels_money_and_causes_in_chinese():
     assert 'simulated_no_fill: "实盘未成交"' in source
     assert 'simulated_strategy_only: "仅模拟策略信号"' in source
     assert 'simulated_only_unknown: "仅模拟（原因未知）"' in source
+    assert 'attempts: "尝试次数不同"' in source
+    assert "reasonLabel(row)" in source
 
 
 def test_strategy_difference_panel_scrolls_tables_without_nested_cards():
