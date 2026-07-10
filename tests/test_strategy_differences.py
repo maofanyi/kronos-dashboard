@@ -154,8 +154,17 @@ def test_non_datastreams_final_fill_is_excluded_not_called_no_fill():
         scored_available=True,
     )
     assert result["data_quality"]["excluded_live_reference_count"] == 1
-    assert result["rows"][0]["primary_type"] == "simulated_only_unknown"
-    assert "missing_source" in result["rows"][0]["difference_flags"]
+    row = result["rows"][0]
+    summary = summarize_difference_rows(result["rows"])
+    assert row["primary_type"] == "simulated_only_unknown"
+    assert "missing_source" in row["difference_flags"]
+    assert row["live_pnl"] is None
+    assert row["simulated_pnl"] == -4.9
+    assert row["pnl_delta"] is None
+    assert row["reconcilable"] is False
+    assert summary["live_pnl"] is None
+    assert summary["simulated_pnl"] is None
+    assert summary["pnl_delta"] is None
 
 
 def test_conflicting_scored_duplicates_are_excluded_with_data_quality_marker():

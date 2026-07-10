@@ -402,9 +402,12 @@ def _reconcile_market(
 ) -> dict[str, Any]:
     live_present = bool(live and live.get("present"))
     simulated_present = bool(simulated and simulated.get("present"))
+    excluded_only_live_settlement = bool(
+        live and live.get("excluded_final_fill_count", 0) > 0 and not live_present
+    )
     live_pnl = (
         round(float(live.get("pnl", 0.0)) if live_present and live else 0.0, 6)
-        if ledger_available
+        if ledger_available and not excluded_only_live_settlement
         else None
     )
     simulated_pnl = (
@@ -478,7 +481,7 @@ def _reconcile_market(
         "live": dict(live) if live is not None else None,
         "formal": dict(formal) if formal is not None else None,
         "simulated": dict(simulated) if simulated is not None else None,
-        "reconcilable": ledger_available and scored_available,
+        "reconcilable": ledger_available and scored_available and not excluded_only_live_settlement,
         "live_pnl": live_pnl,
         "simulated_pnl": simulated_pnl,
         "pnl_delta": pnl_delta,
