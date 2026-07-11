@@ -38,22 +38,22 @@ test("monthly pnl calendar changes month and opens reconciled day orders", async
           date: url.searchParams.get("date"),
           day_tz: "Asia/Shanghai",
           total_pnl_usdc: 5.1,
-          settled: 1,
-          wins: 1,
+          settled: 12,
+          wins: 12,
           losses: 0,
-          orders: [{
-            order_id: "order-win",
-            signal_id: "signal-win",
+          orders: Array.from({ length: 12 }, (_, index) => ({
+            order_id: index === 0 ? "order-win" : `order-win-${index + 1}`,
+            signal_id: `signal-win-${index + 1}`,
             market_slug: "btc-updown-5m",
             direction: "UP",
             settle_ts: "2026-06-30T16:05:00Z",
             filled_size: 10,
             average_fill_price: 0.49,
-            pnl_usdc: 5.1,
+            pnl_usdc: index === 0 ? 5.1 : 0,
             won: true,
             status: "SETTLED",
             settlement_source: "official_chainlink",
-          }],
+          })),
         },
       });
       return;
@@ -66,9 +66,21 @@ test("monthly pnl calendar changes month and opens reconciled day orders", async
   await expect(page.getByRole("heading", { name: "月度收益日历" })).toBeVisible();
 
   await page.getByRole("button", { name: "2026年7月1日，盈利 5.10 USDC，1 笔结算" }).click();
-  const orderCard = page.getByRole("article").filter({ hasText: "order-win" });
+  const orderCard = page.getByRole("article").filter({ has: page.getByText("order-win", { exact: true }) });
   await expect(orderCard).toBeVisible();
   await expect(orderCard.getByText("+5.10 USDC", { exact: true })).toBeVisible();
+  const detailPanel = page.getByTestId("monthly-pnl-detail");
+  const orderList = page.getByTestId("daily-settlement-orders");
+  await expect(detailPanel).toBeVisible();
+  await expect(orderList).toBeVisible();
+  const orderListLayout = await orderList.evaluate((node) => ({
+    overflowY: getComputedStyle(node).overflowY,
+    clientHeight: node.clientHeight,
+    scrollHeight: node.scrollHeight,
+  }));
+  expect(orderListLayout.overflowY).toBe("auto");
+  expect(orderListLayout.clientHeight).toBeLessThanOrEqual(420);
+  expect(orderListLayout.scrollHeight).toBeGreaterThan(orderListLayout.clientHeight);
   expect(orderRequests).toBe(1);
 
   await page.getByRole("button", { name: "2026年7月3日，无结算订单" }).click();

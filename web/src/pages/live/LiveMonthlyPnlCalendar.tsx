@@ -162,7 +162,7 @@ export default function LiveMonthlyPnlCalendar({ source, initialMonth }: Props) 
         </div>
       </header>
 
-      <div className="grid min-w-0 xl:grid-cols-[minmax(0,1fr)_360px]">
+      <div className="grid min-w-0 items-start xl:grid-cols-[minmax(0,1fr)_360px]">
         <div className="min-w-0 p-3 sm:p-4">
           <div className="mb-4 flex flex-wrap items-end justify-between gap-3">
             <div>
@@ -212,7 +212,11 @@ export default function LiveMonthlyPnlCalendar({ source, initialMonth }: Props) 
           {loading && !calendar && <div className="py-8 text-center text-sm text-zinc-500">正在读取月度账本...</div>}
         </div>
 
-        <aside className="min-w-0 border-t border-zinc-800 bg-black/20 p-4 xl:border-l xl:border-t-0" aria-live="polite">
+        <aside
+          data-testid="monthly-pnl-detail"
+          className="flex min-h-0 min-w-0 flex-col border-t border-zinc-800 bg-black/20 p-4 xl:max-h-[640px] xl:border-l xl:border-t-0"
+          aria-live="polite"
+        >
           <div className="flex items-start justify-between gap-3">
             <div>
               <h3 className="text-sm font-semibold text-zinc-100">每日结算订单</h3>
@@ -230,14 +234,18 @@ export default function LiveMonthlyPnlCalendar({ source, initialMonth }: Props) 
           {detailLoading && <div className="py-10 text-center text-sm text-zinc-500">正在读取订单...</div>}
           {detailError && <div className="mt-4 rounded border border-amber-500/25 bg-amber-500/10 px-3 py-2 text-xs text-amber-200">订单明细读取失败：{detailError}</div>}
           {detail && selectedDay?.settled ? (
-            <div className="mt-4 space-y-3">
+            <div className="mt-4 flex min-h-0 flex-1 flex-col">
               <div className="flex items-center justify-between gap-3 border-b border-zinc-800 pb-3 text-xs">
                 <span className="text-zinc-500">{detail.settled} 笔 · {detail.wins}胜/{detail.losses}负</span>
                 <span className={`font-mono font-semibold ${detail.total_pnl_usdc >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{money(detail.total_pnl_usdc)}</span>
               </div>
               {detail.orders.length === 0
                 ? <div className="py-8 text-center text-sm text-zinc-500">当日没有已结算订单</div>
-                : detail.orders.map((order, index) => <OrderDetail key={order.order_id || order.signal_id || index} order={order} />)}
+                : (
+                  <div data-testid="daily-settlement-orders" className="mt-3 min-h-0 max-h-[420px] space-y-3 overflow-y-auto overscroll-contain pr-1">
+                    {detail.orders.map((order, index) => <OrderDetail key={order.order_id || order.signal_id || index} order={order} />)}
+                  </div>
+                )}
             </div>
           ) : null}
         </aside>
