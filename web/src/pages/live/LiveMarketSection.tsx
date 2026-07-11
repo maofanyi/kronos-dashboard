@@ -63,7 +63,7 @@ function EquityChart({ equity }: { equity: EquityView }) {
   const pnlTone = equity.pnlUsdc >= 0 ? "text-emerald-300" : "text-rose-300";
 
   return (
-    <section data-testid="live-equity-chart" className="min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
+    <section data-testid="live-equity-chart" className="min-w-0 self-start overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-800 px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold text-zinc-100">账户权益走势</h2>
