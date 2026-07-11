@@ -87,6 +87,7 @@ test("live defaults to a six-metric trading cockpit", async ({ page }) => {
   await expect(cockpit.getByTestId("cockpit-metric")).toHaveCount(6);
   await expect(cockpit.getByText("账户权益", { exact: true })).toBeVisible();
   await expect(cockpit.getByText("今日已实现 PnL", { exact: true })).toBeVisible();
+  await expect(cockpit.getByText(/当日胜率/)).toBeVisible();
   await expect(cockpit.getByText("结算结果", { exact: true })).toBeVisible();
   await expect(cockpit.getByText("当前风险余量", { exact: true })).toBeVisible();
   await expect(cockpit.getByText("当前敞口", { exact: true })).toBeVisible();

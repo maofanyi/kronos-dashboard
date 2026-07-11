@@ -2503,7 +2503,7 @@ export default function Live({
       id: "today-pnl",
       label: "今日已实现 PnL",
       value: signedMoney(livePnl),
-      detail: `${liveTrades} 笔结算`,
+      detail: `当日胜率 ${percent(todayWinRate)} | ${todayWins}胜/${todayLosses}负 | ${todaySettled}笔`,
       tone: livePnl >= 0 ? "text-emerald-300" : "text-rose-300",
       icon: CircleDollarSign,
     },
