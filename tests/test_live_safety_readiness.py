@@ -3998,9 +3998,11 @@ def test_live_page_scopes_real_order_lock_badge_to_live_real_mode():
 
 def test_live_page_moves_audit_panels_into_diagnostics_section():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    operations_source = Path("web/src/pages/live/LiveOperationsDetails.tsx").read_text(encoding="utf-8")
 
-    assert 'title="Live Diagnostics"' in source
-    assert 'sub="safety gates, audits, and raw signal detail"' in source
+    assert "<LiveOperationsDetails" in source
+    assert 'title: "????"' in operations_source
+    assert 'description: "???????????????????"' in source
     assert "<SafetyStrip safety={safety} health={health} />" in source
     assert "<ReadinessChecklist safety={safety} health={health} intel={intel} />" in source
     assert "<MarketDataPanel data={safety?.market_data} />" in source
@@ -4040,7 +4042,7 @@ def test_live_page_places_weekly_pnl_calendar_below_live_equity_curve():
     assert "function WeeklyPnlStrip" in market_source
     assert "<EquityChart equity={equity} />" in market_source
     assert "{weeklyCalendar && <WeeklyPnlStrip calendar={weeklyCalendar} />}" in market_source
-    assert 'className="grid min-w-0 gap-5 live-main-console"' in live_section
+    assert 'className="grid min-w-0 gap-4 live-main-console"' in live_section
     assert live_section.index("<LiveMarketSection") < live_section.index("<LiveMonthlyPnlCalendar")
 
 
@@ -4526,8 +4528,8 @@ def test_live_page_shows_live_real_recent_prediction_signals():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
     live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
 
-    assert 'Panel title="Recent Signals" sub="formal live prediction artifacts"' in live_section
-    assert "Waiting for formal live decisions" in live_section
+    assert 'Panel title="????" sub="????????"' in live_section
+    assert "????????" in live_section
     assert "(events ?? []).slice(0, 14).map((event)" in live_section
 
 

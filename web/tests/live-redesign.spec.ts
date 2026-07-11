@@ -131,3 +131,25 @@ test("mobile market chart is stable and reachable without horizontal overflow", 
   }));
   expect(widths.scroll).toBeLessThanOrEqual(widths.client);
 });
+
+test("operations details start collapsed and the mobile ledger stays contained", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const sectionNames = ["交易健康", "账户与持仓", "订单账本", "详细诊断"];
+  for (const name of sectionNames) {
+    await expect(page.getByRole("button", { name: new RegExp(name) })).toHaveAttribute("aria-expanded", "false");
+  }
+
+  const ledgerButton = page.getByRole("button", { name: /订单账本/ });
+  await ledgerButton.click();
+  await expect(ledgerButton).toHaveAttribute("aria-expanded", "true");
+  await expect(page.getByRole("button", { name: /交易健康/ })).toHaveAttribute("aria-expanded", "false");
+  await expect(page.getByTestId("live-ledger-mobile")).toBeVisible();
+
+  const widths = await page.evaluate(() => ({
+    scroll: document.documentElement.scrollWidth,
+    client: document.documentElement.clientWidth,
+  }));
+  expect(widths.scroll).toBeLessThanOrEqual(widths.client);
+});

@@ -19,6 +19,7 @@ import LiveCockpitSummary, { type CockpitMetric } from "./live/LiveCockpitSummar
 import LiveCurrentAction from "./live/LiveCurrentAction";
 import LiveMarketSection from "./live/LiveMarketSection";
 import LiveMonthlyPnlCalendar from "./live/LiveMonthlyPnlCalendar";
+import LiveOperationsDetails from "./live/LiveOperationsDetails";
 
 interface StatusData {
   balance: number;
@@ -2223,7 +2224,35 @@ function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"
           <HealthTile label="Attempts" value={`${attempts}`} />
         </div>
       </div>
-      <div className="max-h-[420px] overflow-auto">
+      <div data-testid="live-ledger-mobile" className="space-y-2 p-3 md:hidden">
+        {visible.length === 0 ? (
+          <div className="py-6 text-center text-sm text-zinc-500">暂无实盘账本订单</div>
+        ) : visible.map((order, index) => {
+          const status = String(order.status || "-");
+          const pnl = order.pnl ?? null;
+          const pnlTone = pnl == null ? "text-zinc-500" : pnl >= 0 ? "text-emerald-300" : "text-rose-300";
+          return (
+            <article key={order.signal_id || order.order_id || `${order.market_slug}-${index}`} className="min-w-0 rounded border border-zinc-800 bg-black/20 p-3">
+              <div className="flex min-w-0 items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="break-all font-mono text-xs text-zinc-300">{compactId(order.signal_id || order.order_id || undefined)}</div>
+                  <div className="mt-1 break-words text-xs text-zinc-500">{order.market_slug || "未知市场"}</div>
+                </div>
+                <div className={`shrink-0 font-mono text-sm font-semibold ${pnlTone}`}>{orderValue(pnl)}</div>
+              </div>
+              <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
+                <div><span className="text-zinc-600">状态</span><div className="mt-0.5 text-zinc-300">{liveOrderGroup(order)}</div></div>
+                <div><span className="text-zinc-600">方向</span><div className="mt-0.5 font-mono text-zinc-300">{directionLabel(order.token_outcome || order.direction || "-")}</div></div>
+                <div><span className="text-zinc-600">成交份额</span><div className="mt-0.5 font-mono text-zinc-300">{orderSize(order.filled_size)}</div></div>
+                <div><span className="text-zinc-600">均价</span><div className="mt-0.5 font-mono text-zinc-300">{orderPrice(order.average_fill_price ?? order.price)}</div></div>
+                <div className="col-span-2"><span className="text-zinc-600">结算来源</span><div className="mt-0.5 break-words font-mono text-zinc-300">{order.settlement_source || order.market_result_source || order.fill_source || "-"}</div></div>
+              </div>
+              <div className="mt-2 text-[10px] text-zinc-600">{status} | {shortDateTime(order.settle_ts || order.settled_at || undefined)}</div>
+            </article>
+          );
+        })}
+      </div>
+      <div className="hidden max-h-[420px] w-full min-w-0 max-w-full overflow-x-auto overflow-y-auto md:block">
         {visible.length === 0 ? (
           <div className="px-4 py-8 text-center">
             <div className="text-sm text-zinc-400">No live ledger orders</div>
@@ -2338,7 +2367,7 @@ export default function Live({
   const { data: status } = usePolling<StatusData>("/api/status", 5000);
   const { data: events } = usePolling<EventItem[]>(`/api/events?source=${eventSource}&limit=80`, 5000);
   const { data: trades } = usePolling<TradeItem[]>("/api/trades?limit=200", 5000);
-  const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=260", 5000);
+  const { data: intel } = usePolling<LiveIntel>("/api/live-intel?limit=80", 5000);
   const { data: safety } = usePolling<LiveSafety>("/api/live-safety", 30000);
   const { data: signalStats } = usePolling<SignalStats>(`/api/signal-stats?source=${eventSource}`, 10000);
   const liveReal = safety?.live_real;
@@ -2568,96 +2597,91 @@ export default function Live({
             }}
           />
 
-          <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]">
-            <div className="grid min-w-0 gap-5 live-main-console">
-              <LiveMarketSection
-                equity={{ points: liveEquityPoints, pnlUsdc: liveEquityPnl, settled: liveEquity?.settled ?? 0, source: "实盘结算账本" }}
-                weeklyCalendar={liveReal?.weekly_pnl_calendar}
-              />
-              <LiveMonthlyPnlCalendar
-                source="live_real"
-                initialMonth={(todayStats?.day ?? todayStats?.day_utc ?? new Date().toISOString().slice(0, 10)).slice(0, 7)}
-              />
-            </div>
-            <div className="space-y-5 live-side-console">
-              <LiveSoakPanel liveReal={liveReal} />
-              <RiskRulesPanel controls={liveReal?.risk_controls} />
-            </div>
+          <div className="grid min-w-0 gap-4 live-main-console">
+            <LiveMarketSection
+              equity={{ points: liveEquityPoints, pnlUsdc: liveEquityPnl, settled: liveEquity?.settled ?? 0, source: "实盘结算账本" }}
+              weeklyCalendar={liveReal?.weekly_pnl_calendar}
+            />
+            <LiveMonthlyPnlCalendar
+              source="live_real"
+              initialMonth={(todayStats?.day ?? todayStats?.day_utc ?? new Date().toISOString().slice(0, 10)).slice(0, 7)}
+            />
           </div>
 
-          <div className="grid min-w-0 gap-5 xl:grid-cols-2 2xl:grid-cols-[minmax(320px,0.65fr)_minmax(420px,0.95fr)_minmax(0,1.15fr)]">
-            <CurrentClobOrdersPanel audit={safety?.clob_readonly} />
-            <PolymarketAccountActivityPanel account={liveReal?.account_activity} />
-            <LiveLedgerOrdersPanel liveReal={liveReal} />
-          </div>
-
-          <div className="grid min-w-0 gap-5">
-            <LiveRealOrdersPanel liveReal={liveReal} />
-          </div>
-
-          <div className="grid min-w-0 gap-5">
-            <TradingStatusPanel safety={safety} />
-          </div>
-
-          <CollapsiblePanel
-            title="Live Diagnostics"
-            sub="safety gates, audits, and raw signal detail"
-            right={<StatusPill ok={readinessReady && runtimeFresh} label={readinessReady && runtimeFresh ? "Clean" : "Review"} />}
-            summary={
-              <div className="grid gap-2 text-xs md:grid-cols-4">
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-zinc-500">Readiness</span>
-                  <span className={`font-mono ${readinessTone}`}>{readinessPassed}/{readinessTotal}</span>
+          <LiveOperationsDetails
+            health={{
+              description: "进程、订单同步、风控规则与实盘执行汇总",
+              summary: `${liveRuntime.label} | ${riskBlockerItems.length} 个风险提示`,
+              status: liveRuntime.ok && !riskControlTriggered ? "正常" : "需检查",
+              warning: !liveRuntime.ok || riskControlTriggered,
+              content: (
+                <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+                  <LiveSoakPanel liveReal={liveReal} />
+                  <RiskRulesPanel controls={liveReal?.risk_controls} />
+                  <TradingStatusPanel safety={safety} />
+                  <LiveRealOrdersPanel liveReal={liveReal} />
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-zinc-500">Health</span>
-                  <span className={`font-mono ${healthTone}`}>{healthValue}</span>
+              ),
+            }}
+            account={{
+              description: "Polymarket 账户活动、当前挂单与可赎回持仓",
+              summary: `${liveActivePositions} 个持仓 | ${liveOpenOrders} 个挂单`,
+              status: liveReal?.account_activity?.ok === false ? "需检查" : "正常",
+              warning: liveReal?.account_activity?.ok === false,
+              content: (
+                <div className="grid min-w-0 gap-4 xl:grid-cols-2">
+                  <CurrentClobOrdersPanel audit={safety?.clob_readonly} />
+                  <PolymarketAccountActivityPanel account={liveReal?.account_activity} />
                 </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-zinc-500">Market</span>
-                  <span className={`font-mono ${marketTone}`}>{marketValue}</span>
-                </div>
-                <div className="flex items-center justify-between gap-3">
-                  <span className="text-zinc-500">Dry-run</span>
-                  <span className={`font-mono ${dryrunTone}`}>{dryrunValue}</span>
-                </div>
-              </div>
-            }
-          >
-            <div className="space-y-5 p-4">
-              <div className="grid gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
-                <SafetyStrip safety={safety} health={health} />
-                <ReadinessChecklist safety={safety} health={health} intel={intel} />
-              </div>
-
-              <div className="grid gap-5 xl:grid-cols-4">
-                <MarketDataPanel data={safety?.market_data} />
-                <ReportFreshnessPanel refresh={safety?.report_refresh} />
-                <LegacyReportFreshnessPanel refresh={safety?.legacy_report_refresh} />
-                <RiskPanel intel={intel} safety={safety} />
-              </div>
-
-              <div className="grid gap-5 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.8fr)]">
-                <ClobReadonlyPanel audit={safety?.clob_readonly} />
-                <FirstOrderRail rail={safety?.first_order_rail} />
-              </div>
-
-              <Panel title="Recent Signals" sub="formal live prediction artifacts" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
-                <div className="max-h-[280px] overflow-auto">
-                  {(events?.length ?? 0) === 0 ? (
-                    <div className="px-4 py-8 text-center">
-                      <div className="text-sm text-zinc-400">No recent signals</div>
-                      <div className="mt-1 text-xs text-zinc-600">Waiting for formal live decisions</div>
+              ),
+            }}
+            ledger={{
+              description: "按信号聚合的订单尝试、成交与结算记录",
+              summary: `${liveReal?.order_records?.length ?? 0} 个信号`,
+              status: "只读",
+              content: <LiveLedgerOrdersPanel liveReal={liveReal} />,
+            }}
+            diagnostics={{
+              description: "安全门、数据新鲜度、只读审计与原始信号",
+              summary: `就绪 ${readinessPassed}/${readinessTotal} | ${healthValue}`,
+              status: readinessReady && runtimeFresh ? "正常" : "需检查",
+              warning: !readinessReady || !runtimeFresh,
+              content: (
+                <div className="space-y-4">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 border-b border-zinc-900 pb-3 text-xs">
+                    <span className="text-zinc-500">Dry-run</span>
+                    <span className={`font-mono ${dryrunTone}`}>{dryrunValue}</span>
+                    <span className="text-zinc-600">{dryrunSub}</span>
+                  </div>
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,0.9fr)_minmax(420px,1.1fr)]">
+                    <SafetyStrip safety={safety} health={health} />
+                    <ReadinessChecklist safety={safety} health={health} intel={intel} />
+                  </div>
+                  <div className="grid gap-4 xl:grid-cols-4">
+                    <MarketDataPanel data={safety?.market_data} />
+                    <ReportFreshnessPanel refresh={safety?.report_refresh} />
+                    <LegacyReportFreshnessPanel refresh={safety?.legacy_report_refresh} />
+                    <RiskPanel intel={intel} safety={safety} />
+                  </div>
+                  <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.8fr)]">
+                    <ClobReadonlyPanel audit={safety?.clob_readonly} />
+                    <FirstOrderRail rail={safety?.first_order_rail} />
+                  </div>
+                  <Panel title="最近信号" sub="正式实盘预测记录" right={<span className="font-mono text-xs text-zinc-500">{events?.length ?? 0}</span>}>
+                    <div className="max-h-[280px] overflow-auto">
+                      {(events?.length ?? 0) === 0 ? (
+                        <div className="px-4 py-8 text-center text-sm text-zinc-500">等待正式实盘决策</div>
+                      ) : (
+                        (events ?? []).slice(0, 14).map((event) => (
+                          <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
+                        ))
+                      )}
                     </div>
-                  ) : (
-                    (events ?? []).slice(0, 14).map((event) => (
-                      <SignalCard key={event.id} event={event} expanded={expandedSignal === event.id} onToggle={() => setExpandedSignal(expandedSignal === event.id ? null : event.id)} />
-                    ))
-                  )}
+                  </Panel>
                 </div>
-              </Panel>
-            </div>
-          </CollapsiblePanel>
+              ),
+            }}
+          />
         </div>
       )}
 
