@@ -17,6 +17,7 @@ import { Fragment, type ReactNode, useId, useMemo, useState } from "react";
 import BTCMarketChart from "../components/BTCMarketChart";
 import { Chart } from "@/components/chart";
 import { usePolling } from "../hooks/usePolling";
+import LiveMonthlyPnlCalendar from "./live/LiveMonthlyPnlCalendar";
 
 interface StatusData {
   balance: number;
@@ -2648,6 +2649,10 @@ export default function Live({
                 <EquityPanel title="Equity Curve" sub="real settled ledger" data={liveEquityPoints} pnl={liveEquityPnl} settled={liveEquity?.settled ?? 0} />
               </div>
               <WeeklyPnlCalendarPanel calendar={liveReal?.weekly_pnl_calendar} />
+              <LiveMonthlyPnlCalendar
+                source="live_real"
+                initialMonth={(todayStats?.day ?? todayStats?.day_utc ?? new Date().toISOString().slice(0, 10)).slice(0, 7)}
+              />
             </div>
             <div className="space-y-5 live-side-console">
               <LiveSoakPanel liveReal={liveReal} />
@@ -2751,6 +2756,11 @@ export default function Live({
             </div>
             <PaperRuntimePanel paperMonitor={paperMonitor} />
           </div>
+
+          <LiveMonthlyPnlCalendar
+            source="paper_monitor"
+            initialMonth={(todayStats?.day ?? todayStats?.day_utc ?? new Date().toISOString().slice(0, 10)).slice(0, 7)}
+          />
 
           <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.3fr)_minmax(380px,0.7fr)]">
             <Panel title="Completed Trades" sub="latest fills" right={<span className="font-mono text-xs text-zinc-500">latest {Math.min(10, settledDesc.length)} / {settledDesc.length}</span>}>
