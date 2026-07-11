@@ -78,3 +78,21 @@ test("monthly pnl calendar changes month and opens reconciled day orders", async
   await page.getByRole("button", { name: "上一个月" }).click();
   await expect(page.getByText("2026年6月", { exact: true })).toBeVisible();
 });
+
+test("live defaults to a six-metric trading cockpit", async ({ page }) => {
+  await page.goto("/");
+
+  const cockpit = page.getByTestId("live-cockpit");
+  await expect(cockpit).toBeVisible();
+  await expect(cockpit.getByTestId("cockpit-metric")).toHaveCount(6);
+  await expect(cockpit.getByText("账户权益", { exact: true })).toBeVisible();
+  await expect(cockpit.getByText("今日已实现 PnL", { exact: true })).toBeVisible();
+  await expect(cockpit.getByText("结算结果", { exact: true })).toBeVisible();
+  await expect(cockpit.getByText("当前风险余量", { exact: true })).toBeVisible();
+  await expect(cockpit.getByText("当前敞口", { exact: true })).toBeVisible();
+  await expect(cockpit.getByText("最新决策", { exact: true })).toBeVisible();
+
+  const currentAction = page.getByTestId("live-current-action");
+  await expect(currentAction).toBeVisible();
+  await expect(currentAction.getByText("执行漏斗", { exact: true })).toBeVisible();
+});

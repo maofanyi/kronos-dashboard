@@ -3939,21 +3939,17 @@ def test_live_page_uses_today_summary_for_top_kpis():
 
 def test_live_page_defaults_to_trading_console_layout():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    cockpit_source = Path("web/src/pages/live/LiveCockpitSummary.tsx").read_text(encoding="utf-8")
 
     assert "Trading Console" not in source
-    assert "grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8" in source
-    assert 'StatCard label="CLOB Balance"' in source
-    assert 'StatCard label="Total PnL"' in source
-    assert 'sub={`${liveEquity?.settled ?? 0} settled total`}' in source
-    assert 'StatCard label="Realized PnL"' in source
-    assert 'StatCard label="Total Win Rate"' in source
-    assert 'StatCard label="Today Win Rate"' in source
-    assert 'StatCard label="Total Pass Rate"' in source
-    assert 'StatCard label="Today Pass Rate"' in source
-    assert 'StatCard label="Settled Win Rate"' in source
-    assert 'StatCard label="Orders"' in source
-    assert 'StatCard label="Signal Pass Rate"' in source
-    assert 'sub={`${liveSignalPassed} / ${liveSignalTotal} signals passed`}' in source
+    assert 'import LiveCockpitSummary, { type CockpitMetric }' in source
+    assert "const liveCockpitMetrics: CockpitMetric[]" in source
+    assert 'data-testid="live-cockpit"' in cockpit_source
+    assert 'data-testid="cockpit-metric"' in cockpit_source
+    for metric_id in ("equity", "today-pnl", "settled-result", "risk-budget", "exposure", "latest-decision"):
+        assert f'id: "{metric_id}"' in source
+    assert '<LiveCockpitSummary metrics={liveCockpitMetrics}' in source
+    assert '<LiveCurrentAction' in source
     assert 'StatCard label="Mode"' not in source
     assert 'StatCard label="Readiness"' not in source
     assert 'StatCard label="Health"' not in source
@@ -4109,9 +4105,9 @@ def test_live_page_uses_clob_portfolio_for_top_balance_kpi():
     assert "`Balance gap ${money(fundingBalanceGap)}`" in source
     assert "`Allowance gap ${money(fundingAllowanceGap)}`" in source
     assert "const fundingBalanceTone = funding?.funding_ready === true || funding?.balance_ok === true ? \"text-emerald-300\" : fundingLargestGap > 0 ? \"text-rose-300\" : \"text-zinc-100\"" in source
-    assert "value={money(clobPortfolioValue)}" in source
-    assert "sub={clobPortfolioSub}" in source
-    assert "tone={fundingBalanceTone}" in source
+    assert "value: money(clobPortfolioValue)" in source
+    assert "detail: clobPortfolioSub" in source
+    assert "tone: fundingBalanceTone" in source
 
 
 def test_live_page_live_real_balance_subtitle_does_not_use_paper_today_pnl():

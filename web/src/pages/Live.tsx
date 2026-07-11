@@ -17,6 +17,8 @@ import { Fragment, type ReactNode, useId, useMemo, useState } from "react";
 import BTCMarketChart from "../components/BTCMarketChart";
 import { Chart } from "@/components/chart";
 import { usePolling } from "../hooks/usePolling";
+import LiveCockpitSummary, { type CockpitMetric } from "./live/LiveCockpitSummary";
+import LiveCurrentAction from "./live/LiveCurrentAction";
 import LiveMonthlyPnlCalendar from "./live/LiveMonthlyPnlCalendar";
 
 interface StatusData {
@@ -2577,22 +2579,74 @@ export default function Live({
   const liveOrderCount = liveReal?.orders.open_or_pending ?? 0;
   const liveTrades = liveReal?.risk?.metrics.daily_trades ?? 0;
   const livePnl = liveReal?.risk?.metrics.daily_pnl_usdc ?? 0;
-  const liveWins = liveReal?.risk?.metrics.wins ?? 0;
-  const liveLosses = liveReal?.risk?.metrics.losses ?? 0;
-  const liveWinRate = liveReal?.risk?.metrics.win_rate ?? 0;
-  const liveSignalPassed = signalStats?.passed ?? 0;
-  const liveSignalTotal = signalStats?.total ?? 0;
-  const liveSignalPassRate = signalStats?.pass_rate ?? 0;
+  const liveTotalWins = liveReal?.stats.wins ?? 0;
+  const liveTotalLosses = liveReal?.stats.losses ?? 0;
+  const liveTotalWinRate = liveReal?.stats.win_rate ?? 0;
   const liveEquityPnl = liveEquity?.pnl_usdc ?? livePnl;
   const liveRiskLimits = liveReal?.risk?.limits;
   const liveSubmitted = liveReal?.orders.total ?? (liveReal?.formal?.submitted ? 1 : liveReal?.soak.submitted_count ?? 0);
-  const liveCancelled = liveReal?.orders.cancelled ?? 0;
   const liveNoFillCancelled = liveReal?.orders.no_fill_cancelled ?? 0;
-  const liveFilledSize = liveReal?.orders.filled_size ?? 0;
-  const liveRuntimeRole = liveReal?.runtime?.role === "formal_supervisor" ? "supervisor" : "process";
   const paperOpenPending = (paperMonitor?.orders.open ?? todayOpen) + (paperMonitor?.orders.pending ?? pendingCount);
   const modeStatus = isPaperMonitorTab ? "Simulation only" : safety?.real_orders_enabled ? "REAL ORDERS ENABLED" : "Real orders locked";
   const modeStatusOk = isPaperMonitorTab ? true : !safety?.real_orders_enabled;
+  const liveDailyLossLimit = liveRiskLimits?.max_daily_loss_usdc ?? 0;
+  const liveRiskRemaining = Math.max(0, liveDailyLossLimit + livePnl);
+  const liveActivePositions = liveReal?.account_activity?.summary.active_positions_count ?? 0;
+  const liveOpenOrders = safety?.clob_readonly?.open_orders?.length ?? 0;
+  const latestDecisionAction = liveReal?.formal?.latest_action || latestDetails?.action || latestSignal?.action || "HOLD";
+  const latestDecisionSide = latestDetails?.side || latestSignal?.dir5 || "--";
+  const latestDecisionMarket = latestDetails?.market_slug || rangeLabel(latestDetails?.entry_ts || "--", latestDetails?.settle_ts || "--");
+  const latestDecisionSettle = latestDetails?.settle_ts || liveReal?.formal?.target_market_settle_ts || liveReal?.formal?.settle_ts || "";
+  const liveCockpitMetrics: CockpitMetric[] = [
+    {
+      id: "equity",
+      label: "账户权益",
+      value: money(clobPortfolioValue),
+      detail: clobPortfolioSub,
+      tone: fundingBalanceTone,
+      icon: Wallet,
+    },
+    {
+      id: "today-pnl",
+      label: "今日已实现 PnL",
+      value: signedMoney(livePnl),
+      detail: `${liveTrades} 笔结算`,
+      tone: livePnl >= 0 ? "text-emerald-300" : "text-rose-300",
+      icon: CircleDollarSign,
+    },
+    {
+      id: "settled-result",
+      label: "结算结果",
+      value: signedMoney(liveEquityPnl),
+      detail: `胜率 ${percent(liveTotalWinRate)} | ${liveTotalWins}胜/${liveTotalLosses}负 | ${liveEquity?.settled ?? 0}笔`,
+      tone: liveEquityPnl >= 0 ? "text-emerald-300" : "text-rose-300",
+      icon: Target,
+    },
+    {
+      id: "risk-budget",
+      label: "当前风险余量",
+      value: money(liveRiskRemaining),
+      detail: `日亏损线 ${money(liveDailyLossLimit)}`,
+      tone: riskControlTriggered ? "text-rose-300" : "text-amber-300",
+      icon: AlertTriangle,
+    },
+    {
+      id: "exposure",
+      label: "当前敞口",
+      value: `${liveActivePositions} 持仓`,
+      detail: `${liveOpenOrders} 挂单 | ${liveOrderCount} open/pending`,
+      tone: liveOrderCount > 0 ? "text-amber-300" : "text-zinc-100",
+      icon: ListChecks,
+    },
+    {
+      id: "latest-decision",
+      label: "最新决策",
+      value: `${latestDecisionAction} ${latestDecisionSide}`,
+      detail: latestDecisionSettle ? `结算 ${shortDateTime(latestDecisionSettle)}` : "等待新信号",
+      tone: latestDecisionAction === "HOLD" ? "text-zinc-300" : "text-emerald-300",
+      icon: Activity,
+    },
+  ];
 
   return (
     <div className="space-y-5">
@@ -2631,16 +2685,24 @@ export default function Live({
               </div>
             </div>
           )}
-          <div className="grid grid-cols-2 gap-3 md:grid-cols-4 2xl:grid-cols-8">
-            <StatCard label="CLOB Balance" value={money(clobPortfolioValue)} sub={clobPortfolioSub} icon={Wallet} tone={fundingBalanceTone} />
-            <StatCard label="Total PnL" value={signedMoney(liveEquityPnl)} sub={`${liveEquity?.settled ?? 0} settled total`} icon={CircleDollarSign} tone={liveEquityPnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
-            <StatCard label="Realized PnL" value={signedMoney(livePnl)} sub={`${liveTrades} settled today | ${liveCancelled} cancelled`} icon={CircleDollarSign} tone={livePnl >= 0 ? "text-emerald-300" : "text-rose-300"} />
-            <StatCard label="Settled Win Rate" value={percent(liveWinRate)} sub={`${liveWins}W / ${liveLosses}L settled`} icon={Target} tone={liveTrades === 0 ? "text-zinc-100" : liveWinRate >= 0.51 ? "text-emerald-300" : "text-amber-300"} />
-            <StatCard label="Loss Limit" value={money(liveRiskLimits?.max_daily_loss_usdc ?? 0)} sub="daily guarded stop" icon={AlertTriangle} tone="text-zinc-100" />
-            <StatCard label="Live Runtime" value={liveRuntime.label} sub={`${liveReal?.runtime?.matches.length ?? 0} ${liveRuntimeRole} match`} icon={RadioTower} tone={liveRuntime.ok ? "text-emerald-300" : "text-amber-300"} />
-            <StatCard label="Orders" value={`${liveSubmitted}`} sub={`${liveFilledSize} filled | ${liveNoFillCancelled} no-fill`} icon={ListChecks} tone={liveSubmitted === 0 ? "text-zinc-100" : liveFilledSize > 0 ? "text-emerald-300" : "text-amber-300"} />
-            <StatCard label="Signal Pass Rate" value={percent(liveSignalPassRate)} sub={`${liveSignalPassed} / ${liveSignalTotal} signals passed`} icon={Target} tone={liveSignalTotal === 0 ? "text-zinc-100" : liveSignalPassRate >= 0.1 ? "text-emerald-300" : "text-amber-300"} />
-          </div>
+          <LiveCockpitSummary metrics={liveCockpitMetrics} updatedAt={liveReal?.formal?.latest_created_at || safety?.market_data?.timestamp} />
+
+          <LiveCurrentAction
+            decision={{
+              action: latestDecisionAction,
+              side: latestDecisionSide,
+              market: latestDecisionMarket,
+              settleAt: latestDecisionSettle,
+              reason: liveReal?.formal?.latest_reason || latestDetails?.reason || "等待下一次正式预测",
+            }}
+            openOrders={liveOpenOrders}
+            funnel={{
+              submitted: liveSubmitted,
+              filled: liveReal?.orders.filled_orders ?? 0,
+              noFill: liveNoFillCancelled,
+              settled: liveReal?.orders.settled ?? 0,
+            }}
+          />
 
           <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]">
             <div className="grid min-w-0 gap-5 live-main-console">
