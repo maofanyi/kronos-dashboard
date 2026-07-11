@@ -662,7 +662,7 @@ export default function BTCMarketChart() {
   }, [data?.market.start_ts, data?.markets.length]);
 
   return (
-    <section className="chainlink-market-chart mx-auto w-full max-w-[1180px] overflow-hidden rounded-md border border-zinc-800 bg-[#11171b]">
+    <section className="chainlink-market-chart w-full min-w-0 overflow-hidden rounded-md border border-zinc-800 bg-[#11171b]">
       <div className="flex flex-col gap-3 border-b border-zinc-800 px-4 py-3 lg:flex-row lg:items-start lg:justify-between">
         <div className="flex min-w-0 gap-3">
           <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-md bg-amber-500 text-white shadow-lg shadow-amber-500/10">
@@ -670,9 +670,9 @@ export default function BTCMarketChart() {
           </div>
           <div className="min-w-0">
             <div className="flex flex-wrap items-center gap-2">
-              <h2 className="text-lg font-bold text-zinc-50 sm:text-xl">BTC Up or Down 5m</h2>
-              <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-emerald-300">
-                read only
+              <h2 className="text-lg font-bold text-zinc-50">BTC 5分钟市场</h2>
+              <span className="rounded border border-emerald-500/20 bg-emerald-500/10 px-2 py-1 text-xs font-semibold text-emerald-300">
+                只读
               </span>
             </div>
             <div className="mt-2 flex flex-wrap items-center gap-3 text-sm text-zinc-400">
@@ -700,12 +700,12 @@ export default function BTCMarketChart() {
             <div className="text-2xl font-bold text-rose-400 sm:text-3xl">
               <RollingText value={statusLabel} className="chainlink-clock-odometer" />
             </div>
-            <div className="mt-1 text-xs font-semibold uppercase tracking-[0.14em] text-zinc-500">market clock</div>
+            <div className="mt-1 text-xs font-semibold text-zinc-500">市场倒计时</div>
           </div>
         </div>
       </div>
 
-      <div className="grid gap-4 px-4 py-3 lg:grid-cols-[minmax(0,1fr)_220px]">
+      <div className="min-w-0 space-y-3 px-4 py-3">
         <div className="min-w-0 space-y-3">
           <div className="flex flex-wrap items-start gap-9">
             {showTargetPrice && (
@@ -719,7 +719,7 @@ export default function BTCMarketChart() {
             </div>
           )}
 
-          <div className="relative h-[340px] overflow-hidden rounded-md border border-zinc-800 bg-[#11171b]">
+          <div data-testid="btc-market-plot" className="relative h-[230px] overflow-hidden rounded-md border border-zinc-800 bg-[#11171b] md:h-[300px]">
             <svg viewBox={`0 0 ${CHART_WIDTH} ${CHART_HEIGHT}`} className="h-full w-full" preserveAspectRatio="none">
               <defs>
                 <linearGradient id="chainlinkLineFill" x1="0" x2="0" y1="0" y2="1">
@@ -832,44 +832,38 @@ export default function BTCMarketChart() {
           </div>
         </div>
 
-        <aside className="min-w-0 rounded-md border border-zinc-800 bg-zinc-950/60 t-panel-slide" data-open={data ? "true" : "false"}>
+        <div className="min-w-0 border-t border-zinc-800 pt-3 t-panel-slide" data-open={data ? "true" : "false"}>
           <div className="flex items-center justify-between border-b border-zinc-800 px-4 py-3">
             <div className="flex items-center gap-2 text-sm font-semibold text-zinc-100">
               <History className="h-4 w-4 text-zinc-500" />
-              Recent results
+              最近结算
             </div>
             <span className="text-xs text-zinc-600">{localTime(data?.current_price_ts)}</span>
           </div>
-          <div className="max-h-[420px] divide-y divide-zinc-900 overflow-auto">
+          <div className="flex max-w-full gap-2 overflow-x-auto px-1 py-2">
             {(data?.history ?? []).length === 0 ? (
-              <div className="px-4 py-10 text-center text-sm text-zinc-500">No Chainlink windows yet</div>
+              <div className="w-full px-4 py-5 text-center text-sm text-zinc-500">暂无 Chainlink 结算窗口</div>
             ) : (
               data?.history.map((item) => (
                 <button
                   type="button"
                   key={item.slug}
-                  className="block w-full px-4 py-3 text-left hover:bg-zinc-900/60"
+                  className="min-w-[190px] rounded border border-zinc-800 bg-zinc-950/60 px-3 py-2 text-left hover:border-zinc-700 hover:bg-zinc-900/60"
                   onClick={() => setSelectedStart(item.start_ts)}
                 >
                   <div className="flex items-center justify-between gap-3">
                     <span className="text-sm text-zinc-300">{windowLabel(item.start_ts, item.end_ts)}</span>
                     <ResultPill result={item.result} />
                   </div>
-                  <div className="mt-2 grid grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <div className="text-zinc-600">target</div>
-                      <div className="text-zinc-300">{compactMoney(item.target_price)}</div>
-                    </div>
-                    <div>
-                      <div className="text-zinc-600">settle</div>
-                      <div className="text-zinc-300">{compactMoney(item.settle_price)}</div>
-                    </div>
+                  <div className="mt-1 flex items-center justify-between gap-3 font-mono text-[11px] text-zinc-500">
+                    <span>目标 {compactMoney(item.target_price)}</span>
+                    <span>结算 {compactMoney(item.settle_price)}</span>
                   </div>
                 </button>
               ))
             )}
           </div>
-        </aside>
+        </div>
       </div>
     </section>
   );

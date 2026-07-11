@@ -29,7 +29,7 @@ function compactTime(value: string) {
 
 export default function LiveCurrentAction({ decision, openOrders, funnel }: Props) {
   return (
-    <section data-testid="live-current-action" className="grid min-w-0 gap-3 border-y border-zinc-800 py-3 lg:grid-cols-[minmax(0,1fr)_auto]">
+    <section data-testid="live-current-action" className="grid min-w-0 gap-2 border-y border-zinc-800 py-2 sm:gap-3 sm:py-3 lg:grid-cols-[minmax(0,1fr)_auto]">
       <div className="min-w-0">
         <div className="flex flex-wrap items-center gap-2">
           <RadioTower className="h-4 w-4 text-zinc-500" />

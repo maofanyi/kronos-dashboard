@@ -4013,47 +4013,44 @@ def test_live_page_moves_audit_panels_into_diagnostics_section():
 
 def test_live_page_groups_equity_curve_with_btc_market_chart_on_main_console():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    market_source = Path("web/src/pages/live/LiveMarketSection.tsx").read_text(encoding="utf-8")
 
     live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
     paper_section = source[source.index('activeTradingTab === "paper-monitor"'):]
 
-    assert "<BTCMarketChart />" in live_section
-    assert 'EquityPanel title="Equity Curve" sub="real settled ledger"' in live_section
-    assert "data={liveEquityPoints}" in live_section
-    assert "<BTCMarketChart />" in paper_section
-    assert 'EquityPanel title="Equity Curve" sub="paper checkpoint trades"' in paper_section
-    assert "data={paperEquityPoints}" in paper_section
+    assert "<LiveMarketSection" in live_section
+    assert "points: liveEquityPoints" in live_section
+    assert 'source: "??????"' in live_section
+    assert "<LiveMarketSection" in paper_section
+    assert "points: paperEquityPoints" in paper_section
+    assert 'source: "??????"' in paper_section
     assert "<PaperRuntimePanel paperMonitor={paperMonitor}" in paper_section
-    assert '2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]' in source
-    assert 'xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.75fr)]' in source
-    assert '<div className="min-w-0 space-y-5">' not in source
+    assert "<BTCMarketChart />" in market_source
+    assert "<EquityChart equity={equity} />" in market_source
+    assert 'xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]' in market_source
 
 
 def test_live_page_places_weekly_pnl_calendar_below_live_equity_curve():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
+    market_source = Path("web/src/pages/live/LiveMarketSection.tsx").read_text(encoding="utf-8")
     live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
 
     assert "weekly_pnl_calendar?: WeeklyPnlCalendar" in source
-    assert "function WeeklyPnlCalendarPanel" in source
-    assert "<WeeklyPnlCalendarPanel calendar={liveReal?.weekly_pnl_calendar} />" in live_section
-    assert live_section.index('EquityPanel title="Equity Curve" sub="real settled ledger"') < live_section.index("<WeeklyPnlCalendarPanel")
+    assert "weeklyCalendar={liveReal?.weekly_pnl_calendar}" in live_section
+    assert "function WeeklyPnlStrip" in market_source
+    assert "<EquityChart equity={equity} />" in market_source
+    assert "{weeklyCalendar && <WeeklyPnlStrip calendar={weeklyCalendar} />}" in market_source
     assert 'className="grid min-w-0 gap-5 live-main-console"' in live_section
-    assert live_section.index('className="grid min-w-0 gap-5 live-main-console"') < live_section.index("<WeeklyPnlCalendarPanel")
+    assert live_section.index("<LiveMarketSection") < live_section.index("<LiveMonthlyPnlCalendar")
 
 
 def test_live_weekly_pnl_calendar_uses_horizontal_strip_below_main_console():
-    source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
-    panel = source[source.index("function WeeklyPnlCalendarPanel"):source.index("function CollapsiblePanel")]
+    panel = Path("web/src/pages/live/LiveMarketSection.tsx").read_text(encoding="utf-8")
 
-    live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
-    main_console_start = live_section.index('className="grid min-w-0 gap-5 live-main-console"')
-    main_console_end = live_section.index('className="space-y-5 live-side-console"', main_console_start)
-    main_console = live_section[main_console_start:main_console_end]
-
-    assert "<WeeklyPnlCalendarPanel calendar={liveReal?.weekly_pnl_calendar} />" in main_console
-    assert 'className="grid grid-cols-2 gap-2 md:grid-cols-4 2xl:grid-cols-7"' in panel
+    assert 'aria-label="?????"' in panel
+    assert 'className="grid grid-cols-7 gap-1.5"' in panel
+    assert "maxAbsPnl" in panel
     assert "HealthTile label=\"Week PnL\"" not in panel
-    assert "break-words" not in panel
 
 
 def test_live_page_uses_source_scoped_equity_summaries():

@@ -14,11 +14,10 @@ import {
   Wallet,
 } from "lucide-react";
 import { Fragment, type ReactNode, useId, useMemo, useState } from "react";
-import BTCMarketChart from "../components/BTCMarketChart";
-import { Chart } from "@/components/chart";
 import { usePolling } from "../hooks/usePolling";
 import LiveCockpitSummary, { type CockpitMetric } from "./live/LiveCockpitSummary";
 import LiveCurrentAction from "./live/LiveCurrentAction";
+import LiveMarketSection from "./live/LiveMarketSection";
 import LiveMonthlyPnlCalendar from "./live/LiveMonthlyPnlCalendar";
 
 interface StatusData {
@@ -885,20 +884,6 @@ const shortDateTime = (value?: string | number) => {
   });
 };
 
-const shortDate = (value?: string | null) => {
-  if (!value) return "-";
-  const [year, month, day] = value.split("-");
-  if (!year || !month || !day) return value;
-  return `${month}/${day}`;
-};
-
-const weekdayShort = (value?: string | null) => {
-  if (!value) return "-";
-  const date = new Date(`${value}T00:00:00Z`);
-  if (Number.isNaN(date.getTime())) return "-";
-  return date.toLocaleDateString(undefined, { weekday: "short", timeZone: "UTC" });
-};
-
 const ageLabel = (seconds?: number | null) => {
   if (seconds == null) return "-";
   if (seconds < 90) return `${Math.round(seconds)}s`;
@@ -977,127 +962,6 @@ function Panel({ title, sub, children, right }: { title: string; sub?: string; c
       </div>
       {children}
     </section>
-  );
-}
-
-function EquityPanel({
-  title,
-  sub,
-  data,
-  pnl,
-  settled,
-}: {
-  title: string;
-  sub: string;
-  data: number[];
-  pnl: number;
-  settled: number;
-}) {
-  const tone = pnl >= 0 ? "text-emerald-300" : "text-rose-300";
-  const last = data.length ? data[data.length - 1] : 0;
-  const first = data.length ? data[0] : 0;
-  const delta = last - first;
-  const deltaTone = delta >= 0 ? "text-emerald-300" : "text-rose-300";
-  return (
-    <Panel
-      title={title}
-      sub={sub}
-      right={
-        <div className="flex items-center gap-4 text-right">
-          <div>
-            <div className={`font-mono text-sm ${tone}`}>{signedMoney(pnl)}</div>
-            <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">total pnl</div>
-          </div>
-          <div className="hidden sm:block">
-            <div className="font-mono text-sm text-zinc-200">{settled}</div>
-            <div className="text-[11px] uppercase tracking-[0.14em] text-zinc-600">settled</div>
-          </div>
-        </div>
-      }
-    >
-      <div className="p-4">
-        <div className="mb-4 grid grid-cols-3 gap-2 text-xs">
-          <div className="min-w-0 rounded border border-zinc-800 bg-zinc-900/35 px-3 py-2">
-            <div className="uppercase tracking-[0.14em] text-zinc-600">Start</div>
-            <div className="mt-1 truncate font-mono text-zinc-200">{money(first, 2)}</div>
-          </div>
-          <div className="min-w-0 rounded border border-zinc-800 bg-zinc-900/35 px-3 py-2">
-            <div className="uppercase tracking-[0.14em] text-zinc-600">Current</div>
-            <div className={`mt-1 truncate font-mono ${tone}`}>{money(last, 2)}</div>
-          </div>
-          <div className="min-w-0 rounded border border-zinc-800 bg-zinc-900/35 px-3 py-2">
-            <div className="uppercase tracking-[0.14em] text-zinc-600">Move</div>
-            <div className={`mt-1 truncate font-mono ${deltaTone}`}>{signedMoney(delta)}</div>
-          </div>
-        </div>
-        <div className="rounded-md border border-zinc-800 bg-zinc-950/80 px-3 py-4">
-          <Chart
-            data={data}
-            color={pnl >= 0 ? "#34d399" : "#fb7185"}
-            formatValue={(value) => money(value, 2)}
-            maxWidth="none"
-            aspectRatio="16 / 8"
-            preserveAspectRatio="none"
-            showGrid
-            showZeroLine
-            showXAxis={false}
-          />
-        </div>
-      </div>
-    </Panel>
-  );
-}
-
-function WeeklyPnlCalendarPanel({ calendar }: { calendar?: WeeklyPnlCalendar | null }) {
-  const fallbackDays: WeeklyPnlDay[] = Array.from({ length: 7 }, () => ({
-    date: "",
-    pnl_usdc: 0,
-    settled: 0,
-    wins: 0,
-    losses: 0,
-  }));
-  const days = calendar?.days?.length ? calendar.days : fallbackDays;
-  const total = calendar?.total_pnl_usdc ?? 0;
-  const settled = calendar?.settled ?? 0;
-  const wins = calendar?.wins ?? 0;
-  const losses = calendar?.losses ?? 0;
-  const totalOk = total >= 0;
-
-  return (
-    <Panel
-      title="7-Day PnL Calendar"
-      sub={calendar ? `UTC ${calendar.start_date} - ${calendar.end_date} | ${settled} settled | ${wins}W/${losses}L` : "settled ledger by UTC day"}
-      right={<StatusPill ok={totalOk} label={settled ? signedMoney(total) : "No settled"} />}
-    >
-      <div className="p-3">
-        <div className="grid grid-cols-2 gap-2 md:grid-cols-4 2xl:grid-cols-7">
-          {days.map((day, index) => {
-            const pnl = Number(day.pnl_usdc || 0);
-            const isWin = pnl > 0;
-            const isLoss = pnl < 0;
-            const tone = isWin
-              ? "border-emerald-500/25 bg-emerald-500/10"
-              : isLoss
-                ? "border-rose-500/25 bg-rose-500/10"
-                : "border-zinc-800 bg-black/20";
-            const textTone = isWin ? "text-emerald-300" : isLoss ? "text-rose-300" : "text-zinc-300";
-            return (
-              <div key={day.date || index} className={`min-w-0 rounded border px-3 py-2 ${tone}`}>
-                <div className="flex items-center justify-between gap-2">
-                  <span className="truncate text-[11px] uppercase tracking-[0.14em] text-zinc-500">{weekdayShort(day.date)}</span>
-                  <span className="font-mono text-[11px] text-zinc-500">{shortDate(day.date)}</span>
-                </div>
-                <div className={`mt-2 truncate font-mono text-sm font-semibold leading-tight ${textTone}`}>{signedMoney(pnl)}</div>
-                <div className="mt-1 flex items-center justify-between gap-2 text-[11px] text-zinc-500">
-                  <span>{day.settled} settled</span>
-                  <span className="font-mono">{day.wins}W/{day.losses}L</span>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </div>
-    </Panel>
   );
 }
 
@@ -2669,7 +2533,7 @@ export default function Live({
       </div>
 
       {activeTradingTab === "live-real" && (
-        <div className="space-y-5">
+        <div className="space-y-3 md:space-y-5">
           {riskControlTriggered && (
             <div className="rounded-md border border-rose-500/30 bg-rose-500/10 px-4 py-3">
               <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2706,11 +2570,10 @@ export default function Live({
 
           <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]">
             <div className="grid min-w-0 gap-5 live-main-console">
-              <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.75fr)]">
-                <BTCMarketChart />
-                <EquityPanel title="Equity Curve" sub="real settled ledger" data={liveEquityPoints} pnl={liveEquityPnl} settled={liveEquity?.settled ?? 0} />
-              </div>
-              <WeeklyPnlCalendarPanel calendar={liveReal?.weekly_pnl_calendar} />
+              <LiveMarketSection
+                equity={{ points: liveEquityPoints, pnlUsdc: liveEquityPnl, settled: liveEquity?.settled ?? 0, source: "实盘结算账本" }}
+                weeklyCalendar={liveReal?.weekly_pnl_calendar}
+              />
               <LiveMonthlyPnlCalendar
                 source="live_real"
                 initialMonth={(todayStats?.day ?? todayStats?.day_utc ?? new Date().toISOString().slice(0, 10)).slice(0, 7)}
@@ -2812,10 +2675,7 @@ export default function Live({
           </div>
 
           <div className="grid min-w-0 gap-5 2xl:grid-cols-[minmax(0,1.6fr)_minmax(360px,0.45fr)]">
-            <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,1.1fr)_minmax(340px,0.75fr)]">
-              <BTCMarketChart />
-              <EquityPanel title="Equity Curve" sub="paper checkpoint trades" data={paperEquityPoints} pnl={paperEquityPnl} settled={paperEquity?.settled ?? paperMonitor?.orders.settled ?? 0} />
-            </div>
+            <LiveMarketSection equity={{ points: paperEquityPoints, pnlUsdc: paperEquityPnl, settled: paperEquity?.settled ?? paperMonitor?.orders.settled ?? 0, source: "模拟结算账本" }} />
             <PaperRuntimePanel paperMonitor={paperMonitor} />
           </div>
 

@@ -96,3 +96,38 @@ test("live defaults to a six-metric trading cockpit", async ({ page }) => {
   await expect(currentAction).toBeVisible();
   await expect(currentAction.getByText("执行漏斗", { exact: true })).toBeVisible();
 });
+
+test("primary market and equity charts begin in the desktop first viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/");
+
+  const marketHeading = page.getByRole("heading", { name: "BTC 5分钟市场" });
+  const equityHeading = page.getByRole("heading", { name: "账户权益走势" });
+  await expect(marketHeading).toBeVisible();
+  await expect(equityHeading).toBeVisible();
+  expect((await marketHeading.boundingBox())?.y ?? 9999).toBeLessThan(900);
+  expect((await equityHeading.boundingBox())?.y ?? 9999).toBeLessThan(900);
+
+  const equity = page.getByTestId("live-equity-chart");
+  await expect(equity.getByText("Start", { exact: true })).toHaveCount(0);
+  await expect(equity.getByText("Current", { exact: true })).toHaveCount(0);
+  await expect(equity.getByText("Move", { exact: true })).toHaveCount(0);
+});
+
+test("mobile market chart is stable and reachable without horizontal overflow", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/");
+
+  const heading = page.getByRole("heading", { name: "BTC 5分钟市场" });
+  await expect(heading).toBeVisible();
+  expect((await heading.boundingBox())?.y ?? 9999).toBeLessThan(900);
+  const plot = page.getByTestId("btc-market-plot");
+  const plotBox = await plot.boundingBox();
+  expect(plotBox?.height ?? 0).toBeGreaterThanOrEqual(220);
+  expect(plotBox?.height ?? 9999).toBeLessThanOrEqual(310);
+  const widths = await page.evaluate(() => ({
+    scroll: document.documentElement.scrollWidth,
+    client: document.documentElement.clientWidth,
+  }));
+  expect(widths.scroll).toBeLessThanOrEqual(widths.client);
+});
