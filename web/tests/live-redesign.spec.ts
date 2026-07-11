@@ -115,6 +115,26 @@ test("primary market and equity charts begin in the desktop first viewport", asy
   await expect(equity.getByText("Move", { exact: true })).toHaveCount(0);
 });
 
+test("live charts stay aligned on an ultrawide viewport", async ({ page }) => {
+  await page.setViewportSize({ width: 3440, height: 1440 });
+  await page.goto("/");
+
+  const market = page.locator(".chainlink-market-chart");
+  const equity = page.getByTestId("live-equity-chart");
+  await expect(market).toBeVisible();
+  await expect(equity).toBeVisible();
+  const [marketBox, equityBox] = await Promise.all([market.boundingBox(), equity.boundingBox()]);
+  expect(marketBox).not.toBeNull();
+  expect(equityBox).not.toBeNull();
+  expect(Math.abs(marketBox!.height - equityBox!.height)).toBeLessThanOrEqual(1);
+
+  const consoleBox = await page.getByTestId("live-main-console").boundingBox();
+  expect(consoleBox).not.toBeNull();
+  expect(consoleBox!.width).toBeLessThanOrEqual(1920);
+  const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+  expect(overflow).toBeLessThanOrEqual(1);
+});
+
 test("mobile market chart is stable and reachable without horizontal overflow", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/");

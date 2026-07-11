@@ -2597,7 +2597,7 @@ export default function Live({
             }}
           />
 
-          <div className="grid min-w-0 gap-4 live-main-console">
+          <div data-testid="live-main-console" className="live-main-console mx-auto grid w-full max-w-[1920px] min-w-0 gap-4">
             <LiveMarketSection
               equity={{ points: liveEquityPoints, pnlUsdc: liveEquityPnl, settled: liveEquity?.settled ?? 0, source: "实盘结算账本" }}
               weeklyCalendar={liveReal?.weekly_pnl_calendar}

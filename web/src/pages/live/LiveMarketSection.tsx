@@ -63,7 +63,7 @@ function EquityChart({ equity }: { equity: EquityView }) {
   const pnlTone = equity.pnlUsdc >= 0 ? "text-emerald-300" : "text-rose-300";
 
   return (
-    <section data-testid="live-equity-chart" className="min-w-0 self-start overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
+    <section data-testid="live-equity-chart" className="grid h-full min-w-0 grid-rows-[auto_1fr_auto] overflow-hidden rounded-md border border-zinc-800 bg-zinc-950/70">
       <header className="flex flex-wrap items-start justify-between gap-3 border-b border-zinc-800 px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold text-zinc-100">账户权益走势</h2>
@@ -75,7 +75,7 @@ function EquityChart({ equity }: { equity: EquityView }) {
           <div><div className="text-zinc-600">最大回撤</div><div className={`mt-0.5 font-mono ${drawdown > 0 ? "text-amber-300" : "text-zinc-300"}`}>-{drawdown.toFixed(2)}</div></div>
         </div>
       </header>
-      <div className="h-[230px] min-w-0 px-3 py-4 md:h-[300px]">
+      <div className="h-[230px] min-w-0 self-start px-3 py-4 md:h-[300px]">
         <Chart
           data={points}
           labels={labels}
@@ -128,7 +128,7 @@ function WeeklyPnlStrip({ calendar }: { calendar: WeeklyCalendar }) {
 export default function LiveMarketSection({ equity, weeklyCalendar }: Props) {
   return (
     <div className="min-w-0 space-y-3">
-      <div className="grid min-w-0 gap-3 xl:grid-cols-[minmax(0,1.15fr)_minmax(340px,0.85fr)]">
+      <div data-testid="live-market-chart-grid" className="grid min-w-0 items-stretch gap-3 xl:grid-cols-2">
         <BTCMarketChart />
         <EquityChart equity={equity} />
       </div>
