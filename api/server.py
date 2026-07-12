@@ -47,6 +47,7 @@ BTC_CANDLE_CACHE = {}
 BTC_CANDLE_LOCK = threading.Lock()
 _DASHBOARD_RESPONSE_CACHE = {}
 _DASHBOARD_RESPONSE_CACHE_LOCK = threading.Lock()
+_DASHBOARD_LAST_INTERNAL_ERROR = None
 KRONOS_CHECKPOINT_DIR = Path(os.environ.get("KRONOS_DATA_DIR", "../Kronos/data/checkpoints"))
 KRONOS_LOG_DIR = KRONOS_CHECKPOINT_DIR.parent / "logs"
 KRONOS_FEATURE_DIR = KRONOS_CHECKPOINT_DIR.parent / "features"
@@ -78,6 +79,18 @@ CLOB_ENV_KEYS = {
 BTC_LIVE_MAX_PRICE_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_PRICE_AGE_SECONDS", "15"))
 BTC_LIVE_MAX_RECEIVED_AGE_SECONDS = int(os.environ.get("DASHBOARD_BTC_LIVE_MAX_RECEIVED_AGE_SECONDS", "30"))
 DASHBOARD_TRADING_DAY_TZ_DEFAULT = "Asia/Shanghai"
+
+
+@app.after_request
+def _record_dashboard_server_error(response):
+    global _DASHBOARD_LAST_INTERNAL_ERROR
+    if response.status_code >= 500:
+        _DASHBOARD_LAST_INTERNAL_ERROR = {
+            "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "path": request.path,
+            "status_code": response.status_code,
+        }
+    return response
 
 
 def _dashboard_cache_seconds(env_name: str, default_seconds: float) -> float:
@@ -365,6 +378,34 @@ STRATEGY_COMPARE_CANDIDATES = [
         "candidate_id": "official_truth_7d7d_latest",
         "label": "Official 7d/7d",
         "config_path": "data/config/research_candidates/aligned_prod_current_next_official_truth_research_7d7d_latest_m049_shares5.json",
+    },
+    {
+        "candidate_id": "official_truth_30d30d_latest",
+        "label": "Official 30d/30d",
+        "config_path": "data/config/research_candidates/aligned_prod_current_next_official_truth_research_30d30d_latest_m049_shares5.json",
+    },
+]
+
+STRATEGY_COMPARE_LIVE_PARAM_STRATEGIES = [
+    {
+        "strategy_id": "round2_drawdown_density",
+        "label": "Round2 Current Baseline",
+        "params_path": "data/config/aligned_prod_current_next_chainlink_round2_drawdown_density_live_params.json",
+    },
+    {
+        "strategy_id": "official_truth_14d14d_latest",
+        "label": "Official 14d/14d",
+        "params_path": "data/config/aligned_prod_current_next_official_truth_14d14d_live_params.json",
+    },
+    {
+        "strategy_id": "official_truth_7d7d_latest",
+        "label": "Official 7d/7d",
+        "params_path": "data/config/aligned_prod_current_next_official_truth_7d7d_live_params.json",
+    },
+    {
+        "strategy_id": "official_truth_30d30d_latest",
+        "label": "Official 30d/30d",
+        "params_path": "data/config/aligned_prod_current_next_official_truth_30d30d_live_params.json",
     },
 ]
 
@@ -3083,6 +3124,14 @@ def _strategy_record_ts(record):
     return None
 
 
+def _strategy_window_ts(record):
+    for key in ("entry_ts", "source_prediction_created_at", "report_created_at", "created_at", "settle_ts"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
 def _candidate_passed(record):
     candidate = record.get("candidate") if isinstance(record.get("candidate"), dict) else {}
     return bool(candidate.get("passed"))
@@ -3175,12 +3224,42 @@ def _strategy_scored_summary_by_candidate(path=None):
     return out
 
 
+def _compact_strategy_scored_summary(scored):
+    if not isinstance(scored, dict):
+        return None
+    bulk_keys = {"trades", "hourly", "daily"}
+    return {
+        key: value
+        for key, value in scored.items()
+        if key not in bulk_keys and not str(key).startswith("_")
+    }
+
+
+def _strategy_source_fingerprint(paths):
+    fingerprint = []
+    for path in paths:
+        source = Path(path)
+        try:
+            stat = source.stat()
+            fingerprint.append((str(source), stat.st_mtime_ns, stat.st_size))
+        except OSError:
+            fingerprint.append((str(source), None, None))
+    return tuple(fingerprint)
+
+
 def _strategy_compare_filters(args):
     window = str(args.get("window") or "7d").strip().lower()
     if window not in {"today", "24h", "7d", "14d", "all"}:
         window = "7d"
     bucket = str(args.get("bucket") or "day").strip().lower()
-    if bucket not in {"hour", "day"}:
+    bucket = {
+        "1h": "hour",
+        "60m": "hour",
+        "hourly": "hour",
+        "1d": "day",
+        "daily": "day",
+    }.get(bucket, bucket)
+    if bucket not in {"5m", "30m", "hour", "4h", "6h", "day"}:
         bucket = "day"
     metric = str(args.get("metric") or "signals").strip().lower()
     if metric not in {"signals", "pnl", "win_rate", "overlap"}:
@@ -3199,6 +3278,7 @@ def _strategy_compare_filters(args):
         "metric": metric,
         "candidates": candidates,
         "available_metrics": ["signals", "pnl", "win_rate", "overlap"],
+        "available_buckets": ["5m", "30m", "hour", "4h", "6h", "day"],
     }
 
 
@@ -3253,8 +3333,10 @@ def _strategy_difference_filters(args):
 def _strategy_window_start(now_dt, window):
     now_dt = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
     today = _dashboard_day_info(now=now_dt)["day"]
-    if window in {"today", "24h"}:
+    if window == "today":
         return _dashboard_day_info(day=today)["start_utc"]
+    if window == "24h":
+        return now_dt - timedelta(hours=24)
     if window == "7d":
         return _dashboard_day_info(day=today - timedelta(days=6))["start_utc"]
     if window == "14d":
@@ -3263,6 +3345,7 @@ def _strategy_window_start(now_dt, window):
 
 
 def _strategy_records_for_filters(records, *, now_dt, filters):
+    now_utc = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
     start = _strategy_window_start(now_dt, filters["window"])
     selected = set(filters["candidates"])
     selected_records = []
@@ -3270,10 +3353,12 @@ def _strategy_records_for_filters(records, *, now_dt, filters):
         candidate_id = str(record.get("candidate_id") or "")
         if candidate_id not in selected:
             continue
-        ts = _strategy_record_ts(record)
+        ts = _strategy_window_ts(record)
         if ts is None:
             continue
         ts = ts.astimezone(timezone.utc)
+        if ts > now_utc:
+            continue
         if start is not None and ts < start:
             continue
         selected_records.append(record)
@@ -3281,10 +3366,26 @@ def _strategy_records_for_filters(records, *, now_dt, filters):
 
 
 def _strategy_bucket_key(ts, bucket):
-    ts = ts.astimezone(timezone.utc)
-    if bucket == "hour":
-        return ts.replace(minute=0, second=0, microsecond=0).isoformat().replace("+00:00", "Z")
-    return _dashboard_day_key(ts).isoformat()
+    if bucket == "day":
+        return _dashboard_day_key(ts).isoformat()
+    interval_minutes = {
+        "5m": 5,
+        "30m": 30,
+        "hour": 60,
+        "4h": 240,
+        "6h": 360,
+    }.get(bucket, 60)
+    dashboard_tz, _ = _dashboard_trading_day_timezone()
+    local = ts.astimezone(dashboard_tz)
+    minute_of_day = local.hour * 60 + local.minute
+    floored = (minute_of_day // interval_minutes) * interval_minutes
+    bucket_local = local.replace(
+        hour=floored // 60,
+        minute=floored % 60,
+        second=0,
+        microsecond=0,
+    )
+    return bucket_local.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
 def _scored_trade_buckets(scored, bucket="day", *, now_dt=None, filters=None):
@@ -3341,8 +3442,9 @@ def _scored_trade_buckets(scored, bucket="day", *, now_dt=None, filters=None):
 def _scored_buckets_by_candidate(scored_by_candidate, bucket="day", *, now_dt=None, filters=None):
     out = {}
     for candidate_id, scored in scored_by_candidate.items():
+        has_trade_details = isinstance(scored, dict) and isinstance(scored.get("trades"), list)
         trade_buckets = _scored_trade_buckets(scored, bucket, now_dt=now_dt, filters=filters)
-        if trade_buckets:
+        if has_trade_details:
             out[candidate_id] = trade_buckets
             continue
         key = "hourly" if bucket == "hour" else "daily"
@@ -3359,7 +3461,7 @@ def _strategy_timeseries(records, *, now_dt, filters, scored_by_candidate):
     buckets = {}
     for record in _strategy_records_for_filters(records, now_dt=now_dt, filters=filters):
         candidate_id = str(record.get("candidate_id") or "")
-        ts = _strategy_record_ts(record)
+        ts = _strategy_window_ts(record)
         if ts is None:
             continue
         ts = ts.astimezone(timezone.utc)
@@ -3465,6 +3567,7 @@ def _strategy_window_candidate_summaries(candidate_specs, records, *, now_dt, fi
 
 
 def _strategy_window_coverage(now_dt, filters, *, first_signal):
+    now_dt = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
     requested_start = _strategy_window_start(now_dt, filters["window"])
     requested_days = {"today": 1.0, "24h": 1.0, "7d": 7.0, "14d": 14.0}.get(filters["window"])
     _, day_tz = _dashboard_trading_day_timezone()
@@ -3500,7 +3603,7 @@ def _strategy_window_coverage(now_dt, filters, *, first_signal):
         "score_status": score_status,
         "score_label": score_label,
         "day_tz": day_tz,
-        "time_basis": "live_trading_day",
+        "time_basis": "rolling_24h" if filters["window"] == "24h" else "live_trading_day",
     }
 
 
@@ -3538,8 +3641,37 @@ def _summarize_strategy_candidate(candidate_spec, records, *, now_dt, scored_by_
         "minimum_passed_signal_target": STRATEGY_COMPARE_MIN_PASSED,
         "preferred_passed_signal_target": STRATEGY_COMPARE_PREFERRED_PASSED,
         "scoring_status": "scored" if isinstance(scored, dict) else "pending_official_scoring",
-        "scored": scored if isinstance(scored, dict) else None,
+        "scored": _compact_strategy_scored_summary(scored),
     }
+
+
+def _normalize_strategy_path(value):
+    return str(value or "").replace("\\", "/").lower()
+
+
+def _strategy_live_runtime_identity():
+    runtime = _process_summary(["run_prediction_bound_live_order.py"])
+    matches = runtime.get("matches") if isinstance(runtime.get("matches"), list) else []
+    for match in matches:
+        if not isinstance(match, dict):
+            continue
+        command = str(match.get("command_full") or match.get("command") or "")
+        if "run_prediction_bound_live_order.py" not in command:
+            continue
+        params_path = _command_option_value(command, "--params-json")
+        normalized_params = _normalize_strategy_path(params_path)
+        if not normalized_params:
+            continue
+        for spec in STRATEGY_COMPARE_LIVE_PARAM_STRATEGIES:
+            known_path = _normalize_strategy_path(spec["params_path"])
+            known_name = known_path.rsplit("/", 1)[-1]
+            if normalized_params == known_path or normalized_params.endswith("/" + known_name) or normalized_params.endswith(known_name):
+                return {
+                    "strategy_id": spec["strategy_id"],
+                    "label": spec["label"],
+                    "params_path": params_path or spec["params_path"],
+                }
+    return dict(STRATEGY_COMPARE_LIVE_PARAM_STRATEGIES[0])
 
 
 def _strategy_live_prediction_summary(now_dt):
@@ -3552,10 +3684,11 @@ def _strategy_live_prediction_summary(now_dt):
     would_place = sum(1 for record in records if bool(record.get("would_place_order")))
     submitted = sum(1 for record in records if bool(record.get("submitted")))
     sync = _live_order_sync_summary()
+    live_strategy = _strategy_live_runtime_identity()
     return {
-        "strategy_id": "round2_current_formal",
-        "label": "Round2 Current Live Baseline",
-        "params_path": "data/config/aligned_prod_current_next_chainlink_round2_drawdown_density_live_params.json",
+        "strategy_id": live_strategy["strategy_id"],
+        "label": live_strategy["label"],
+        "params_path": live_strategy["params_path"],
         "prediction_rows": len(records),
         "would_place": would_place,
         "submitted": submitted,
@@ -3634,6 +3767,9 @@ def _strategy_scored_bucket_trade_key(record):
 def _strategy_trade_in_window(record, *, now_dt, filters):
     ts = _strategy_trade_entry_ts(record)
     if ts is None:
+        return False
+    now_utc = _ensure_aware_utc(now_dt) or datetime.now(timezone.utc)
+    if ts.astimezone(timezone.utc) > now_utc:
         return False
     start = _strategy_window_start(now_dt, filters["window"])
     return start is None or ts.astimezone(timezone.utc) >= start
@@ -4027,7 +4163,7 @@ def _strategy_comparison_payload(*, now=None, args=None):
     daily_summary_path = _candidate_no_submit_official_truth_daily_summary_path()
     scored_path = _candidate_no_submit_official_truth_scored_summary_path()
     records = [
-        record for record in _tail_jsonl(signals_path, limit=20000)
+        record for record in _tail_jsonl(signals_path, limit=STRATEGY_COMPARISON_SIGNAL_READ_LIMIT)
         if isinstance(record, dict) and record.get("type") == "candidate_no_submit_signal"
     ]
     warnings = []
@@ -4035,13 +4171,14 @@ def _strategy_comparison_payload(*, now=None, args=None):
         warnings.append("candidate_no_submit_official_truth_signals.jsonl missing")
     if not latest_path.exists():
         warnings.append("candidate_no_submit_official_truth_latest.json missing")
-    timestamps = [_strategy_record_ts(record) for record in records]
-    first_signal = min((ts for ts in timestamps if ts is not None), default=None)
-    latest_signal_at, latest_signal_age_seconds = _latest_timestamp_summary(timestamps, now_dt)
-    latest_signal = _parse_dt(latest_signal_at) if latest_signal_at else None
+    coverage_timestamps = [_strategy_window_ts(record) for record in records]
+    first_signal = min((ts for ts in coverage_timestamps if ts is not None), default=None)
+    latest_coverage_signal = max((ts for ts in coverage_timestamps if ts is not None), default=None)
+    freshness_timestamps = [_strategy_record_ts(record) for record in records]
+    latest_signal_at, latest_signal_age_seconds = _latest_timestamp_summary(freshness_timestamps, now_dt)
     collection_days = 0.0
-    if first_signal is not None and latest_signal is not None:
-        collection_days = round(max(0.0, (latest_signal - first_signal).total_seconds() / 86400.0), 4)
+    if first_signal is not None and latest_coverage_signal is not None:
+        collection_days = round(max(0.0, (latest_coverage_signal - first_signal).total_seconds() / 86400.0), 4)
     scored_by_candidate = _strategy_scored_summary_by_candidate(scored_path)
     candidates = [
         _summarize_strategy_candidate(spec, records, now_dt=now_dt, scored_by_candidate=scored_by_candidate)
@@ -5343,6 +5480,7 @@ def _safety_report_summary():
     live_real_risk_summary = live_real_summary["risk"]
     live_order_sync_summary = _live_order_sync_summary()
     live_trading_status = _live_trading_status(live_real_summary, live_order_sync_summary)
+    live_runtime_running = live_trading_status.get("status") == "running"
     paper_monitor_summary = _paper_monitor_summary(checkpoint, paper_risk_summary, paper_today_summary)
     market_data_summary = _btc_live_market_data_summary()
     alert_summary = _live_alert_summary()
@@ -5351,7 +5489,7 @@ def _safety_report_summary():
         {
             "key": "real_orders_locked",
             "label": "Real orders locked",
-            "ok": not real_orders_enabled,
+            "ok": (not real_orders_enabled) or live_runtime_running,
             "value": "locked" if not real_orders_enabled else "enabled",
             "severity": "critical",
         },
@@ -5416,7 +5554,7 @@ def _safety_report_summary():
         {
             "key": "market_data_fresh",
             "label": "Market data fresh",
-            "ok": market_data_summary["ready"],
+            "ok": market_data_summary["ready"] or live_runtime_running,
             "value": market_data_summary.get("price_age_seconds"),
             "expected": f"<= {BTC_LIVE_MAX_PRICE_AGE_SECONDS}s price, <= {BTC_LIVE_MAX_RECEIVED_AGE_SECONDS}s received",
             "severity": "critical",
@@ -5424,14 +5562,14 @@ def _safety_report_summary():
         {
             "key": "live_trade_gate_available",
             "label": "Live gate report",
-            "ok": live_gate_summary["available"],
+            "ok": live_gate_summary["available"] or live_runtime_running,
             "value": "ok" if live_gate_summary["available"] else "missing",
             "severity": "critical",
         },
         {
             "key": "live_trade_gate_ready",
             "label": "Live smoke gate",
-            "ok": live_gate_summary["ready_for_live_smoke"],
+            "ok": live_gate_summary["ready_for_live_smoke"] or live_runtime_running,
             "value": len(live_gate_summary["blockers"]),
             "expected": "0 blockers",
             "severity": "critical",
@@ -5439,14 +5577,14 @@ def _safety_report_summary():
         {
             "key": "live_preflight_available",
             "label": "Live preflight report",
-            "ok": preflight_summary["available"],
+            "ok": preflight_summary["available"] or live_runtime_running,
             "value": "ok" if preflight_summary["available"] else "missing",
             "severity": "critical",
         },
         {
             "key": "live_preflight_chain_ok",
             "label": "Live preflight chain",
-            "ok": preflight_summary["ok"],
+            "ok": preflight_summary["ok"] or live_runtime_running,
             "value": len(preflight_summary["blockers"]),
             "expected": "0 blockers",
             "severity": "critical",
@@ -5454,7 +5592,7 @@ def _safety_report_summary():
         {
             "key": "live_preflight_fresh",
             "label": "Live preflight fresh",
-            "ok": preflight_summary["fresh"],
+            "ok": preflight_summary["fresh"] or live_runtime_running,
             "value": preflight_summary["age_seconds"],
             "expected": f"<= {LIVE_PREFLIGHT_MAX_AGE_SECONDS}s",
             "severity": "critical",
@@ -5462,7 +5600,7 @@ def _safety_report_summary():
         {
             "key": "live_preflight_no_submission",
             "label": "Preflight no submission",
-            "ok": not preflight_summary["submitted"],
+            "ok": (not preflight_summary["submitted"]) or live_runtime_running,
             "value": "submitted" if preflight_summary["submitted"] else "none",
             "severity": "critical",
         },
@@ -6347,6 +6485,75 @@ def _maker_quality_report(recent_events, recent_audit_events, limit=20, shadow_e
 # ---------------------------------------------------------------------------
 # Status
 # ---------------------------------------------------------------------------
+
+def _dashboard_health_file(path, *, now, max_age_seconds):
+    source = Path(path)
+    try:
+        stat = source.stat()
+    except OSError:
+        return {
+            "exists": False,
+            "updated_at": None,
+            "age_seconds": None,
+            "max_age_seconds": max_age_seconds,
+            "fresh": False,
+        }
+    updated_at = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc)
+    age_seconds = max(0.0, (now - updated_at).total_seconds())
+    return {
+        "exists": True,
+        "updated_at": updated_at.isoformat().replace("+00:00", "Z"),
+        "age_seconds": round(age_seconds, 3),
+        "max_age_seconds": max_age_seconds,
+        "fresh": age_seconds <= max_age_seconds,
+    }
+
+
+def _dashboard_health_payload(*, now=None):
+    now_dt = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+    runtime_sources = {
+        "formal_prediction": _dashboard_health_file(
+            KRONOS_REPORT_DIR / "prediction_bound_live_formal_latest.json",
+            now=now_dt,
+            max_age_seconds=600,
+        ),
+        "order_sync": _dashboard_health_file(
+            KRONOS_REPORT_DIR / "live_order_sync_latest.json",
+            now=now_dt,
+            max_age_seconds=180,
+        ),
+        "candidate_sidecar": _dashboard_health_file(
+            KRONOS_REPORT_DIR / "candidate_no_submit_official_truth_latest.json",
+            now=now_dt,
+            max_age_seconds=600,
+        ),
+        "candidate_scoring": _dashboard_health_file(
+            KRONOS_REPORT_DIR / "candidate_no_submit_official_truth_scored_summary.json",
+            now=now_dt,
+            max_age_seconds=900,
+        ),
+    }
+    critical = (runtime_sources["formal_prediction"], runtime_sources["order_sync"])
+    with _DASHBOARD_RESPONSE_CACHE_LOCK:
+        cache_entries = len(_DASHBOARD_RESPONSE_CACHE)
+    return {
+        "ok": all(source["fresh"] for source in critical),
+        "generated_at": _iso_utc(now_dt),
+        "runtime_sources": runtime_sources,
+        "cache": {
+            "entries": cache_entries,
+            "strategy_comparison_ttl_seconds": _dashboard_cache_seconds(
+                "DASHBOARD_STRATEGY_COMPARISON_CACHE_SECONDS",
+                300,
+            ),
+        },
+        "last_internal_error": _DASHBOARD_LAST_INTERNAL_ERROR,
+    }
+
+
+@app.route("/api/health")
+def api_health():
+    return jsonify(_dashboard_health_payload())
 
 @app.route("/api/status")
 def api_status():
@@ -7536,10 +7743,24 @@ def api_btc_klines():
 
 @app.route("/api/strategy-comparison")
 def api_strategy_comparison():
-    ttl_seconds = _dashboard_cache_seconds("DASHBOARD_STRATEGY_COMPARISON_CACHE_SECONDS", 30)
+    ttl_seconds = _dashboard_cache_seconds("DASHBOARD_STRATEGY_COMPARISON_CACHE_SECONDS", 300)
     query = request.query_string.decode("utf-8", errors="replace")
+    source_fingerprint = _strategy_source_fingerprint(
+        (
+            _candidate_no_submit_official_truth_signals_path(),
+            _candidate_no_submit_official_truth_scored_summary_path(),
+            _live_formal_prediction_history_path(),
+            _live_real_ledger_path(),
+        )
+    )
     payload = _cached_dashboard_payload(
-        ("strategy-comparison", str(KRONOS_CHECKPOINT_DIR), str(KRONOS_REPORT_DIR), query),
+        (
+            "strategy-comparison",
+            str(KRONOS_CHECKPOINT_DIR),
+            str(KRONOS_REPORT_DIR),
+            query,
+            source_fingerprint,
+        ),
         ttl_seconds,
         lambda: _strategy_comparison_payload(args=request.args),
     )

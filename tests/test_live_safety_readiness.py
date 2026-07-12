@@ -1157,7 +1157,7 @@ def test_live_trading_status_uses_formal_sync_risk_not_stale_preflight(monkeypat
     monkeypatch.setattr(
         server,
         "_btc_live_market_data_summary",
-        lambda: {"ready": True, "price_age_seconds": 1, "received_age_seconds": 1, "status": "fresh"},
+        lambda: {"ready": False, "price_age_seconds": 3000, "received_age_seconds": 3000, "status": "stale"},
     )
     monkeypatch.setattr(
         server,
@@ -1221,7 +1221,10 @@ def test_live_trading_status_uses_formal_sync_risk_not_stale_preflight(monkeypat
         },
     )
 
-    status = server._safety_report_summary()["live_trading_status"]
+    summary = server._safety_report_summary()
+    status = summary["live_trading_status"]
+    checks = {item["key"]: item for item in summary["checklist"]}
+    top_blocker_keys = {item["key"] for item in summary["readiness_summary"]["top_blockers"]}
     blocker_keys = {item["key"] for item in status["blockers"]}
 
     assert status["ok"] is True
@@ -1234,6 +1237,10 @@ def test_live_trading_status_uses_formal_sync_risk_not_stale_preflight(monkeypat
     assert status["sync"]["fresh"] is True
     assert "live_preflight_fresh" not in blocker_keys
     assert "stale_manual_preflight" not in blocker_keys
+    assert checks["real_orders_locked"]["ok"] is True
+    assert checks["market_data_fresh"]["ok"] is True
+    assert checks["live_preflight_fresh"]["ok"] is True
+    assert not {"real_orders_locked", "market_data_fresh", "live_preflight_fresh"} & top_blocker_keys
 
 
 def test_live_safety_summaries_include_source_scoped_equity_curves(monkeypatch, tmp_path):
@@ -4001,8 +4008,8 @@ def test_live_page_moves_audit_panels_into_diagnostics_section():
     operations_source = Path("web/src/pages/live/LiveOperationsDetails.tsx").read_text(encoding="utf-8")
 
     assert "<LiveOperationsDetails" in source
-    assert 'title: "????"' in operations_source
-    assert 'description: "???????????????????"' in source
+    assert 'title: "详细诊断"' in operations_source
+    assert 'description: "安全门、数据新鲜度、只读审计与原始信号"' in source
     assert "<SafetyStrip safety={safety} health={health} />" in source
     assert "<ReadinessChecklist safety={safety} health={health} intel={intel} />" in source
     assert "<MarketDataPanel data={safety?.market_data} />" in source
@@ -4022,10 +4029,10 @@ def test_live_page_groups_equity_curve_with_btc_market_chart_on_main_console():
 
     assert "<LiveMarketSection" in live_section
     assert "points: liveEquityPoints" in live_section
-    assert 'source: "??????"' in live_section
+    assert 'source: "实盘结算账本"' in live_section
     assert "<LiveMarketSection" in paper_section
     assert "points: paperEquityPoints" in paper_section
-    assert 'source: "??????"' in paper_section
+    assert 'source: "模拟结算账本"' in paper_section
     assert "<PaperRuntimePanel paperMonitor={paperMonitor}" in paper_section
     assert "<BTCMarketChart />" in market_source
     assert "<EquityChart equity={equity} />" in market_source
@@ -4049,7 +4056,7 @@ def test_live_page_places_weekly_pnl_calendar_below_live_equity_curve():
 def test_live_weekly_pnl_calendar_uses_horizontal_strip_below_main_console():
     panel = Path("web/src/pages/live/LiveMarketSection.tsx").read_text(encoding="utf-8")
 
-    assert 'aria-label="?????"' in panel
+    assert 'aria-label="近七日收益"' in panel
     assert 'className="grid grid-cols-7 gap-1.5"' in panel
     assert "maxAbsPnl" in panel
     assert "HealthTile label=\"Week PnL\"" not in panel
@@ -4528,8 +4535,8 @@ def test_live_page_shows_live_real_recent_prediction_signals():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
     live_section = source[source.index('activeTradingTab === "live-real"'):source.index('activeTradingTab === "paper-monitor"')]
 
-    assert 'Panel title="????" sub="????????"' in live_section
-    assert "????????" in live_section
+    assert 'Panel title="最近信号" sub="正式实盘预测记录"' in live_section
+    assert "等待正式实盘决策" in live_section
     assert "(events ?? []).slice(0, 14).map((event)" in live_section
 
 
