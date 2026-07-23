@@ -445,7 +445,7 @@ export default function StatusBar() {
   const preflightBlockers = safety?.preflight_chain?.blockers?.length ?? 0;
   const preflightReady = liveEnabled || (preflightOk && preflightFresh && !preflightSubmitted);
   const preflightAge = ageLabel(safety?.preflight_chain?.age_seconds);
-  const marketDataReady = safety?.market_data?.ready === true;
+  const marketDataFresh = safety?.market_data?.ready === true;
   const alertCritical = safety?.alerts?.critical_count ?? 0;
   const alertActive = safety?.alerts?.active_count ?? 0;
   const fundingReady = safety?.funding?.funding_ready === true;
@@ -456,7 +456,7 @@ export default function StatusBar() {
   const fundingAllowanceLabel = compactAllowance(safety?.funding?.min_allowance, safety?.funding?.allowance_ok === true || fundingReady);
   const runtimeLabel = liveEnabled ? liveTradingStatus?.label ?? "Waiting" : healthOk ? "Runtime OK" : "Runtime review";
   const runtimeChipOk = liveEnabled ? liveTradingStatus?.ok === true : healthOk;
-  const needsReview = Boolean(error) || cooling || alertCritical > 0 || !runtimeChipOk || !checksOk || !riskOk || !preflightReady || !fundingReady || !marketDataReady;
+  const needsReview = Boolean(error) || cooling || alertCritical > 0 || !runtimeChipOk || !checksOk || !riskOk || !preflightReady || !fundingReady || (!liveEnabled && !marketDataFresh);
   const operator = safety?.operator_summary;
   const operatorStage = operator?.current_stage_label ?? "Live safety";
   const operatorNextAction = operator?.next_action ?? "Review readiness";
@@ -543,9 +543,9 @@ export default function StatusBar() {
               )}
               <DetailTile label="Open/Pending" value={`${metrics?.open_or_pending_orders ?? health?.pending_count ?? 0}`} ok={riskOk} />
               <DetailTile
-                label="Market Data"
+                label={liveEnabled ? "Display Feed" : "Market Data"}
                 value={`${safety?.market_data?.status ?? "-"} / ${safety?.market_data?.source ?? "-"}`}
-                ok={marketDataReady}
+                ok={liveEnabled ? undefined : marketDataFresh}
               />
               {!liveEnabled && (
                 <DetailTile

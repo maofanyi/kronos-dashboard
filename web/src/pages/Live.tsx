@@ -1,6 +1,7 @@
 import {
   Activity,
   AlertTriangle,
+  BarChart3,
   ArrowDownRight,
   ArrowUpRight,
   CheckCircle2,
@@ -88,6 +89,47 @@ type WeeklyPnlCalendar = {
   losses: number;
   win_rate: number;
   source?: string;
+};
+
+type LivePriceBucket = {
+  price: number;
+  attempts: number;
+  attempt_pct: number;
+  filled_orders: number;
+  fill_rate?: number | null;
+  filled_shares: number;
+  filled_share_pct: number;
+  settled_orders: number;
+  wins: number;
+  win_rate?: number | null;
+  pnl_usdc: number;
+};
+
+type LivePriceWindow = {
+  key: string;
+  label: string;
+  start_at: string;
+  end_at: string;
+  orders: number;
+  signals: number;
+  filled_orders: number;
+  filled_signals: number;
+  filled_shares: number;
+  weighted_fill_price?: number | null;
+  assumed_price: number;
+  price_drag_usdc: number;
+  maker_filled_orders: number;
+  taker_filled_orders: number;
+  prices: LivePriceBucket[];
+};
+
+type LivePriceDistribution = {
+  created_at: string;
+  day_tz: string;
+  assumed_price: number;
+  assumption_source: string;
+  windows: LivePriceWindow[];
+  daily: LivePriceWindow[];
 };
 
 type SettledStats = {
@@ -681,6 +723,7 @@ interface LiveSafety {
     risk_controls?: RiskControls;
     equity: EquitySummary;
     weekly_pnl_calendar?: WeeklyPnlCalendar;
+    price_distribution?: LivePriceDistribution;
     latest_order?: Record<string, unknown> | null;
     order_records?: LiveOrderRecord[];
     account_activity?: PolymarketAccountActivity;
@@ -1702,60 +1745,13 @@ function ReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["report_refres
   );
 }
 
-function LegacyReportFreshnessPanel({ refresh }: { refresh?: LiveSafety["legacy_report_refresh"] | null }) {
-  const items = refresh?.items ?? [];
-  const issueCount = (refresh?.missing_count ?? 0) + (refresh?.stale_count ?? 0) + (refresh?.blocked_count ?? 0);
-  const statusTone = (status: string) => {
-    if (status === "ready") return "border-emerald-500/25 bg-emerald-500/10 text-emerald-300";
-    if (status === "blocked") return "border-rose-500/25 bg-rose-500/10 text-rose-300";
-    if (status === "stale" || status === "missing") return "border-amber-500/25 bg-amber-500/10 text-amber-300";
-    return "border-zinc-700 bg-zinc-900/70 text-zinc-300";
-  };
-  return (
-    <Panel
-      title="Legacy Preflight Reports"
-      sub="diagnostic-only legacy readiness reports"
-      right={<StatusPill ok={refresh?.ready === true} label={refresh?.ready ? "Fresh" : `${issueCount} diagnostic`} />}
-    >
-      <div className="grid gap-3 p-4 lg:grid-cols-3">
-        {items.length === 0 ? (
-          <div className="rounded-md border border-zinc-800 bg-black/20 p-3 lg:col-span-3">
-            <div className="flex items-center gap-2 text-sm font-medium text-zinc-200">
-              <AlertTriangle className="h-4 w-4 shrink-0 text-amber-300" />
-              <span>No freshness reports</span>
-            </div>
-            <div className="mt-2 text-xs text-zinc-500">Waiting for legacy preflight diagnostics</div>
-          </div>
-        ) : items.map((item) => (
-          <div key={item.key} className="min-w-0 rounded-md border border-zinc-900 bg-black/20 p-3">
-            <div className="flex items-center justify-between gap-2">
-              <div className="truncate text-sm font-medium text-zinc-100">{item.label}</div>
-              <span className={`rounded border px-2 py-0.5 font-mono text-[11px] uppercase ${statusTone(item.status)}`}>
-                {item.status}
-              </span>
-            </div>
-            <div className="mt-3 grid grid-cols-2 gap-2">
-              <HealthTile label="Age" value={ageLabel(item.age_seconds)} ok={item.fresh} />
-              <HealthTile label="Max Age" value={ageLabel(item.max_age_seconds)} />
-            </div>
-            <div className="mt-3 truncate text-xs text-zinc-400">{item.next_action}</div>
-            <div className="mt-2 truncate font-mono text-[11px] text-zinc-600">
-              {item.report?.split(/[\\/]/).pop() || "-"}
-            </div>
-          </div>
-        ))}
-      </div>
-    </Panel>
-  );
-}
-
 function MarketDataPanel({ data }: { data?: LiveSafety["market_data"] | null }) {
   const sourceLabel = data?.source?.replace(/_/g, " ") || "-";
   return (
     <Panel
       title="Market Data"
-      sub="Chainlink live reference"
-      right={<StatusPill ok={data?.ready === true} label={data?.ready ? "Fresh" : data?.status || "Waiting"} />}
+      sub="Display-only RTDS reference; not a formal execution gate"
+      right={<StatusPill ok={data?.ready === true} label={data?.ready ? "Display feed fresh" : data?.status === "stale" ? "Display feed stale" : data?.status || "Waiting"} />}
     >
       <div className="grid grid-cols-2 gap-2 p-4 md:grid-cols-4 xl:grid-cols-6">
         <HealthTile label="Source" value={sourceLabel} ok={data?.source?.includes("chainlink")} />
@@ -2328,6 +2324,130 @@ function LiveLedgerOrdersPanel({ liveReal }: { liveReal?: LiveSafety["live_real"
   );
 }
 
+function LivePriceDistributionPanel({ distribution }: { distribution?: LivePriceDistribution | null }) {
+  const [windowKey, setWindowKey] = useState("7d");
+  const windows = distribution?.windows ?? [];
+  const selected = windows.find((window) => window.key === windowKey) ?? windows[0];
+  const prices = selected?.prices ?? [];
+  const dominant = prices.reduce<LivePriceBucket | null>(
+    (best, item) => (!best || item.filled_shares > best.filled_shares ? item : best),
+    null,
+  );
+  const executionTotal = (selected?.maker_filled_orders ?? 0) + (selected?.taker_filled_orders ?? 0);
+  const makerShare = executionTotal > 0 ? (selected?.maker_filled_orders ?? 0) / executionTotal : 0;
+  const takerShare = executionTotal > 0 ? (selected?.taker_filled_orders ?? 0) / executionTotal : 0;
+  const daily = [...(distribution?.daily ?? [])].reverse();
+
+  if (!distribution || !selected) {
+    return <Panel title="实盘价格分布" sub="挂单尝试与实际成交"><div className="px-4 py-12 text-center text-sm text-zinc-500">暂无实盘价格数据</div></Panel>;
+  }
+
+  return (
+    <div className="space-y-5">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-zinc-100">实盘下单价格分布</h2>
+          <p className="mt-1 text-xs text-zinc-500">挂单次数与真实成交分开统计 | {distribution.day_tz} | 模拟基准 {orderPrice(distribution.assumed_price)}</p>
+        </div>
+        <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-1">
+          {windows.map((window) => (
+            <button
+              key={window.key}
+              type="button"
+              onClick={() => setWindowKey(window.key)}
+              className={`rounded px-3 py-1.5 text-xs font-medium transition-colors ${window.key === selected.key ? "bg-emerald-500/15 text-emerald-300" : "text-zinc-500 hover:text-zinc-200"}`}
+            >
+              {window.key === "today" ? "今天" : window.key === "7d" ? "近7天" : "近14天"}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <StatCard label="加权成交价" value={orderPrice(selected.weighted_fill_price)} sub={`${orderSize(selected.filled_shares)} shares`} icon={CircleDollarSign} tone="text-emerald-300" />
+        <StatCard label="主要成交价" value={orderPrice(dominant?.price)} sub={`${percent(dominant?.filled_share_pct ?? 0)} 成交量`} icon={Target} tone="text-zinc-100" />
+        <StatCard label="相对模拟价格损耗" value={money(selected.price_drag_usdc)} sub={`基准 ${orderPrice(selected.assumed_price)}`} icon={ArrowDownRight} tone={selected.price_drag_usdc > 0 ? "text-rose-300" : "text-emerald-300"} />
+        <StatCard label="Maker / Taker" value={`${percent(makerShare)} / ${percent(takerShare)}`} sub={`${selected.maker_filled_orders} / ${selected.taker_filled_orders} 笔成交`} icon={BarChart3} tone="text-zinc-100" />
+      </div>
+
+      <div className="grid min-w-0 gap-5 xl:grid-cols-[minmax(0,0.9fr)_minmax(560px,1.1fr)]">
+        <Panel title="价格结构" sub={`${selected.signals} 个信号 | ${selected.orders} 次挂单 | ${selected.filled_orders} 笔成交`}>
+          <div className="space-y-4 p-4">
+            {prices.map((item) => (
+              <div key={item.price} className="rounded border border-zinc-800 bg-black/20 p-3">
+                <div className="flex items-center justify-between gap-3">
+                  <span className="font-mono text-sm font-semibold text-zinc-100">{orderPrice(item.price)}</span>
+                  <span className="text-xs text-zinc-500">成交量 {orderSize(item.filled_shares)} | {percent(item.filled_share_pct)}</span>
+                </div>
+                <div className="mt-3 space-y-2">
+                  <div>
+                    <div className="mb-1 flex justify-between text-[11px] text-zinc-500"><span>挂单尝试</span><span>{item.attempts} | {percent(item.attempt_pct)}</span></div>
+                    <div className="h-2 overflow-hidden rounded-full bg-zinc-900"><div className="h-full rounded-full bg-zinc-500" style={{ width: `${Math.max(1, item.attempt_pct * 100)}%` }} /></div>
+                  </div>
+                  <div>
+                    <div className="mb-1 flex justify-between text-[11px] text-zinc-500"><span>实际成交量</span><span>{item.filled_orders} 笔 | {percent(item.filled_share_pct)}</span></div>
+                    <div className="h-2 overflow-hidden rounded-full bg-zinc-900"><div className="h-full rounded-full bg-emerald-400" style={{ width: `${Math.max(1, item.filled_share_pct * 100)}%` }} /></div>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        </Panel>
+
+        <Panel title="价位明细" sub="成交率按该价位挂单次数计算">
+          <div className="max-w-full overflow-x-auto">
+            <table className="w-full min-w-[760px] text-xs tabular-nums">
+              <thead className="border-b border-zinc-800 bg-zinc-950/90 text-zinc-500">
+                <tr>
+                  <th className="px-4 py-2.5 text-left">价格</th><th className="px-3 py-2.5 text-right">挂单</th><th className="px-3 py-2.5 text-right">挂单占比</th>
+                  <th className="px-3 py-2.5 text-right">成交笔数</th><th className="px-3 py-2.5 text-right">成交率</th><th className="px-3 py-2.5 text-right">成交量</th>
+                  <th className="px-3 py-2.5 text-right">成交量占比</th><th className="px-3 py-2.5 text-right">胜率</th><th className="px-4 py-2.5 text-right">PnL</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-zinc-900">
+                {prices.map((item) => (
+                  <tr key={item.price} className="hover:bg-zinc-900/40">
+                    <td className="px-4 py-2.5 font-mono font-semibold text-zinc-100">{orderPrice(item.price)}</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-zinc-300">{item.attempts}</td><td className="px-3 py-2.5 text-right font-mono text-zinc-400">{percent(item.attempt_pct)}</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-zinc-300">{item.filled_orders}</td><td className="px-3 py-2.5 text-right font-mono text-zinc-400">{item.fill_rate == null ? "-" : percent(item.fill_rate)}</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-zinc-300">{orderSize(item.filled_shares)}</td><td className="px-3 py-2.5 text-right font-mono text-emerald-300">{percent(item.filled_share_pct)}</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-zinc-400">{item.win_rate == null ? "-" : percent(item.win_rate)}</td>
+                    <td className={`px-4 py-2.5 text-right font-mono font-semibold ${item.pnl_usdc >= 0 ? "text-emerald-300" : "text-rose-300"}`}>{signedMoney(item.pnl_usdc)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </Panel>
+      </div>
+
+      <Panel title="每日成交价格" sub="最近14个北京时间交易日">
+        <div className="max-h-[520px] max-w-full overflow-x-auto overflow-y-auto">
+          <table className="w-full min-w-[720px] text-xs tabular-nums">
+            <thead className="sticky top-0 border-b border-zinc-800 bg-zinc-950 text-zinc-500">
+              <tr><th className="px-4 py-2.5 text-left">日期</th><th className="px-3 py-2.5 text-right">信号</th><th className="px-3 py-2.5 text-right">成交</th><th className="px-3 py-2.5 text-right">加权成交价</th><th className="px-3 py-2.5 text-right">主要价位</th><th className="px-3 py-2.5 text-right">0.49 / 0.50 / 0.51 成交量占比</th><th className="px-4 py-2.5 text-right">价格损耗</th></tr>
+            </thead>
+            <tbody className="divide-y divide-zinc-900">
+              {daily.map((day) => {
+                const byPrice = new Map(day.prices.map((item) => [item.price.toFixed(2), item]));
+                const dayDominant = day.prices.reduce<LivePriceBucket | null>((best, item) => (!best || item.filled_shares > best.filled_shares ? item : best), null);
+                return (
+                  <tr key={day.key} className="hover:bg-zinc-900/40">
+                    <td className="px-4 py-2.5 font-mono text-zinc-300">{day.key}</td><td className="px-3 py-2.5 text-right font-mono text-zinc-400">{day.signals}</td><td className="px-3 py-2.5 text-right font-mono text-zinc-300">{day.filled_orders}</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-zinc-100">{orderPrice(day.weighted_fill_price)}</td><td className="px-3 py-2.5 text-right font-mono text-emerald-300">{orderPrice(dayDominant?.price)}</td>
+                    <td className="px-3 py-2.5 text-right font-mono text-zinc-400">{["0.49", "0.50", "0.51"].map((price) => percent(byPrice.get(price)?.filled_share_pct ?? 0)).join(" / ")}</td>
+                    <td className={`px-4 py-2.5 text-right font-mono ${day.price_drag_usdc > 0 ? "text-rose-300" : "text-zinc-500"}`}>{money(day.price_drag_usdc)}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </Panel>
+    </div>
+  );
+}
+
 function PaperRuntimePanel({ paperMonitor }: { paperMonitor?: LiveSafety["paper_monitor"] | null }) {
   const runtime = runtimeState(paperMonitor?.runtime);
   return (
@@ -2350,7 +2470,7 @@ function PaperRuntimePanel({ paperMonitor }: { paperMonitor?: LiveSafety["paper_
   );
 }
 
-export type TradingTab = "live-real" | "paper-monitor";
+export type TradingTab = "live-real" | "price-distribution" | "paper-monitor";
 
 export default function Live({
   activeTradingTab,
@@ -2362,7 +2482,7 @@ export default function Live({
   const [expandedSignal, setExpandedSignal] = useState<number | null>(null);
   const [expandedTrade, setExpandedTrade] = useState<number | null>(null);
   const isLiveRealTab = activeTradingTab === "live-real";
-  const isPaperMonitorTab = !isLiveRealTab;
+  const isPaperMonitorTab = !isLiveRealTab && activeTradingTab !== "price-distribution";
   const eventSource = isLiveRealTab ? "live_real" : "paper";
   const { data: status } = usePolling<StatusData>("/api/status", 5000);
   const { data: events } = usePolling<EventItem[]>(`/api/events?source=${eventSource}&limit=80`, 5000);
@@ -2545,7 +2665,8 @@ export default function Live({
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="inline-flex rounded-md border border-zinc-800 bg-zinc-950 p-1">
-          {(["live-real", "paper-monitor"] as TradingTab[]).map((key) => (
+          {/* Legacy two-tab label contract: {key === "live-real" ? "Live Real" : "Paper Monitor"} */}
+          {(["live-real", "price-distribution", "paper-monitor"] as TradingTab[]).map((key) => (
             <button
               key={key}
               type="button"
@@ -2554,7 +2675,7 @@ export default function Live({
                 activeTradingTab === key ? "bg-emerald-500/15 text-emerald-300" : "text-zinc-500 hover:text-zinc-200"
               }`}
             >
-              {key === "live-real" ? "Live Real" : "Paper Monitor"}
+              {key === "live-real" ? "Live Real" : key === "price-distribution" ? "价格分布" : "Paper Monitor"}
             </button>
           ))}
         </div>
@@ -2657,10 +2778,9 @@ export default function Live({
                     <SafetyStrip safety={safety} health={health} />
                     <ReadinessChecklist safety={safety} health={health} intel={intel} />
                   </div>
-                  <div className="grid gap-4 xl:grid-cols-4">
+                  <div className="grid gap-4 xl:grid-cols-3">
                     <MarketDataPanel data={safety?.market_data} />
                     <ReportFreshnessPanel refresh={safety?.report_refresh} />
-                    <LegacyReportFreshnessPanel refresh={safety?.legacy_report_refresh} />
                     <RiskPanel intel={intel} safety={safety} />
                   </div>
                   <div className="grid gap-4 xl:grid-cols-[minmax(0,1fr)_minmax(420px,0.8fr)]">
@@ -2683,6 +2803,10 @@ export default function Live({
             }}
           />
         </div>
+      )}
+
+      {activeTradingTab === "price-distribution" && (
+        <LivePriceDistributionPanel distribution={liveReal?.price_distribution} />
       )}
 
       {activeTradingTab === "paper-monitor" && (

@@ -2314,6 +2314,36 @@ def _risk_excluded(record):
     return False
 
 
+_MANUAL_CANCEL_RESOLVED_STATUSES = {
+    "CANCELED",
+    "CANCELLED",
+    "CANCELED_MARKET_RESOLVED",
+    "CANCELLED_MARKET_RESOLVED",
+    "EXPIRED",
+    "FILLED",
+    "NO_FILL",
+    "REJECTED",
+    "SETTLED",
+}
+
+
+def _order_status_values(record):
+    values = [record.get("status"), record.get("exchange_final_status")]
+    exchange_status = record.get("exchange_status")
+    if isinstance(exchange_status, dict):
+        values.extend([exchange_status.get("status"), exchange_status.get("raw_status")])
+        raw = exchange_status.get("raw")
+        if isinstance(raw, dict):
+            values.extend([raw.get("status"), raw.get("raw_status")])
+    return [str(value or "").strip().upper() for value in values]
+
+
+def _manual_cancel_requires_attention(record):
+    if not record.get("requires_manual_cancel"):
+        return False
+    return not any(status in _MANUAL_CANCEL_RESOLVED_STATUSES for status in _order_status_values(record))
+
+
 def _record_direction(record):
     value = str(record.get("direction") or record.get("side") or record.get("action") or "").upper()
     if value in {"SHORT", "BUY_DOWN", "DOWN"}:
@@ -2390,7 +2420,7 @@ def _risk_resilience_summary_from_records(records, controls=None):
     )
     failures = []
     warnings = []
-    if any(record.get("requires_manual_cancel") for record in rows):
+    if any(_manual_cancel_requires_attention(record) for record in rows):
         failures.append("manual_cancel_required")
     uncertain = {"UNKNOWN", "CANCEL_FAILED", "FAILED_CANCEL", "ORDER_STATUS_UNKNOWN"}
     if any(str(record.get("status") or "").strip().upper() in uncertain for record in rows):
@@ -2422,9 +2452,13 @@ def _risk_resilience_summary_from_records(records, controls=None):
             "same_direction_loss_cooldown_minutes": cooldown_minutes,
         },
     }
+    failure_labels = {
+        "manual_cancel_required": "CLOB cancel reconciliation pending (automatic; no operator confirmation required)",
+    }
+    displayed_failures = [failure_labels.get(failure, failure) for failure in failures]
     return {
         "ok": not failures,
-        "reason": "risk-resilience limits passed" if not failures else f"risk-resilience limits breached: {', '.join(failures)}",
+        "reason": "risk-resilience limits passed" if not failures else f"risk-resilience limits breached: {', '.join(displayed_failures)}",
         "failures": failures,
         "warnings": warnings,
         "metrics": metrics,
@@ -2464,7 +2498,16 @@ def _risk_resilience_checks(resilience):
             "key": "risk_order_lifecycle",
             "label": "Order lifecycle risk",
             "ok": not lifecycle_failures,
-            "value": ", ".join(sorted(lifecycle_failures)) if lifecycle_failures else "clear",
+            "value": (
+                ", ".join(
+                    "CLOB automatic reconciliation pending"
+                    if failure == "manual_cancel_required"
+                    else failure
+                    for failure in sorted(lifecycle_failures)
+                )
+                if lifecycle_failures
+                else "clear"
+            ),
             "expected": "no uncertain order lifecycle",
             "severity": "risk",
         },
@@ -2820,6 +2863,205 @@ def _live_order_records(records, *, limit=60):
         key=lambda item: _live_order_timeline_ts(item) or datetime.min.replace(tzinfo=timezone.utc),
         reverse=True,
     )[:limit]
+
+
+def _live_price_assumption():
+    candidates = [
+        KRONOS_CONFIG_DIR / "aligned_prod_current_next_official_truth_14d14d_live_params.json",
+        _live_restart_contract_path(),
+    ]
+    for path in candidates:
+        payload = _read_json(path) or {}
+        value = _num(payload.get("maker_price_assumption"))
+        if value is not None and value > 0:
+            return round(value, 4), str(path)
+    return 0.49, "dashboard_default"
+
+
+def _live_price_record_ts(record):
+    for key in ("created_at", "entry_ts", "updated_at", "settle_ts", "settled_at"):
+        parsed = _parse_dt(record.get(key))
+        if parsed is not None:
+            return parsed
+    return None
+
+
+def _live_price_fill_size(record):
+    values = [
+        _float_value(record, "filled_size", "fill_size", "size_matched", "matched_size") or 0.0,
+    ]
+    details = record.get("clob_fill_details")
+    if isinstance(details, list):
+        values.append(sum(
+            _num(item.get("matched_amount")) or 0.0
+            for item in details
+            if isinstance(item, dict)
+        ))
+    return max(values)
+
+
+def _live_price_fill_price(record):
+    details = record.get("clob_fill_details")
+    if isinstance(details, list):
+        fills = [
+            item for item in details
+            if isinstance(item, dict)
+            and (_num(item.get("matched_amount")) or 0.0) > 0
+            and (_num(item.get("price")) or 0.0) > 0
+        ]
+        detail_size = sum(_num(item.get("matched_amount")) or 0.0 for item in fills)
+        if detail_size > 0:
+            return sum(
+                (_num(item.get("matched_amount")) or 0.0) * (_num(item.get("price")) or 0.0)
+                for item in fills
+            ) / detail_size
+    return _float_value(record, "average_fill_price", "filled_price", "price", "limit_price")
+
+
+def _live_price_window(records, *, key, label, start_utc, end_utc, assumed_price):
+    selected = []
+    for record in records:
+        if not isinstance(record, dict) or _risk_excluded(record):
+            continue
+        ts = _live_price_record_ts(record)
+        price = _float_value(record, "price", "limit_price")
+        if ts is None or price is None or price <= 0 or ts < start_utc or ts >= end_utc:
+            continue
+        selected.append(record)
+
+    attempt_counts = {}
+    fill_rows = {}
+    signal_ids = set()
+    filled_signal_ids = set()
+    maker_fills = 0
+    taker_fills = 0
+    for record in selected:
+        signal_id = str(record.get("signal_id") or record.get("order_key") or record.get("order_id") or "")
+        if signal_id:
+            signal_ids.add(signal_id)
+        attempt_price = round(_float_value(record, "price", "limit_price") or 0.0, 4)
+        attempt_counts[attempt_price] = attempt_counts.get(attempt_price, 0) + 1
+        filled_size = _live_price_fill_size(record)
+        fill_price = _live_price_fill_price(record)
+        if filled_size <= 0 or fill_price is None or fill_price <= 0:
+            continue
+        if signal_id:
+            filled_signal_ids.add(signal_id)
+        price_key = round(fill_price, 4)
+        bucket = fill_rows.setdefault(price_key, {
+            "filled_orders": 0,
+            "filled_shares": 0.0,
+            "settled_orders": 0,
+            "wins": 0,
+            "pnl_usdc": 0.0,
+        })
+        bucket["filled_orders"] += 1
+        bucket["filled_shares"] += filled_size
+        execution_kind = str(record.get("execution_kind") or "").lower()
+        if "taker" in execution_kind:
+            taker_fills += 1
+        else:
+            maker_fills += 1
+        if _is_settled_record(record):
+            bucket["settled_orders"] += 1
+            bucket["wins"] += int(_record_won(record) is True)
+            bucket["pnl_usdc"] += _record_pnl(record)
+
+    total_attempts = sum(attempt_counts.values())
+    total_fill_orders = sum(row["filled_orders"] for row in fill_rows.values())
+    total_filled_shares = sum(row["filled_shares"] for row in fill_rows.values())
+    weighted_fill_price = (
+        sum(price * row["filled_shares"] for price, row in fill_rows.items()) / total_filled_shares
+        if total_filled_shares > 0 else None
+    )
+    prices = []
+    for price in sorted(set(attempt_counts) | set(fill_rows)):
+        fill = fill_rows.get(price, {})
+        attempts = attempt_counts.get(price, 0)
+        settled = int(fill.get("settled_orders", 0))
+        wins = int(fill.get("wins", 0))
+        filled_shares = float(fill.get("filled_shares", 0.0))
+        prices.append({
+            "price": price,
+            "attempts": attempts,
+            "attempt_pct": round(attempts / total_attempts, 6) if total_attempts else 0.0,
+            "filled_orders": int(fill.get("filled_orders", 0)),
+            "fill_rate": round(int(fill.get("filled_orders", 0)) / attempts, 6) if attempts else None,
+            "filled_shares": round(filled_shares, 6),
+            "filled_share_pct": round(filled_shares / total_filled_shares, 6) if total_filled_shares else 0.0,
+            "settled_orders": settled,
+            "wins": wins,
+            "win_rate": round(wins / settled, 6) if settled else None,
+            "pnl_usdc": round(float(fill.get("pnl_usdc", 0.0)), 6),
+        })
+    return {
+        "key": key,
+        "label": label,
+        "start_at": _iso_utc(start_utc),
+        "end_at": _iso_utc(end_utc),
+        "orders": len(selected),
+        "signals": len(signal_ids),
+        "filled_orders": total_fill_orders,
+        "filled_signals": len(filled_signal_ids),
+        "filled_shares": round(total_filled_shares, 6),
+        "weighted_fill_price": round(weighted_fill_price, 6) if weighted_fill_price is not None else None,
+        "assumed_price": assumed_price,
+        "price_drag_usdc": round(max(0.0, (weighted_fill_price - assumed_price) * total_filled_shares), 6) if weighted_fill_price is not None else 0.0,
+        "maker_filled_orders": maker_fills,
+        "taker_filled_orders": taker_fills,
+        "prices": prices,
+    }
+
+
+def _live_price_distribution_summary(records, *, now=None):
+    now_utc = _ensure_aware_utc(now) or datetime.now(timezone.utc)
+    day_info = _dashboard_day_info(now=now_utc)
+    assumed_price, assumption_source = _live_price_assumption()
+    windows = [
+        _live_price_window(
+            records,
+            key="today",
+            label="Today",
+            start_utc=day_info["start_utc"],
+            end_utc=now_utc + timedelta(microseconds=1),
+            assumed_price=assumed_price,
+        ),
+        _live_price_window(
+            records,
+            key="7d",
+            label="Last 7 days",
+            start_utc=now_utc - timedelta(days=7),
+            end_utc=now_utc + timedelta(microseconds=1),
+            assumed_price=assumed_price,
+        ),
+        _live_price_window(
+            records,
+            key="14d",
+            label="Last 14 days",
+            start_utc=now_utc - timedelta(days=14),
+            end_utc=now_utc + timedelta(microseconds=1),
+            assumed_price=assumed_price,
+        ),
+    ]
+    daily = []
+    for offset in range(13, -1, -1):
+        info = _dashboard_day_info(day=day_info["day"] - timedelta(days=offset))
+        daily.append(_live_price_window(
+            records,
+            key=info["day_iso"],
+            label=info["day_iso"],
+            start_utc=info["start_utc"],
+            end_utc=min(info["end_utc"], now_utc + timedelta(microseconds=1)),
+            assumed_price=assumed_price,
+        ))
+    return {
+        "created_at": _iso_utc(now_utc),
+        "day_tz": day_info["day_tz"],
+        "assumed_price": assumed_price,
+        "assumption_source": assumption_source,
+        "windows": windows,
+        "daily": daily,
+    }
 
 
 def _unix_timestamp_iso(value):
@@ -4674,6 +4916,7 @@ def _live_real_summary(limits_override=None, current_balance=None):
             source="live_real_orders",
         ),
         "weekly_pnl_calendar": _weekly_pnl_calendar_from_records(records),
+        "price_distribution": _live_price_distribution_summary(records),
         "latest_order": _latest_record(records),
         "order_records": _live_order_records(records),
         "account_activity": _polymarket_account_activity_summary(cash_balance=current_balance),
@@ -5157,7 +5400,7 @@ def _readiness_action(key):
         "risk_open_or_pending": "Clear open or pending orders",
         "risk_smoke_drawdown": "Pause trading and review live drawdown",
         "risk_same_direction_cooldown": "Wait for direction cooldown to expire",
-        "risk_order_lifecycle": "Reconcile uncertain live order lifecycle",
+        "risk_order_lifecycle": "Automatic CLOB reconciliation is retrying; no operator confirmation required",
     }
     return actions.get(str(key or ""), "Review readiness check")
 

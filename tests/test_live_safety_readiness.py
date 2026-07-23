@@ -6,6 +6,8 @@ import sqlite3
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from api import server
 
 
@@ -265,6 +267,119 @@ def test_live_safety_includes_local_alert_report(monkeypatch, tmp_path):
     assert payload["alerts"]["available"] is True
     assert payload["alerts"]["active_count"] == 1
     assert payload["alerts"]["critical_count"] == 1
+
+
+def test_risk_resilience_ignores_manual_cancel_after_market_resolved():
+    payload = server._risk_resilience_summary_from_records(
+        [
+            {
+                "order_id": "resolved-cancel",
+                "entry_ts": "2026-07-21T04:10:00Z",
+                "status": "CANCELED_MARKET_RESOLVED",
+                "requires_manual_cancel": True,
+                "cancel_failed": True,
+                "exchange_status": {
+                    "found": True,
+                    "status": "CANCELED_MARKET_RESOLVED",
+                    "checked_at": "2026-07-21T04:45:35Z",
+                },
+            }
+        ]
+    )
+
+    assert payload["ok"] is True
+    assert "manual_cancel_required" not in payload["failures"]
+
+
+def test_risk_resilience_describes_pending_cancel_as_automatic_reconciliation():
+    payload = server._risk_resilience_summary_from_records(
+        [{"order_id": "pending", "status": "OPEN", "requires_manual_cancel": True}]
+    )
+    checks = server._risk_resilience_checks(payload)
+    lifecycle = next(item for item in checks if item["key"] == "risk_order_lifecycle")
+
+    assert payload["ok"] is False
+    assert "automatic" in payload["reason"]
+    assert "no operator confirmation required" in payload["reason"]
+    assert lifecycle["value"] == "CLOB automatic reconciliation pending"
+    assert "Automatic CLOB reconciliation" in server._readiness_action("risk_order_lifecycle")
+
+
+def test_live_price_distribution_separates_attempts_from_fills(monkeypatch):
+    monkeypatch.setattr(server, "_live_price_assumption", lambda: (0.49, "test-config"))
+    now = datetime.fromisoformat("2026-07-21T08:00:00+00:00")
+    records = [
+        {
+            "order_id": "no-fill-049",
+            "signal_id": "s1",
+            "created_at": "2026-07-21T01:00:00Z",
+            "status": "CANCELLED",
+            "price": 0.49,
+            "size": 5,
+            "filled_size": 0,
+        },
+        {
+            "order_id": "fill-049",
+            "signal_id": "s2",
+            "created_at": "2026-07-21T02:00:00Z",
+            "status": "SETTLED",
+            "price": 0.49,
+            "filled_size": 5,
+            "average_fill_price": 0.49,
+            "execution_kind": "maker_post_only",
+            "won": True,
+            "pnl": 2.55,
+        },
+        {
+            "order_id": "fill-050",
+            "signal_id": "s3",
+            "created_at": "2026-07-21T03:00:00Z",
+            "status": "SETTLED",
+            "price": 0.50,
+            "filled_size": 5,
+            "average_fill_price": 0.50,
+            "execution_kind": "maker_post_only",
+            "won": False,
+            "pnl": -2.50,
+        },
+        {
+            "order_id": "fill-051",
+            "signal_id": "s4",
+            "created_at": "2026-07-21T04:00:00Z",
+            "status": "SETTLED",
+            "price": 0.51,
+            "filled_size": 5,
+            "execution_kind": "taker_fok",
+            "won": True,
+            "pnl": 2.45,
+        },
+        {
+            "order_id": "excluded",
+            "created_at": "2026-07-21T05:00:00Z",
+            "price": 0.52,
+            "filled_size": 5,
+            "risk_excluded": True,
+        },
+    ]
+
+    payload = server._live_price_distribution_summary(records, now=now)
+    today = next(item for item in payload["windows"] if item["key"] == "today")
+    prices = {item["price"]: item for item in today["prices"]}
+
+    assert payload["day_tz"] == "Asia/Shanghai"
+    assert payload["assumed_price"] == 0.49
+    assert today["orders"] == 4
+    assert today["signals"] == 4
+    assert today["filled_orders"] == 3
+    assert today["weighted_fill_price"] == 0.5
+    assert today["price_drag_usdc"] == pytest.approx(0.15)
+    assert today["maker_filled_orders"] == 2
+    assert today["taker_filled_orders"] == 1
+    assert prices[0.49]["attempts"] == 2
+    assert prices[0.49]["filled_orders"] == 1
+    assert prices[0.49]["fill_rate"] == 0.5
+    assert prices[0.5]["filled_share_pct"] == pytest.approx(1 / 3)
+    assert 0.52 not in prices
 
 
 def test_live_safety_separates_live_real_from_paper_monitor(monkeypatch, tmp_path):
@@ -4441,17 +4556,20 @@ def test_live_page_separates_live_real_and_paper_monitor_tabs():
 
     assert "live_real?:" in source
     assert "paper_monitor?:" in source
-    assert 'type TradingTab = "live-real" | "paper-monitor";' in source
+    assert 'type TradingTab = "live-real" | "price-distribution" | "paper-monitor";' in source
     assert "activeTradingTab: TradingTab" in source
     assert 'const [activeTradingTab, setActiveTradingTab] = useState<TradingTab>("live-real");' in app_source
     assert '"live-real"' in source
     assert '"paper-monitor"' in source
+    assert '"price-distribution"' in source
     assert "Live Real" in source
+    assert "价格分布" in source
     assert "Paper Monitor" in source
     assert "<Live activeTradingTab={activeTradingTab} onTradingTabChange={setActiveTradingTab}" in app_source
     assert "const liveReal = safety?.live_real" in source
     assert "const paperMonitor = safety?.paper_monitor" in source
     assert "<LiveSoakPanel liveReal={liveReal}" in source
+    assert "<LivePriceDistributionPanel distribution={liveReal?.price_distribution}" in source
     assert "<PaperRuntimePanel paperMonitor={paperMonitor}" in source
 
 
@@ -4553,16 +4671,16 @@ def test_live_page_recent_signals_show_directional_probs_and_order_chain():
     assert "Order Chain" in source
 
 
-def test_live_page_surfaces_report_freshness_panel():
+def test_live_page_surfaces_current_report_freshness_without_legacy_preflight_panel():
     source = Path("web/src/pages/Live.tsx").read_text(encoding="utf-8")
 
     assert "report_refresh" in source
     assert "legacy_report_refresh" in source
     assert "function ReportFreshnessPanel" in source
     assert "<ReportFreshnessPanel refresh={safety?.report_refresh}" in source
-    assert "<LegacyReportFreshnessPanel refresh={safety?.legacy_report_refresh}" in source
+    assert "<LegacyReportFreshnessPanel" not in source
     assert "Report Freshness" in source
-    assert "Legacy Preflight Reports" in source
+    assert "Legacy Preflight Reports" not in source
     assert "item.next_action" in source
     assert "item.status" in source
     assert "item.age_seconds" in source
@@ -4578,7 +4696,7 @@ def test_live_page_shows_empty_state_for_missing_report_freshness_items():
     assert "items.length === 0" in source
     assert "No freshness reports" in source
     assert "Waiting for formal live, order sync, and account activity reports" in source
-    assert "Waiting for legacy preflight diagnostics" in source
+    assert "Waiting for legacy preflight diagnostics" not in source
 
 
 def test_live_page_renders_blocked_report_freshness_as_alert():
@@ -4595,6 +4713,8 @@ def test_live_page_surfaces_market_data_panel():
     assert "function MarketDataPanel" in source
     assert "<MarketDataPanel data={safety?.market_data}" in source
     assert "Market Data" in source
+    assert "Display-only RTDS reference; not a formal execution gate" in source
+    assert 'label={data?.ready ? "Display feed fresh" : data?.status === "stale" ? "Display feed stale" : data?.status || "Waiting"}' in source
     assert "data?.price_age_seconds" in source
     assert "data?.received_age_seconds" in source
     assert "const ageBudgetLabel = (age?: number | null, max?: number | null)" in source
@@ -4659,8 +4779,10 @@ def test_status_bar_surfaces_market_data_status():
     source = Path("web/src/components/StatusBar.tsx").read_text(encoding="utf-8")
 
     assert "market_data?: {" in source
-    assert "const marketDataReady = safety?.market_data?.ready === true" in source
-    assert "Market Data" in source
+    assert "const marketDataFresh = safety?.market_data?.ready === true" in source
+    assert "(!liveEnabled && !marketDataFresh)" in source
+    assert 'label={liveEnabled ? "Display Feed" : "Market Data"}' in source
+    assert "ok={liveEnabled ? undefined : marketDataFresh}" in source
     assert "safety?.market_data?.source" in source
 
 
